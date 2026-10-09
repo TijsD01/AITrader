@@ -1,0 +1,522 @@
+import asyncio
+import logging
+from typing import Dict, Any, List, Optional
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from sqlalchemy import select, desc
+
+from config.settings import settings
+from src.db.session import AsyncSessionLocal
+from src.db.models import Position, Trade, PortfolioSnapshot, AnalysisReport, WatchlistItem, SystemConfig, MarketDigest, TradeLesson
+from src.trading.broker import active_broker as paper_broker, get_active_broker, active_broker, live_broker
+from src.trading.risk import calculate_position_allocation
+from src.data.market import market_data_provider
+from src.screener.scanner import market_scanner
+from src.agents.committee import investment_committee
+from src.agents.base import llm_client
+from src.scheduler.jobs import trading_scheduler
+from src.data.market_hours import get_market_statuses, check_market_hours
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+class AnalyzeRequest(BaseModel):
+    ticker: str
+
+class BuyRequest(BaseModel):
+    ticker: str
+    allocation_eur: Optional[float] = None
+
+class SellRequest(BaseModel):
+    ticker: str
+    reason: Optional[str] = "Manual Dashboard Close"
+
+class WatchlistRequest(BaseModel):
+    ticker: str
+    name: Optional[str] = None
+    sector: Optional[str] = None
+
+class CreateTriggerRequest(BaseModel):
+    ticker: str
+    trigger_type: Optional[str] = "LIMIT_PULLBACK"
+    target_price: Optional[float] = None
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    allocation_eur: Optional[float] = None
+    ai_rationale: Optional[str] = None
+
+class CreateTriggerFromAIRequest(BaseModel):
+    ticker: str
+    allocation_eur: Optional[float] = None
+
+class SettingsUpdateRequest(BaseModel):
+    auto_buy_enabled: Optional[bool] = None
+    min_consensus_score: Optional[int] = None
+    trigger_min_score: Optional[int] = None
+    position_size_pct: Optional[float] = None
+    enforce_market_hours: Optional[bool] = None
+    gemini_api_key: Optional[str] = None
+    telegram_bot_token: Optional[str] = None
+    telegram_chat_id: Optional[str] = None
+
+@router.get("/api/market-status")
+async def get_market_status():
+    return get_market_statuses()
+
+# 1. Portfolio & Metrics
+@router.get("/api/portfolio")
+async def get_portfolio():
+    return await paper_broker.get_portfolio_summary()
+
+@router.get("/api/positions")
+async def get_positions():
+    return await paper_broker.get_positions()
+
+@router.get("/api/trades")
+async def get_trades(limit: int = 30):
+    async with AsyncSessionLocal() as session:
+        res = await session.execute(select(Trade).order_by(desc(Trade.executed_at)).limit(limit))
+        trades = res.scalars().all()
+        return [
+            {
+                "id": t.id,
+                "ticker": t.ticker,
+                "name": t.name,
+                "order_type": t.order_type,
+                "shares": round(t.shares, 4),
+                "price_native": round(t.price_native, 2),
+                "price_eur": round(t.price_eur, 2),
+                "currency": t.currency,
+                "total_eur": round(t.total_eur, 2),
+                "realized_pnl_eur": round(t.realized_pnl_eur, 2) if t.realized_pnl_eur is not None else None,
+                "realized_pnl_pct": round(t.realized_pnl_pct, 2) if t.realized_pnl_pct is not None else None,
+                "consensus_score": t.consensus_score,
+                "rationale": t.rationale,
+                "executed_at": t.executed_at.strftime("%Y-%m-%d %H:%M") if t.executed_at else ""
+            }
+            for t in trades
+        ]
+
+# 2. Recommendations & Reports
+@router.get("/api/recommendations")
+async def get_recommendations(limit: int = 15):
+    async with AsyncSessionLocal() as session:
+        res = await session.execute(select(AnalysisReport).order_by(desc(AnalysisReport.created_at)).limit(limit))
+        reports = res.scalars().all()
+        return [
+            {
+                "id": r.id,
+                "ticker": r.ticker,
+                "action": r.action,
+                "consensus_score": r.consensus_score,
+                "target_price": r.target_price,
+                "stop_loss": r.stop_loss,
+                "summary": r.summary,
+                "technical_summary": r.technical_summary,
+                "fundamental_summary": r.fundamental_summary,
+                "sentiment_summary": r.sentiment_summary,
+                "risk_summary": r.risk_summary,
+                "debate_transcript": r.debate_transcript,
+                "created_at": r.created_at.strftime("%Y-%m-%d %H:%M") if r.created_at else ""
+            }
+            for r in reports
+        ]
+
+# 3. On-Demand Analysis
+@router.post("/api/analyze")
+async def analyze_ticker(req: AnalyzeRequest):
+    ticker = req.ticker.strip().upper()
+    data = await asyncio.to_thread(market_data_provider.get_stock_data, ticker)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Market data could not be found for ticker '{ticker}'.")
+
+    summary = await paper_broker.get_portfolio_summary()
+    report = await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
+
+    # Persist report
+    async with AsyncSessionLocal() as session:
+        entry = AnalysisReport(
+            ticker=ticker,
+            action=report["action"],
+            consensus_score=report["consensus_score"],
+            target_price=report["risk"]["take_profit_price"],
+            stop_loss=report["risk"]["stop_loss_price"],
+            summary=report["summary"],
+            technical_summary=report["technical"]["analysis_summary"],
+            fundamental_summary=report["fundamental"]["analysis_summary"],
+            sentiment_summary=report["sentiment"]["sentiment_summary"],
+            risk_summary=report["risk"]["risk_summary"],
+            debate_transcript=report["debate_transcript"],
+            raw_signals=report
+        )
+        session.add(entry)
+        await session.commit()
+
+    return report
+
+# 4. Market Screener
+@router.get("/api/screener")
+async def get_screener_candidates(market: str = "ALL"):
+    return await asyncio.to_thread(market_scanner.scan_universe, market=market, limit=12)
+
+# 5. Trading Actions
+def _calculate_safe_allocation(available_cash: float, requested_alloc: Optional[float], risk_rep: Dict[str, Any], current_positions_count: int = 0) -> float:
+    return calculate_position_allocation(
+        available_cash=available_cash,
+        current_positions_count=current_positions_count,
+        requested_alloc=requested_alloc,
+        recommended_size_pct=risk_rep.get("recommended_size_pct"),
+        full_budget_utilization=settings.FULL_BUDGET_UTILIZATION
+    )
+
+@router.post("/api/trade/buy")
+async def manual_buy(req: BuyRequest):
+    ticker = req.ticker.strip().upper()
+
+    # Fast market hours check (No trades when market is closed)
+    is_open, open_msg = check_market_hours(ticker)
+    if not is_open:
+        raise HTTPException(status_code=400, detail=open_msg)
+
+    data = await asyncio.to_thread(market_data_provider.get_stock_data, ticker)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Stock data not found for '{ticker}'.")
+
+    summary = await paper_broker.get_portfolio_summary()
+    available_cash = summary.get("available_cash_eur", 0.0)
+    if available_cash < 20.0:
+        raise HTTPException(status_code=400, detail=f"Insufficient available cash (€{available_cash:.2f}) to execute buy order.")
+
+    report = await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
+    alloc_eur = _calculate_safe_allocation(available_cash, req.allocation_eur, report["risk"], summary.get("open_positions_count", 0))
+
+    res = await paper_broker.execute_buy(
+        ticker=ticker,
+        name=data.get("name", ticker),
+        price_native=data["price"],
+        currency=data["currency"],
+        stop_loss_native=report["risk"]["stop_loss_price"],
+        take_profit_native=report["risk"]["take_profit_price"],
+        allocation_eur=alloc_eur,
+        consensus_score=report["consensus_score"],
+        rationale=f"Executed via Dashboard ({report['action']})",
+        is_manual=True
+    )
+    if not res.get("success"):
+        raise HTTPException(status_code=400, detail=res.get("message"))
+    return res
+
+@router.post("/api/trade/sell")
+async def manual_sell(req: SellRequest):
+    ticker = req.ticker.strip().upper()
+
+    # Fast market hours check (No selling when market is closed)
+    is_open, open_msg = check_market_hours(ticker)
+    if not is_open:
+        raise HTTPException(status_code=400, detail=open_msg)
+
+    res = await paper_broker.execute_sell(ticker, reason=req.reason)
+    if not res.get("success"):
+        raise HTTPException(status_code=400, detail=res.get("message"))
+    return res
+
+# 5b. AI Order Triggers (Limit Pullback & Breakout Buy Orders)
+@router.get("/api/triggers")
+async def get_triggers(status: Optional[str] = None):
+    return await paper_broker.get_triggers(status=status)
+
+@router.post("/api/triggers")
+async def create_trigger(req: CreateTriggerRequest):
+    ticker = req.ticker.strip().upper()
+    data = await asyncio.to_thread(market_data_provider.get_stock_data, ticker)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Market data not found for '{ticker}'.")
+
+    summary = await paper_broker.get_portfolio_summary()
+    available_cash = summary.get("available_cash_eur", 0.0)
+    if available_cash < 20.0:
+        raise HTTPException(status_code=400, detail=f"Insufficient available cash (€{available_cash:.2f}) to arm trigger.")
+
+    report = await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
+
+    target_price = req.target_price or report.get("entry_trigger_price", data["price"])
+    trigger_type = req.trigger_type or report.get("trigger_type", "LIMIT_PULLBACK")
+    alloc_eur = _calculate_safe_allocation(available_cash, req.allocation_eur, report["risk"], summary.get("open_positions_count", 0))
+    sl = req.stop_loss or report["risk"]["stop_loss_price"]
+    tp = req.take_profit or report["risk"]["take_profit_price"]
+    rationale = req.ai_rationale or report.get("trigger_rationale", report["summary"])
+
+    res = await paper_broker.create_price_trigger(
+        ticker=ticker,
+        name=data.get("name", ticker),
+        currency=data["currency"],
+        trigger_type=trigger_type,
+        target_price=target_price,
+        current_price_at_creation=data["price"],
+        stop_loss=sl,
+        take_profit=tp,
+        allocation_eur=alloc_eur,
+        consensus_score=report["consensus_score"],
+        ai_rationale=rationale
+    )
+    if not res.get("success"):
+        raise HTTPException(status_code=400, detail=res.get("message"))
+    return res
+
+@router.post("/api/triggers/from-ai")
+async def create_trigger_from_ai(req: CreateTriggerFromAIRequest):
+    """Convenience endpoint: Runs AI committee and arms optimal limit trigger directly."""
+    ticker = req.ticker.strip().upper()
+    data = await asyncio.to_thread(market_data_provider.get_stock_data, ticker)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Market data not found for '{ticker}'.")
+
+    summary = await paper_broker.get_portfolio_summary()
+    available_cash = summary.get("available_cash_eur", 0.0)
+    if available_cash < 20.0:
+        raise HTTPException(status_code=400, detail=f"Insufficient available cash (€{available_cash:.2f}) to arm trigger.")
+
+    report = await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
+
+    trigger_price = report.get("entry_trigger_price", data["price"])
+    trigger_type = report.get("trigger_type", "LIMIT_PULLBACK")
+    alloc_eur = _calculate_safe_allocation(available_cash, req.allocation_eur, report["risk"], summary.get("open_positions_count", 0))
+    rationale = report.get("trigger_rationale", report["summary"])
+
+    res = await paper_broker.create_price_trigger(
+        ticker=ticker,
+        name=data.get("name", ticker),
+        currency=data["currency"],
+        trigger_type=trigger_type,
+        target_price=trigger_price,
+        current_price_at_creation=data["price"],
+        stop_loss=report["risk"]["stop_loss_price"],
+        take_profit=report["risk"]["take_profit_price"],
+        allocation_eur=alloc_eur,
+        consensus_score=report["consensus_score"],
+        ai_rationale=rationale
+    )
+    if not res.get("success"):
+        raise HTTPException(status_code=400, detail=res.get("message"))
+    
+    # Broadcast to Telegram
+    from src.telegram.bot import telegram_bot
+    await telegram_bot.notify_trigger_armed(res)
+
+    return res
+
+@router.delete("/api/triggers/{trigger_id}")
+async def cancel_trigger(trigger_id: int):
+    res = await paper_broker.cancel_price_trigger(trigger_id)
+    if not res.get("success"):
+        raise HTTPException(status_code=400, detail=res.get("message"))
+    return res
+
+# 6. Watchlist
+@router.get("/api/watchlist")
+async def get_watchlist():
+    async with AsyncSessionLocal() as session:
+        res = await session.execute(select(WatchlistItem).where(WatchlistItem.is_active == True))
+        items = res.scalars().all()
+        return [
+            {
+                "id": w.id,
+                "ticker": w.ticker,
+                "name": w.name,
+                "sector": w.sector,
+                "country": w.country,
+                "added_at": w.added_at.strftime("%Y-%m-%d") if w.added_at else ""
+            }
+            for w in items
+        ]
+
+@router.post("/api/watchlist")
+async def add_watchlist(req: WatchlistRequest):
+    ticker = req.ticker.strip().upper()
+    async with AsyncSessionLocal() as session:
+        res = await session.execute(select(WatchlistItem).where(WatchlistItem.ticker == ticker))
+        item = res.scalars().first()
+        if item:
+            item.is_active = True
+        else:
+            session.add(WatchlistItem(ticker=ticker, name=req.name or ticker, sector=req.sector or "General"))
+        await session.commit()
+    return {"success": True, "ticker": ticker}
+
+@router.delete("/api/watchlist/{ticker}")
+async def remove_watchlist(ticker: str):
+    async with AsyncSessionLocal() as session:
+        res = await session.execute(select(WatchlistItem).where(WatchlistItem.ticker == ticker.upper()))
+        item = res.scalars().first()
+        if item:
+            item.is_active = False
+            await session.commit()
+    return {"success": True, "ticker": ticker}
+
+# 7. System Settings & Manual Trigger
+@router.get("/api/settings")
+async def get_settings():
+    async with AsyncSessionLocal() as session:
+        cfg_res = await session.execute(select(SystemConfig))
+        configs = {c.key: c.value for c in cfg_res.scalars().all()}
+        return {
+            "auto_buy_enabled": configs.get("AUTO_BUY_ENABLED", "true") == "true",
+            "min_consensus_score": int(configs.get("MIN_CONSENSUS_SCORE", settings.MIN_CONSENSUS_SCORE)),
+            "trigger_min_score": int(configs.get("TRIGGER_MIN_SCORE", settings.TRIGGER_MIN_SCORE)),
+            "position_size_pct": float(configs.get("POSITION_SIZE_PCT", settings.POSITION_SIZE_PCT)),
+            "atr_stop_multiplier": float(configs.get("ATR_STOP_MULTIPLIER", 1.75)),
+            "take_profit_rr": float(configs.get("TAKE_PROFIT_RR", 2.1)),
+            "breakeven_trigger_pct": float(configs.get("BREAKEVEN_TRIGGER_PCT", 0.025)),
+            "enforce_market_hours": configs.get("ENFORCE_MARKET_HOURS", "true") == "true",
+            "base_currency": settings.BASE_CURRENCY,
+            "max_positions": settings.MAX_POSITIONS,
+            "llm_provider": settings.LLM_PROVIDER,
+            "has_antigravity": bool(settings.LLM_PROVIDER == "antigravity" and llm_client.has_active_key()),
+            "has_gemini_key": bool(settings.GEMINI_API_KEY and not settings.GEMINI_API_KEY.startswith("your_")),
+            "has_telegram": bool(settings.TELEGRAM_BOT_TOKEN and not settings.TELEGRAM_BOT_TOKEN.startswith("your_"))
+        }
+
+@router.post("/api/settings")
+async def update_settings(req: SettingsUpdateRequest):
+    async with AsyncSessionLocal() as session:
+        if req.auto_buy_enabled is not None:
+            res = await session.execute(select(SystemConfig).where(SystemConfig.key == "AUTO_BUY_ENABLED"))
+            cfg = res.scalars().first()
+            val = str(req.auto_buy_enabled).lower()
+            if cfg:
+                cfg.value = val
+            else:
+                session.add(SystemConfig(key="AUTO_BUY_ENABLED", value=val))
+
+        if req.min_consensus_score is not None:
+            res = await session.execute(select(SystemConfig).where(SystemConfig.key == "MIN_CONSENSUS_SCORE"))
+            cfg = res.scalars().first()
+            val = str(req.min_consensus_score)
+            if cfg:
+                cfg.value = val
+            else:
+                session.add(SystemConfig(key="MIN_CONSENSUS_SCORE", value=val))
+
+        if req.trigger_min_score is not None:
+            res = await session.execute(select(SystemConfig).where(SystemConfig.key == "TRIGGER_MIN_SCORE"))
+            cfg = res.scalars().first()
+            val = str(req.trigger_min_score)
+            if cfg:
+                cfg.value = val
+            else:
+                session.add(SystemConfig(key="TRIGGER_MIN_SCORE", value=val))
+            settings.TRIGGER_MIN_SCORE = req.trigger_min_score
+
+        if req.enforce_market_hours is not None:
+            res = await session.execute(select(SystemConfig).where(SystemConfig.key == "ENFORCE_MARKET_HOURS"))
+            cfg = res.scalars().first()
+            val = str(req.enforce_market_hours).lower()
+            if cfg:
+                cfg.value = val
+            else:
+                session.add(SystemConfig(key="ENFORCE_MARKET_HOURS", value=val))
+            settings.ENFORCE_MARKET_HOURS = req.enforce_market_hours
+
+        await session.commit()
+    return {"success": True, "message": "Settings updated successfully."}
+
+@router.post("/api/scheduler/trigger")
+async def trigger_scan(market: str = "ALL"):
+    """Allows triggering an immediate market session scan from the UI."""
+    asyncio.create_task(trading_scheduler.run_market_session(market=market, session="MANUAL_SCAN"))
+    return {"success": True, "message": f"Market scan triggered for {market} in background."}
+
+class MarketSessionRequest(BaseModel):
+    market: Optional[str] = "EU"
+    session: Optional[str] = "OPEN"
+
+@router.get("/api/market-digest/latest")
+async def get_latest_market_digest(market: Optional[str] = None):
+    """Returns the most recent market opening/closing digest."""
+    from src.data.review_tracker import review_tracker
+    next_info = review_tracker.get_next_session_info()
+    async with AsyncSessionLocal() as session:
+        query = select(MarketDigest).order_by(desc(MarketDigest.timestamp))
+        if market:
+            query = query.where(MarketDigest.market == market.upper())
+        res = await session.execute(query)
+        digest = res.scalars().first()
+        if not digest:
+            return {
+                "found": False,
+                "message": "No market digests recorded yet.",
+                "next_session": next_info
+            }
+        
+        return {
+            "found": True,
+            "id": digest.id,
+            "market": digest.market,
+            "session": digest.session,
+            "headline": digest.headline,
+            "content": digest.content,
+            "top_picks": digest.top_picks or [],
+            "portfolio_state": digest.portfolio_state or {},
+            "review_text": digest.review_text or "",
+            "timestamp": digest.timestamp.strftime("%Y-%m-%d %H:%M CET") if digest.timestamp else "",
+            "next_session": next_info
+        }
+
+@router.get("/api/reviews/weekly")
+async def get_weekly_reviews(days: int = 7):
+    """Returns archived market reviews from the past N days."""
+    from src.data.review_tracker import review_tracker
+    return await review_tracker.get_weekly_reviews(days=days)
+
+@router.get("/api/reviews/compare")
+async def get_reviews_comparison(market: str = "EU", session: str = "OPEN", days: int = 7):
+    """Compares past-week reviews, pick follow-through, and portfolio trajectory against live quotes."""
+    from src.data.review_tracker import review_tracker
+    return await review_tracker.compare_past_week_reviews(current_market=market, current_session=session, days=days)
+
+@router.get("/api/reviews/next-session")
+async def get_next_scheduled_session():
+    """Returns the upcoming chronological market session schedule."""
+    from src.data.review_tracker import review_tracker
+    return review_tracker.get_next_session_info()
+
+@router.post("/api/market-session/run")
+async def run_market_session_endpoint(req: MarketSessionRequest):
+    """Allows manual/on-demand execution of Opening Market Review or Closing Session."""
+    market = (req.market or "EU").upper()
+    session = (req.session or "OPEN").upper()
+    asyncio.create_task(trading_scheduler.run_market_session(market=market, session=session))
+    return {"success": True, "message": f"Triggered {market} {session} market session in background."}
+
+@router.get("/api/learning/insights")
+async def get_learning_insights():
+    """Returns telemetry on trade post-mortems, win/loss stats, and actively adapted parameters."""
+    from src.trading.learner import trade_learner
+    return await trade_learner.get_learning_insights()
+
+@router.post("/api/learning/calibrate")
+async def calibrate_learning_parameters():
+    """Forces an immediate re-evaluation and calibration of internal parameters."""
+    from src.trading.learner import trade_learner
+    return await trade_learner.calibrate_internal_parameters()
+
+# 8. Real Money Execution & Emergency Controls
+@router.post("/api/killswitch")
+async def toggle_killswitch(active: bool):
+    """Emergency halt switch to immediately block or resume all automated buying."""
+    settings.KILL_SWITCH_ACTIVE = active
+    return {
+        "success": True,
+        "kill_switch_active": settings.KILL_SWITCH_ACTIVE,
+        "trading_mode": settings.TRADING_MODE,
+        "live_trading_enabled": settings.LIVE_TRADING_ENABLED
+    }
+
+@router.post("/api/sync")
+async def sync_account():
+    """Syncs live positions and settled cash balance with the broker."""
+    broker = get_active_broker()
+    summary = await broker.sync_account_state()
+    return {"success": True, "portfolio": summary}
+
+

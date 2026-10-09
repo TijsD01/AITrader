@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Antigravity AI Trading & Multi-Agent Committee</title>
+  
+  <!-- Tailwind CSS & FontAwesome -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#ecfdf5',
+              500: '#10b981',
+              600: '#059669',
+              700: '#047857'
+            },
+            darkBg: '#0b0f19',
+            cardBg: '#131b2e',
+            borderCol: '#1e293b'
+          }
+        }
+      }
+    }
+  </script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="bg-darkBg text-slate-100 min-h-screen pb-20 md:pb-8 flex flex-col font-sans antialiased selection:bg-emerald-500 selection:text-white">
+
+  <!-- Top Header Bar -->
+  <header class="sticky top-0 z-40 bg-cardBg/90 backdrop-blur-md border-b border-borderCol px-4 py-3 sm:px-6 flex items-center justify-between">
+    <div class="flex items-center space-x-3">
+      <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-emerald-500 to-cyan-500 flex items-center justify-center shadow-lg shadow-emerald-500/20">
+        <i class="fa-solid fa-brain text-white text-lg"></i>
+      </div>
+      <div>
+        <h1 class="text-base sm:text-lg font-bold tracking-tight text-white flex items-center gap-2">
+          AlphaAgent <span class="text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-semibold">Multi-Agent</span>
+        </h1>
+        <p class="text-xs text-slate-400 hidden sm:block">Autonomous Hedge Fund Committee & Paper Trading</p>
+      </div>
+    </div>
+
+    <!-- Right Controls -->
+    <div class="flex items-center space-x-2 sm:space-x-3">
+      <div id="marketStatusBadge" class="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700 text-slate-400 text-xs font-medium">
+        <i class="fa-solid fa-clock text-slate-400"></i>
+        <span id="marketStatusText">Markets: Checking...</span>
+      </div>
+
+      <div id="autoBuyBadge" class="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-medium">
+        <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+        <span class="hidden sm:inline">Auto-Buy:</span> <span id="autoBuyStatusText">Active</span>
+      </div>
+
+      <button onclick="triggerQuickScan()" id="scanBtn" class="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold px-3 py-1.5 rounded-lg shadow-md transition-all active:scale-95">
+        <i class="fa-solid fa-radar"></i>
+        <span class="hidden sm:inline">Run Scan</span>
+      </button>
+
+      <div class="px-2.5 py-1 rounded-lg bg-slate-800 text-xs font-semibold text-slate-300 border border-slate-700">
+        EUR (€)
+      </div>
+    </div>
+  </header>
+
+  <!-- Desktop Navigation Bar -->
+  <nav class="hidden md:flex bg-cardBg border-b border-borderCol px-6 py-2 space-x-1 text-sm font-medium">
+    <button onclick="switchTab('portfolio')" class="tab-btn px-4 py-2 rounded-lg transition-colors active-tab" data-tab="portfolio">
+      <i class="fa-solid fa-wallet mr-2"></i>Portfolio
+    </button>
+    <button onclick="switchTab('advice')" class="tab-btn px-4 py-2 rounded-lg text-slate-400 hover:text-white transition-colors" data-tab="advice">
+      <i class="fa-solid fa-lightbulb mr-2"></i>Daily Advice
+    </button>
+    <button onclick="switchTab('screener')" class="tab-btn px-4 py-2 rounded-lg text-slate-400 hover:text-white transition-colors" data-tab="screener">
+      <i class="fa-solid fa-magnifying-glass-chart mr-2"></i>Market Screener
+    </button>
+    <button onclick="switchTab('debate')" class="tab-btn px-4 py-2 rounded-lg text-slate-400 hover:text-white transition-colors" data-tab="debate">
+      <i class="fa-solid fa-comments mr-2"></i>Committee Debate
+    </button>
+    <button onclick="switchTab('triggers')" class="tab-btn px-4 py-2 rounded-lg text-slate-400 hover:text-white transition-colors" data-tab="triggers">
+      <i class="fa-solid fa-crosshairs mr-2"></i>AI Triggers
+    </button>
+    <button onclick="switchTab('history')" class="tab-btn px-4 py-2 rounded-lg text-slate-400 hover:text-white transition-colors" data-tab="history">
+      <i class="fa-solid fa-clock-rotate-left mr-2"></i>Trade History
+    </button>
+    <button onclick="switchTab('settings')" class="tab-btn px-4 py-2 rounded-lg text-slate-400 hover:text-white transition-colors" data-tab="settings">
+      <i class="fa-solid fa-sliders mr-2"></i>Settings
+    </button>
+  </nav>
+
+  <!-- Main Content Container -->
+  <main class="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 space-y-6">
+
+    <!-- TAB 1: PORTFOLIO -->
+    <section id="tab-portfolio" class="tab-content space-y-6">
+      <!-- Metric Cards Grid -->
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+        <!-- Total Value -->
+        <div class="bg-cardBg border border-borderCol rounded-xl p-4 shadow-sm relative overflow-hidden">
+          <div class="text-xs text-slate-400 font-medium">Total Portfolio Value</div>
+          <div id="metricTotalVal" class="text-xl sm:text-2xl font-bold mt-1 text-white">€10,000.00</div>
+          <div id="metricReturnBadge" class="text-xs font-semibold text-emerald-400 mt-2 flex items-center gap-1">
+            <i class="fa-solid fa-arrow-trend-up"></i> +0.00%
+          </div>
+          <div class="absolute -right-2 -bottom-2 opacity-5 text-4xl text-emerald-400">
+            <i class="fa-solid fa-chart-pie"></i>
+          </div>
+        </div>
+
+        <!-- Available Cash -->
+        <div class="bg-cardBg border border-borderCol rounded-xl p-4 shadow-sm relative overflow-hidden">
+          <div class="text-xs text-slate-400 font-medium">Available Cash (EUR)</div>
+          <div id="metricCash" class="text-xl sm:text-2xl font-bold mt-1 text-white">€10,000.00</div>
+          <div class="text-xs text-slate-400 mt-2">Buffer capital</div>
+          <div class="absolute -right-2 -bottom-2 opacity-5 text-4xl text-cyan-400">
+            <i class="fa-solid fa-money-bill-wave"></i>
+          </div>
+        </div>
+
+        <!-- Invested Equity -->
+        <div class="bg-cardBg border border-borderCol rounded-xl p-4 shadow-sm relative overflow-hidden">
+          <div class="text-xs text-slate-400 font-medium">Active Equity</div>
+          <div id="metricEquity" class="text-xl sm:text-2xl font-bold mt-1 text-white">€0.00</div>
+          <div id="metricPosCount" class="text-xs text-slate-400 mt-2">0 open holdings</div>
+          <div class="absolute -right-2 -bottom-2 opacity-5 text-4xl text-indigo-400">
+            <i class="fa-solid fa-layer-group"></i>
+          </div>
+        </div>
+
+        <!-- Unrealized PnL -->
+        <div class="bg-cardBg border border-borderCol rounded-xl p-4 shadow-sm relative overflow-hidden">
+          <div class="text-xs text-slate-400 font-medium">Unrealized PnL</div>
+          <div id="metricUnrealizedPnl" class="text-xl sm:text-2xl font-bold mt-1 text-slate-300">€0.00</div>
+          <div class="text-xs text-slate-400 mt-2">Open paper positions</div>
+          <div class="absolute -right-2 -bottom-2 opacity-5 text-4xl text-amber-400">
+            <i class="fa-solid fa-scale-balanced"></i>
+          </div>
+        </div>
+      </div>
+
+      <!-- Portfolio Allocation & Active Positions -->
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <!-- Positions List -->
+        <div class="lg:col-span-2 bg-cardBg border border-borderCol rounded-xl p-4 sm:p-5 shadow-sm space-y-4">
+          <div class="flex items-center justify-between border-b border-borderCol/60 pb-3">
+            <h2 class="text-sm sm:text-base font-bold text-white flex items-center gap-2">
+              <i class="fa-solid fa-cubes text-emerald-400"></i> Open Positions
+            </h2>
+            <button onclick="loadPortfolio()" class="text-xs text-slate-400 hover:text-white flex items-center gap-1">
+              <i class="fa-solid fa-arrows-rotate"></i> Refresh
+            </button>
+          </div>
+
+          <!-- Position Cards container -->
+          <div id="positionsContainer" class="space-y-3">
+            <div class="text-center py-10 text-slate-400 text-sm">
+              <i class="fa-solid fa-circle-notch fa-spin text-2xl mb-2 text-emerald-400 block"></i>
+              Loading active positions...
+            </div>
+          </div>
+        </div>
+
+        <!-- Allocation Chart -->
+        <div class="bg-cardBg border border-borderCol rounded-xl p-4 sm:p-5 shadow-sm flex flex-col items-center justify-between">
+          <h2 class="text-sm sm:text-base font-bold text-white self-start flex items-center gap-2 mb-2">
+            <i class="fa-solid fa-chart-donut text-cyan-400"></i> Capital Allocation
+          </h2>
+          <div class="w-full max-w-[240px] aspect-square flex items-center justify-center relative my-auto">
+            <canvas id="allocationChart"></canvas>
+          </div>
+          <div class="w-full text-xs text-slate-400 pt-3 border-t border-borderCol/60 flex justify-between">
+            <span>Base Currency: <strong class="text-white">EUR</strong></span>
+            <span>Max Pos: <strong class="text-white">8</strong></span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 2: DAILY STOCK ADVICE -->
+    <section id="tab-advice" class="tab-content hidden space-y-5">
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div>
+          <h2 class="text-base sm:text-lg font-bold text-white flex items-center gap-2">
+            <i class="fa-solid fa-lightbulb text-amber-400"></i> Daily Committee Stock Advice
+          </h2>
+          <p class="text-xs text-slate-400">Multi-agent evaluated opportunities ranked by consensus conviction</p>
+        </div>
+        <button onclick="loadRecommendations()" class="self-start sm:self-auto text-xs bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-1.5 rounded-lg flex items-center gap-1.5">
+          <i class="fa-solid fa-arrows-rotate"></i> Refresh Advice
+        </button>
+      </div>
+
+      <!-- Opening Market Review Card -->
+      <div id="marketReviewCard" class="bg-cardBg border border-borderCol rounded-xl p-4 sm:p-5 shadow-sm space-y-3">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-borderCol pb-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+              <i class="fa-solid fa-newspaper mr-1"></i> Market Review
+            </span>
+            <span id="digestTimestamp" class="text-xs text-slate-400 font-mono">Today</span>
+            <span id="nextSessionBadge" class="text-xs px-2.5 py-0.5 rounded-full bg-cyan-500/10 text-cyan-300 border border-cyan-500/20 font-medium">
+              <i class="fa-regular fa-clock mr-1"></i> Next: Calculating...
+            </span>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <div class="flex items-center bg-slate-900/80 p-0.5 rounded-lg border border-slate-700/80 text-xs font-medium">
+              <button onclick="loadMarketReview(null)" class="px-2 py-1 rounded text-slate-400 hover:text-white transition-colors" title="View Latest Digest">Latest</button>
+              <button onclick="loadMarketReview('EU')" class="px-2 py-1 rounded text-slate-400 hover:text-white transition-colors" title="View Latest EU Review">EU</button>
+              <button onclick="loadMarketReview('US')" class="px-2 py-1 rounded text-slate-400 hover:text-white transition-colors" title="View Latest US Review">US</button>
+            </div>
+            <button onclick="triggerMarketReview('EU')" class="text-xs bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all active:scale-95">
+              <i class="fa-solid fa-play text-emerald-400"></i> Run EU Review
+            </button>
+            <button onclick="triggerMarketReview('US')" class="text-xs bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all active:scale-95">
+              <i class="fa-solid fa-play text-blue-400"></i> Run US Review
+            </button>
+          </div>
+        </div>
+        <div>
+          <h3 id="digestHeadline" class="text-sm sm:text-base font-bold text-white">Opening Market Review</h3>
+          <p id="digestContent" class="text-xs text-slate-300 mt-1 leading-relaxed">Loading latest market opening digest...</p>
+        </div>
+        <div id="reviewTextContainer" class="hidden text-xs text-slate-300 bg-slate-900/60 p-3.5 rounded-lg border border-slate-800 font-mono whitespace-pre-wrap"></div>
+      </div>
+
+      <!-- Past-Week Review Comparison & Pick Follow-Through Card -->
+      <div id="weeklyReviewCard" class="bg-cardBg border border-borderCol rounded-xl p-4 sm:p-5 shadow-sm space-y-4">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-borderCol pb-3">
+          <div>
+            <h3 class="text-sm sm:text-base font-bold text-white flex items-center gap-2">
+              <i class="fa-solid fa-scale-balanced text-indigo-400"></i> 7-Day Review Comparison & Pick Follow-Through
+            </h3>
+            <p class="text-xs text-slate-400">Tracks how recommendations from the past week performed against current live prices</p>
+          </div>
+          <button onclick="loadWeeklyReviewComparison()" class="self-start sm:self-auto text-xs bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-1.5 rounded-lg flex items-center gap-1.5">
+            <i class="fa-solid fa-arrows-rotate"></i> Re-Calculate
+          </button>
+        </div>
+
+        <!-- Metric Badges -->
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+          <div class="bg-slate-900/60 p-3 rounded-lg border border-slate-800">
+            <div class="text-slate-400">7-Day Win Rate</div>
+            <div id="weeklyWinRate" class="text-lg font-bold text-emerald-400 mt-0.5">--%</div>
+            <div id="weeklyWinCounts" class="text-[10px] text-slate-500">0 picks evaluated</div>
+          </div>
+          <div class="bg-slate-900/60 p-3 rounded-lg border border-slate-800">
+            <div class="text-slate-400">Portfolio Trajectory</div>
+            <div id="weeklyPortfolioDelta" class="text-lg font-bold text-white mt-0.5">€0.00 (+0.0%)</div>
+            <div id="weeklyPortfolioRange" class="text-[10px] text-slate-500 font-mono">Past 7 days</div>
+          </div>
+          <div class="bg-slate-900/60 p-3 rounded-lg border border-slate-800">
+            <div class="text-slate-400">Best Pick Follow-Through</div>
+            <div id="weeklyBestPick" class="text-lg font-bold text-emerald-400 mt-0.5">--</div>
+            <div id="weeklyBestPickDetails" class="text-[10px] text-slate-500">No data</div>
+          </div>
+          <div class="bg-slate-900/60 p-3 rounded-lg border border-slate-800">
+            <div class="text-slate-400">Sessions Archived</div>
+            <div id="weeklySessionsCount" class="text-lg font-bold text-cyan-400 mt-0.5">0</div>
+            <div class="text-[10px] text-slate-500">Opens & Closes</div>
+          </div>
+        </div>
+
+        <!-- Tracked Picks List -->
+        <div>
+          <h4 class="text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2.5 flex items-center gap-1.5">
+            <i class="fa-solid fa-crosshairs text-emerald-400"></i> Tracked Recommendations & Current Performance
+          </h4>
+          <div id="weeklyTrackedPicksContainer" class="space-y-2 text-xs">
+            <div class="text-slate-500 italic p-3 bg-slate-900/40 rounded-lg border border-slate-800/80">
+              No historical picks recorded in past 7 days yet. Run an Opening Review to start tracking.
+            </div>
+          </div>
+        </div>
+
+        <!-- Past Reviews Archive Accordion -->
+        <div class="pt-2 border-t border-borderCol/60">
+          <button onclick="toggleWeeklyArchive()" class="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1.5 font-semibold">
+            <i id="weeklyArchiveIcon" class="fa-solid fa-chevron-right text-[10px]"></i> View Archived Daily Reviews (<span id="archiveCountBadge">0</span>)
+          </button>
+          <div id="weeklyArchiveContainer" class="hidden mt-3 space-y-2">
+            <!-- Populated dynamically -->
+          </div>
+        </div>
+      </div>
+
+      <div id="adviceContainer" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <!-- Dynamic Advice Cards -->
+      </div>
+    </section>
+
+    <!-- TAB 3: MARKET SCREENER -->
+    <section id="tab-screener" class="tab-content hidden space-y-5">
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div>
+          <h2 class="text-base sm:text-lg font-bold text-white flex items-center gap-2">
+            <i class="fa-solid fa-magnifying-glass-chart text-cyan-400"></i> Algorithmic Momentum Screener
+          </h2>
+          <p class="text-xs text-slate-400">Pre-filtering US (S&P/Nasdaq) and EU (AEX, DAX, CAC) liquid leaders</p>
+        </div>
+        <!-- Market Filter Tabs -->
+        <div class="flex items-center bg-slate-800 p-1 rounded-lg border border-slate-700 text-xs font-semibold">
+          <button onclick="filterScreener('ALL')" class="screener-filter-btn px-3 py-1 rounded-md bg-emerald-600 text-white" data-market="ALL">All Markets</button>
+          <button onclick="filterScreener('EU')" class="screener-filter-btn px-3 py-1 rounded-md text-slate-400 hover:text-white" data-market="EU">🇪🇺 European</button>
+          <button onclick="filterScreener('US')" class="screener-filter-btn px-3 py-1 rounded-md text-slate-400 hover:text-white" data-market="US">🇺🇸 US Stocks</button>
+        </div>
+      </div>
+
+      <!-- Screener Cards Grid -->
+      <div id="screenerContainer" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <!-- Dynamic Screener Cards -->
+      </div>
+    </section>
+
+    <!-- TAB 4: COMMITTEE DEBATE INSPECTOR -->
+    <section id="tab-debate" class="tab-content hidden space-y-6">
+      <!-- On Demand Search Bar -->
+      <div class="bg-cardBg border border-borderCol rounded-xl p-4 sm:p-5 shadow-sm">
+        <h2 class="text-sm sm:text-base font-bold text-white mb-2 flex items-center gap-2">
+          <i class="fa-solid fa-magnifying-glass text-emerald-400"></i> Convene Committee on Any Ticker
+        </h2>
+        <p class="text-xs text-slate-400 mb-4">Enter any US or European ticker symbol (e.g., <code>NVDA</code>, <code>AAPL</code>, <code>ASML.AS</code>, <code>INGA.AS</code>, <code>SAP.DE</code>)</p>
+        
+        <div class="flex flex-col sm:flex-row gap-2 max-w-lg">
+          <input type="text" id="analyzeInput" placeholder="Enter ticker (e.g. ASML.AS, NVDA)..." class="bg-slate-900 border border-slate-700 rounded-lg px-3.5 py-2 text-sm text-white focus:outline-none focus:border-emerald-500 uppercase tracking-wider font-semibold flex-1">
+          <button onclick="runOnDemandAnalysis()" id="analyzeBtn" class="bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs sm:text-sm px-5 py-2 rounded-lg flex items-center justify-center gap-2 transition-all active:scale-95">
+            <i class="fa-solid fa-users-viewfinder"></i> Convene Debate
+          </button>
+        </div>
+      </div>
+
+      <!-- Live Analysis / Debate Output -->
+      <div id="debateOutputArea" class="space-y-6 hidden">
+        <!-- Verdict Header Card -->
+        <div id="verdictCard" class="bg-cardBg border border-borderCol rounded-xl p-5 shadow-md">
+          <!-- Filled by JS -->
+        </div>
+
+        <!-- Specialist Agents Grid -->
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          <!-- Technical Agent Card -->
+          <div class="bg-cardBg border border-borderCol rounded-xl p-4 shadow-sm space-y-2">
+            <div class="flex items-center justify-between border-b border-borderCol/60 pb-2">
+              <span class="text-xs font-bold text-cyan-400 flex items-center gap-1.5">
+                <i class="fa-solid fa-chart-line"></i> Technical Analyst
+              </span>
+              <span id="techBiasBadge" class="text-xs px-2 py-0.5 rounded font-bold"></span>
+            </div>
+            <p id="techSummaryText" class="text-xs text-slate-300 leading-relaxed"></p>
+          </div>
+
+          <!-- Fundamental Agent Card -->
+          <div class="bg-cardBg border border-borderCol rounded-xl p-4 shadow-sm space-y-2">
+            <div class="flex items-center justify-between border-b border-borderCol/60 pb-2">
+              <span class="text-xs font-bold text-purple-400 flex items-center gap-1.5">
+                <i class="fa-solid fa-landmark"></i> Fundamental Analyst
+              </span>
+              <span id="fundValuationBadge" class="text-xs px-2 py-0.5 rounded font-bold"></span>
+            </div>
+            <p id="fundSummaryText" class="text-xs text-slate-300 leading-relaxed"></p>
+          </div>
+
+          <!-- Sentiment Agent Card -->
+          <div class="bg-cardBg border border-borderCol rounded-xl p-4 shadow-sm space-y-2">
+            <div class="flex items-center justify-between border-b border-borderCol/60 pb-2">
+              <span class="text-xs font-bold text-amber-400 flex items-center gap-1.5">
+                <i class="fa-solid fa-newspaper"></i> Sentiment & News
+              </span>
+              <span id="sentMoodBadge" class="text-xs px-2 py-0.5 rounded font-bold"></span>
+            </div>
+            <p id="sentSummaryText" class="text-xs text-slate-300 leading-relaxed"></p>
+          </div>
+
+          <!-- Risk Agent Card -->
+          <div class="bg-cardBg border border-borderCol rounded-xl p-4 shadow-sm space-y-2">
+            <div class="flex items-center justify-between border-b border-borderCol/60 pb-2">
+              <span class="text-xs font-bold text-emerald-400 flex items-center gap-1.5">
+                <i class="fa-solid fa-shield-halved"></i> Risk Officer
+              </span>
+              <span id="riskApprovedBadge" class="text-xs px-2 py-0.5 rounded font-bold"></span>
+            </div>
+            <p id="riskSummaryText" class="text-xs text-slate-300 leading-relaxed"></p>
+          </div>
+        </div>
+
+        <!-- Multi-Turn Debate Transcript -->
+        <div class="bg-cardBg border border-borderCol rounded-xl p-5 shadow-sm space-y-3">
+          <h3 class="text-sm font-bold text-white flex items-center gap-2">
+            <i class="fa-solid fa-comments text-cyan-400"></i> Full Committee Debate Transcript
+          </h3>
+          <div id="debateTranscriptBox" class="text-xs sm:text-sm text-slate-200 leading-relaxed space-y-3 bg-slate-900/60 p-4 rounded-lg border border-slate-800 font-mono whitespace-pre-wrap">
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 5: TRADE HISTORY -->
+    <section id="tab-history" class="tab-content hidden space-y-4">
+      <div class="flex items-center justify-between">
+        <h2 class="text-base sm:text-lg font-bold text-white flex items-center gap-2">
+          <i class="fa-solid fa-clock-rotate-left text-slate-400"></i> Executed Trade History
+        </h2>
+        <button onclick="loadTrades(); loadLearningInsights();" class="text-xs text-slate-400 hover:text-white flex items-center gap-1">
+          <i class="fa-solid fa-arrows-rotate"></i> Refresh
+        </button>
+      </div>
+
+      <!-- AI Trader Learning & Post-Mortem Card -->
+      <div class="bg-cardBg border border-borderCol rounded-xl p-4 sm:p-5 shadow-sm space-y-4">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-borderCol pb-3">
+          <div>
+            <h3 class="text-sm sm:text-base font-bold text-white flex items-center gap-2">
+              <i class="fa-solid fa-brain text-purple-400"></i> AI Trader Learning & Autonomous Adaptation
+            </h3>
+            <p class="text-xs text-slate-400">Self-reflective post-mortems on wins and losses, adjusting internal risk parameters</p>
+          </div>
+          <button onclick="triggerLearningCalibration()" class="self-start sm:self-auto text-xs bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 border border-purple-500/30 px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all active:scale-95">
+            <i class="fa-solid fa-sliders"></i> Re-Calibrate Parameters
+          </button>
+        </div>
+
+        <!-- Metric Badges -->
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+          <div class="bg-slate-900/60 p-3 rounded-lg border border-slate-800">
+            <div class="text-slate-400">Win Rate</div>
+            <div id="learningWinRate" class="text-lg font-bold text-emerald-400 mt-0.5">--%</div>
+            <div id="learningTradeCounts" class="text-[10px] text-slate-500">0 Trades</div>
+          </div>
+          <div class="bg-slate-900/60 p-3 rounded-lg border border-slate-800">
+            <div class="text-slate-400">Min Consensus Score</div>
+            <div id="learningMinScore" class="text-lg font-bold text-indigo-400 mt-0.5">70/100</div>
+            <div class="text-[10px] text-slate-500">Conviction Threshold</div>
+          </div>
+          <div class="bg-slate-900/60 p-3 rounded-lg border border-slate-800">
+            <div class="text-slate-400">Position Sizing</div>
+            <div id="learningPositionSize" class="text-lg font-bold text-cyan-400 mt-0.5">8.0%</div>
+            <div class="text-[10px] text-slate-500">Drawdown Scaled</div>
+          </div>
+          <div class="bg-slate-900/60 p-3 rounded-lg border border-slate-800">
+            <div class="text-slate-400">Risk-to-Reward & Stop</div>
+            <div id="learningRiskParams" class="text-lg font-bold text-amber-400 mt-0.5">1:2.1 (1.75x)</div>
+            <div class="text-[10px] text-slate-500">TP R:R (ATR Buffer)</div>
+          </div>
+        </div>
+
+        <!-- Recent Lessons Learned -->
+        <div>
+          <h4 class="text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+            <i class="fa-solid fa-graduation-cap text-purple-400"></i> Recent Post-Mortem Diagnoses & Lessons
+          </h4>
+          <div id="learningLessonsContainer" class="space-y-2 text-xs">
+            <div class="text-slate-500 italic p-3 bg-slate-900/40 rounded-lg border border-slate-800/80">
+              No trade post-mortems yet. Lessons will appear here automatically when positions exit.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="bg-cardBg border border-borderCol rounded-xl overflow-hidden shadow-sm">
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-xs sm:text-sm">
+            <thead class="bg-slate-800/70 border-b border-borderCol text-slate-400 uppercase tracking-wider font-semibold text-[11px]">
+              <tr>
+                <th class="py-3 px-4">Date</th>
+                <th class="py-3 px-4">Type</th>
+                <th class="py-3 px-4">Asset</th>
+                <th class="py-3 px-4">Shares</th>
+                <th class="py-3 px-4">Price</th>
+                <th class="py-3 px-4">Total (EUR)</th>
+                <th class="py-3 px-4">Realized PnL</th>
+                <th class="py-3 px-4">Rationale</th>
+              </tr>
+            </thead>
+            <tbody id="tradeHistoryTableBody" class="divide-y divide-borderCol/50">
+              <!-- Filled by JS -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 5: AI ORDER TRIGGERS -->
+    <section id="tab-triggers" class="tab-content hidden space-y-6">
+      <!-- Quick Arm Trigger Bar -->
+      <div class="bg-cardBg border border-borderCol rounded-xl p-4 sm:p-5 shadow-sm space-y-3">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-borderCol pb-3">
+          <div>
+            <h2 class="text-base font-bold text-white flex items-center gap-2">
+              <i class="fa-solid fa-crosshairs text-indigo-400"></i> AI Price Triggers & Limit Orders
+            </h2>
+            <p class="text-xs text-slate-400">AI calculates optimal entry levels (pullback support / breakout). When reached during market hours, orders execute automatically.</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <button onclick="loadTriggers()" class="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold flex items-center gap-1">
+              <i class="fa-solid fa-rotate text-indigo-400"></i> Refresh
+            </button>
+          </div>
+        </div>
+
+        <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 pt-1">
+          <div class="relative flex-1">
+            <i class="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-slate-500 text-xs"></i>
+            <input type="text" id="triggerTickerInput" placeholder="Enter stock ticker (e.g. NVDA, ASML.AS, AAPL)..." class="w-full bg-slate-900/80 border border-slate-700 rounded-lg pl-8 pr-3 py-1.5 text-xs text-white uppercase placeholder-slate-500 focus:outline-none focus:border-indigo-500 font-mono">
+          </div>
+          <button onclick="armTriggerFromInput()" id="armTriggerBtn" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold px-4 py-2 rounded-lg shadow-sm transition-all flex items-center justify-center gap-1.5 active:scale-95 whitespace-nowrap">
+            <i class="fa-solid fa-wand-magic-sparkles"></i> AI Calculate & Arm Trigger
+          </button>
+        </div>
+      </div>
+
+      <!-- Pending Triggers List -->
+      <div class="space-y-3">
+        <div class="flex items-center justify-between">
+          <h3 class="text-sm font-bold text-slate-200 flex items-center gap-2">
+            <span class="w-2 h-2 rounded-full bg-indigo-400 animate-ping"></span>
+            Active Pending Triggers
+          </h3>
+          <span id="pendingTriggersCount" class="text-xs font-semibold px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">0 Active</span>
+        </div>
+
+        <div id="pendingTriggersContainer" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          <!-- Populated by JS -->
+        </div>
+      </div>
+
+      <!-- Trigger History -->
+      <div class="bg-cardBg border border-borderCol rounded-xl p-4 sm:p-5 shadow-sm space-y-3">
+        <h3 class="text-sm font-bold text-slate-200 flex items-center gap-2">
+          <i class="fa-solid fa-clock-rotate-left text-slate-400"></i> Trigger Execution History
+        </h3>
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-xs text-slate-300">
+            <thead class="bg-slate-900/60 uppercase font-semibold text-slate-400 border-b border-borderCol">
+              <tr>
+                <th class="py-2.5 px-3">Ticker</th>
+                <th class="py-2.5 px-3">Type</th>
+                <th class="py-2.5 px-3">Target Price</th>
+                <th class="py-2.5 px-3">Status</th>
+                <th class="py-2.5 px-3">Triggered At</th>
+                <th class="py-2.5 px-3">Rationale</th>
+              </tr>
+            </thead>
+            <tbody id="triggerHistoryTableBody" class="divide-y divide-borderCol/40">
+              <!-- Populated by JS -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 6: SETTINGS -->
+    <section id="tab-settings" class="tab-content hidden space-y-6 max-w-2xl">
+      <div class="bg-cardBg border border-borderCol rounded-xl p-5 shadow-sm space-y-5">
+        <h2 class="text-base font-bold text-white flex items-center gap-2 border-b border-borderCol pb-3">
+          <i class="fa-solid fa-sliders text-emerald-400"></i> Trading & Risk Settings
+        </h2>
+
+        <!-- Auto-Buy Toggle -->
+        <div class="flex items-center justify-between">
+          <div>
+            <label class="text-sm font-semibold text-white">Automated Buying</label>
+            <p class="text-xs text-slate-400">Allow agent committee to automatically place paper buy orders on high conviction signals.</p>
+          </div>
+          <input type="checkbox" id="settingAutoBuy" onchange="saveSettings()" class="w-5 h-5 accent-emerald-500 rounded cursor-pointer">
+        </div>
+
+        <!-- Consensus Score Threshold -->
+        <div class="space-y-2">
+          <div class="flex justify-between text-sm">
+            <label class="font-semibold text-white">Minimum Consensus Score for Auto-Buy</label>
+            <span id="consensusScoreLabel" class="text-emerald-400 font-bold">70 / 100</span>
+          </div>
+          <input type="range" id="settingMinScore" min="50" max="95" value="70" oninput="document.getElementById('consensusScoreLabel').innerText = this.value + ' / 100'" onchange="saveSettings()" class="w-full accent-emerald-500 cursor-pointer">
+        </div>
+
+        <!-- Position Sizing % -->
+        <div class="space-y-2">
+          <div class="flex justify-between text-sm">
+            <label class="font-semibold text-white">Default Position Sizing (% of Equity)</label>
+            <span id="posSizeLabel" class="text-cyan-400 font-bold">8.0%</span>
+          </div>
+          <input type="range" id="settingPosSize" min="3" max="15" step="0.5" value="8.0" oninput="document.getElementById('posSizeLabel').innerText = this.value + '%'" onchange="saveSettings()" class="w-full accent-cyan-500 cursor-pointer">
+        </div>
+
+        <!-- Strict Market Hours Toggle -->
+        <div class="flex items-center justify-between border-t border-borderCol/60 pt-4">
+          <div>
+            <label class="text-sm font-semibold text-white">Strict Market Hours</label>
+            <p class="text-xs text-slate-400">No trades can be executed in paper mode when European or US markets are closed (or on weekends).</p>
+          </div>
+          <input type="checkbox" id="settingMarketHours" onchange="saveSettings()" class="w-5 h-5 accent-emerald-500 rounded cursor-pointer">
+        </div>
+      </div>
+
+      <!-- Telegram & Integrations Status -->
+      <div class="bg-cardBg border border-borderCol rounded-xl p-5 shadow-sm space-y-4">
+        <h2 class="text-base font-bold text-white flex items-center gap-2 border-b border-borderCol pb-3">
+          <i class="fa-brands fa-telegram text-sky-400"></i> Telegram & AI Engine Status
+        </h2>
+
+        <div class="space-y-3 text-xs sm:text-sm">
+          <div class="flex items-center justify-between p-3 rounded-lg bg-slate-900/60 border border-borderCol">
+            <div class="flex items-center gap-2">
+              <i class="fa-brands fa-telegram text-sky-400 text-lg"></i>
+              <div>
+                <div class="font-semibold text-white">Telegram Assistant Bot</div>
+                <div class="text-xs text-slate-400">Instant trade alerts & market open/close broadcasts</div>
+              </div>
+            </div>
+            <span id="telegramStatusBadge" class="px-2 py-0.5 rounded text-xs font-bold bg-slate-800 text-slate-400">Not Configured</span>
+          </div>
+
+          <div class="flex items-center justify-between p-3 rounded-lg bg-slate-900/60 border border-borderCol">
+            <div class="flex items-center gap-2">
+              <i class="fa-solid fa-microchip text-purple-400 text-lg"></i>
+              <div>
+                <div class="font-semibold text-white">AI LLM Committee Engine</div>
+                <div class="text-xs text-slate-400">Google Gemini / OpenAI multi-agent reasoning</div>
+              </div>
+            </div>
+            <span id="aiEngineStatusBadge" class="px-2 py-0.5 rounded text-xs font-bold bg-emerald-500/20 text-emerald-400">Active (Deterministic & LLM Ready)</span>
+          </div>
+        </div>
+
+        <div class="text-xs text-slate-400 bg-slate-900/40 p-3 rounded-lg border border-slate-800">
+          💡 <em>To configure your Telegram token or Gemini/OpenAI API key, update the <code>.env</code> file in your project folder. The system will automatically detect them upon restart.</em>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Mobile Bottom Sticky Navigation Bar -->
+  <nav class="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-cardBg/95 backdrop-blur-lg border-t border-borderCol flex justify-around py-2 px-1 text-[10px] font-medium">
+    <button onclick="switchTab('portfolio')" class="mobile-tab-btn flex flex-col items-center gap-1 py-1 px-2 rounded-lg text-emerald-400" data-tab="portfolio">
+      <i class="fa-solid fa-wallet text-base"></i>
+      <span>Portfolio</span>
+    </button>
+    <button onclick="switchTab('advice')" class="mobile-tab-btn flex flex-col items-center gap-1 py-1 px-2 rounded-lg text-slate-400" data-tab="advice">
+      <i class="fa-solid fa-lightbulb text-base"></i>
+      <span>Advice</span>
+    </button>
+    <button onclick="switchTab('screener')" class="mobile-tab-btn flex flex-col items-center gap-1 py-1 px-2 rounded-lg text-slate-400" data-tab="screener">
+      <i class="fa-solid fa-magnifying-glass-chart text-base"></i>
+      <span>Screener</span>
+    </button>
+    <button onclick="switchTab('debate')" class="mobile-tab-btn flex flex-col items-center gap-1 py-1 px-2 rounded-lg text-slate-400" data-tab="debate">
+      <i class="fa-solid fa-comments text-base"></i>
+      <span>Debate</span>
+    </button>
+    <button onclick="switchTab('triggers')" class="mobile-tab-btn flex flex-col items-center gap-1 py-1 px-2 rounded-lg text-slate-400" data-tab="triggers">
+      <i class="fa-solid fa-crosshairs text-base"></i>
+      <span>Triggers</span>
+    </button>
+    <button onclick="switchTab('history')" class="mobile-tab-btn flex flex-col items-center gap-1 py-1 px-2 rounded-lg text-slate-400" data-tab="history">
+      <i class="fa-solid fa-clock-rotate-left text-base"></i>
+      <span>History</span>
+    </button>
+    <button onclick="switchTab('settings')" class="mobile-tab-btn flex flex-col items-center gap-1 py-1 px-2 rounded-lg text-slate-400" data-tab="settings">
+      <i class="fa-solid fa-sliders text-base"></i>
+      <span>Settings</span>
+    </button>
+  </nav>
+
+  <!-- Toast Notification element -->
+  <div id="toast" class="fixed top-16 right-4 z-50 transform transition-all duration-300 translate-y-[-100px] opacity-0 pointer-events-none bg-slate-800 text-white border border-borderCol px-4 py-2.5 rounded-xl shadow-xl text-xs sm:text-sm flex items-center gap-2">
+    <i id="toastIcon" class="fa-solid fa-circle-check text-emerald-400"></i>
+    <span id="toastMsg">Action executed.</span>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
