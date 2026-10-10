@@ -122,8 +122,22 @@ async function loadPortfolio() {
     // Update KPI cards
     const pnlVal = positions.reduce((s, p) => s + (p.unrealized_pnl_eur || 0), 0);
     const equityVal = positions.reduce((s, p) => s + (p.current_value_eur || 0), 0);
-    const totalVal = summary.cash_eur + equityVal;
-    const totalReturnPct = summary.initial_capital_eur ? ((totalVal / summary.initial_capital_eur) - 1.0) * 100 : summary.total_return_pct;
+    const totalVal = (summary.cash_eur || 0) + equityVal;
+    const rawReturn = summary.initial_capital_eur ? (((totalVal / summary.initial_capital_eur) - 1.0) * 100) : (summary.total_return_pct ?? 0);
+    const totalReturnPct = Number.isFinite(rawReturn) ? rawReturn : 0;
+
+    const isLive = (summary.trading_mode || '').toUpperCase() === 'LIVE';
+    const modeBadge = document.getElementById('tradingModeBadge');
+    if (modeBadge) {
+      modeBadge.textContent = isLive ? 'LIVE' : 'PAPER';
+      modeBadge.className = isLive
+        ? 'text-xs px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-400 font-semibold uppercase border border-rose-500/30'
+        : 'text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-semibold uppercase border border-emerald-500/30';
+    }
+    const pnlSub = document.getElementById('metricUnrealizedPnlSub');
+    if (pnlSub) {
+      pnlSub.textContent = `Open ${isLive ? 'live' : 'paper'} positions`;
+    }
 
     document.getElementById('metricTotalVal').textContent = `€${totalVal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
     document.getElementById('metricCash').textContent = `€${summary.cash_eur.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
@@ -626,6 +640,10 @@ async function loadSettings() {
       }
     }
 
+    if (document.getElementById('settingTradingMode') && data.trading_mode) {
+      document.getElementById('settingTradingMode').value = data.trading_mode.toUpperCase();
+    }
+
     if (document.getElementById('settingMarketHours')) {
       document.getElementById('settingMarketHours').checked = data.enforce_market_hours !== false;
     }
@@ -641,21 +659,30 @@ async function saveSettings() {
   const minScore = parseInt(document.getElementById('settingMinScore').value);
   const posSizePct = parseFloat(document.getElementById('settingPosSize').value) / 100.0;
   const enforceHours = document.getElementById('settingMarketHours') ? document.getElementById('settingMarketHours').checked : true;
+  const tradingModeEl = document.getElementById('settingTradingMode');
+  const tradingMode = tradingModeEl ? tradingModeEl.value : undefined;
 
   try {
+    const payload = {
+      auto_buy_enabled: autoBuy,
+      min_consensus_score: minScore,
+      position_size_pct: posSizePct,
+      enforce_market_hours: enforceHours
+    };
+    if (tradingMode) {
+      payload.trading_mode = tradingMode;
+      payload.live_trading_enabled = (tradingMode === 'LIVE');
+    }
+
     const res = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        auto_buy_enabled: autoBuy,
-        min_consensus_score: minScore,
-        position_size_pct: posSizePct,
-        enforce_market_hours: enforceHours
-      })
+      body: JSON.stringify(payload)
     });
     if (res.ok) {
       showToast('Settings saved successfully.');
       document.getElementById('autoBuyStatusText').textContent = autoBuy ? 'Active' : 'Paused';
+      await loadPortfolio();
     }
   } catch (e) {
     showToast('Failed to save settings.', true);
@@ -716,8 +743,14 @@ async function loadTriggers() {
           const typeBadge = isPullback
             ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40'
             : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40';
-          const distSign = t.distance_pct > 0 ? '+' : '';
-          const distColor = Math.abs(t.distance_pct) <= 1.0 ? 'text-emerald-400' : 'text-slate-300';
+          const currPrice = (t.current_price !== undefined && t.current_price !== null)
+            ? t.current_price
+            : (t.current_price_at_creation !== undefined && t.current_price_at_creation !== null ? t.current_price_at_creation : t.target_price);
+          const distVal = (t.distance_pct !== undefined && t.distance_pct !== null)
+            ? t.distance_pct
+            : (currPrice > 0 ? Math.round(((t.target_price / currPrice) - 1.0) * 10000) / 100 : 0);
+          const distSign = distVal > 0 ? '+' : '';
+          const distColor = Math.abs(distVal) <= 1.0 ? 'text-emerald-400' : 'text-slate-300';
 
           return `
             <div class="bg-cardBg border border-indigo-500/30 rounded-xl p-4 shadow-sm space-y-3.5 flex flex-col justify-between hover:border-indigo-500/60 transition-colors">
@@ -739,11 +772,11 @@ async function loadTriggers() {
                   </div>
                   <div>
                     <span class="text-slate-500 text-[10px] block">Current Live Price</span>
-                    <span class="text-white font-semibold">${t.current_price} ${t.currency}</span>
+                    <span class="text-white font-semibold">${currPrice} ${t.currency || 'EUR'}</span>
                   </div>
                   <div>
                     <span class="text-slate-500 text-[10px] block">Distance to Trigger</span>
-                    <span class="${distColor} font-bold">${distSign}${t.distance_pct}%</span>
+                    <span class="${distColor} font-bold">${distSign}${distVal}%</span>
                   </div>
                   <div>
                     <span class="text-slate-500 text-[10px] block">Alloc (EUR)</span>

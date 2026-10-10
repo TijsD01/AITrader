@@ -26,12 +26,32 @@ async def get_db():
         finally:
             await session.close()
 
+def _run_migrations(connection):
+    migrations = [
+        ("positions", "is_live", "BOOLEAN DEFAULT 0"),
+        ("positions", "broker_order_id", "VARCHAR(100)"),
+        ("trades", "is_live", "BOOLEAN DEFAULT 0"),
+        ("trades", "broker_order_id", "VARCHAR(100)"),
+        ("order_triggers", "is_live", "BOOLEAN DEFAULT 0"),
+        ("order_triggers", "broker_order_id", "VARCHAR(100)"),
+        ("portfolio_snapshots", "is_live", "BOOLEAN DEFAULT 0")
+    ]
+    for table, col, col_type in migrations:
+        try:
+            res = connection.exec_driver_sql(f"PRAGMA table_info({table});")
+            cols = [r[1] for r in res.fetchall()]
+            if col not in cols:
+                connection.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {col} {col_type};")
+        except Exception:
+            pass
+
 async def init_db():
     # Ensure parent dir exists
     os.makedirs(settings.DATA_DIR, exist_ok=True)
     
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_run_migrations)
         
     async with AsyncSessionLocal() as session:
         # Check if portfolio snapshot exists

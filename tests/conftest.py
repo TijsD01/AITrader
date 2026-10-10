@@ -9,6 +9,9 @@ os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{TEST_DB_FILE}"
 
 from config.settings import settings
 settings.DATABASE_URL = f"sqlite+aiosqlite:///{TEST_DB_FILE}"
+settings.TRADING_MODE = "PAPER"
+settings.LIVE_TRADING_ENABLED = False
+settings.ENFORCE_MARKET_HOURS = True
 
 # Re-bind session engine to the test database
 from src.db import session as db_session_module

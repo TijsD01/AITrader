@@ -18,21 +18,7 @@ def main():
 
     args = parser.parse_args()
 
-    # Detect tailscale / local network IP
     tailscale_ip = None
-    try:
-        import socket, fcntl, struct, array
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        names = array.array('B', b'\0' * 4096)
-        outbytes = struct.unpack('iL', fcntl.ioctl(s.fileno(), 0x8912, struct.pack('iL', 4096, names.buffer_info()[0])))[0]
-        namestr = names.tobytes()
-        for i in range(0, outbytes, 40):
-            name = namestr[i:i+16].split(b'\0', 1)[0].decode('latin-1')
-            if 'tailscale' in name:
-                tailscale_ip = socket.inet_ntoa(namestr[i+20:i+24])
-                break
-    except Exception:
-        pass
 
     print("==================================================================")
     print(" [*] Starting Multi-Agent Investment & Trading System")

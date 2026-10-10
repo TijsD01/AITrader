@@ -80,6 +80,7 @@ class PortfolioSnapshot(Base):
     daily_pnl_eur = Column(Float, default=0.0)
     daily_pnl_pct = Column(Float, default=0.0)
     open_positions_count = Column(Integer, default=0)
+    is_live = Column(Boolean, default=False)
 
 class AnalysisReport(Base):
     __tablename__ = "analysis_reports"

@@ -31,15 +31,17 @@ class PaperBroker(BaseBroker):
         await self.refresh_positions_pnl()
         async with AsyncSessionLocal() as session:
             # Latest snapshot
-            res = await session.execute(select(PortfolioSnapshot).order_by(desc(PortfolioSnapshot.timestamp)))
+            res = await session.execute(
+                select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == False).order_by(desc(PortfolioSnapshot.timestamp))
+            )
             snapshot = res.scalars().first()
             
             # Active positions
-            pos_res = await session.execute(select(Position).where(Position.status == "OPEN"))
+            pos_res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == False))
             positions = pos_res.scalars().all()
 
             # Active pending triggers
-            trig_res = await session.execute(select(OrderTrigger).where(OrderTrigger.status == "PENDING"))
+            trig_res = await session.execute(select(OrderTrigger).where(OrderTrigger.status == "PENDING", OrderTrigger.is_live == False))
             pending_triggers = trig_res.scalars().all()
             pending_alloc = sum(t.allocation_eur for t in pending_triggers)
 
@@ -52,6 +54,7 @@ class PaperBroker(BaseBroker):
             total_return_pct = round(((total_val / initial_cap) - 1.0) * 100, 2)
 
             return {
+                "trading_mode": "PAPER",
                 "base_currency": settings.BASE_CURRENCY,
                 "cash_eur": round(cash, 2),
                 "available_cash_eur": round(available_cash, 2),
@@ -68,7 +71,7 @@ class PaperBroker(BaseBroker):
     async def get_positions(self) -> List[Dict[str, Any]]:
         await self.refresh_positions_pnl()
         async with AsyncSessionLocal() as session:
-            res = await session.execute(select(Position).where(Position.status == "OPEN"))
+            res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == False))
             positions = res.scalars().all()
             return [
                 {
@@ -121,17 +124,19 @@ class PaperBroker(BaseBroker):
                 auto_buy_enabled = (cfg.value.lower() == "true") if cfg else settings.AUTO_BUY_ENABLED
 
             # Get open positions & latest cash
-            pos_res = await session.execute(select(Position).where(Position.status == "OPEN"))
+            pos_res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == False))
             open_positions = pos_res.scalars().all()
 
-            snap_res = await session.execute(select(PortfolioSnapshot).order_by(desc(PortfolioSnapshot.timestamp)))
+            snap_res = await session.execute(
+                select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == False).order_by(desc(PortfolioSnapshot.timestamp))
+            )
             snapshot = snap_res.scalars().first()
             cash_eur = snapshot.cash_eur if snapshot else settings.INITIAL_PAPER_CAPITAL
             equity_eur = sum(p.current_price_eur * p.shares for p in open_positions)
             total_eur = cash_eur + equity_eur
 
             # Calculate available cash excluding the trigger being executed (if any)
-            trig_query = select(OrderTrigger).where(OrderTrigger.status == "PENDING")
+            trig_query = select(OrderTrigger).where(OrderTrigger.status == "PENDING", OrderTrigger.is_live == False)
             if trigger_id:
                 trig_query = trig_query.where(OrderTrigger.id != trigger_id)
             trig_res = await session.execute(trig_query)
@@ -224,6 +229,7 @@ class PaperBroker(BaseBroker):
                 equity_eur=new_equity_eur,
                 total_value_eur=new_cash_eur + new_equity_eur,
                 open_positions_count=len(open_positions) + 1,
+                is_live=False,
                 timestamp=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
             )
             session.add(new_snapshot)
@@ -252,7 +258,7 @@ class PaperBroker(BaseBroker):
 
         async with AsyncSessionLocal() as session:
             res = await session.execute(
-                select(Position).where(Position.ticker == ticker.upper(), Position.status == "OPEN")
+                select(Position).where(Position.ticker == ticker.upper(), Position.status == "OPEN", Position.is_live == False)
             )
             pos = res.scalars().first()
             if not pos:
@@ -284,18 +290,21 @@ class PaperBroker(BaseBroker):
                 realized_pnl_eur=realized_pnl_eur,
                 realized_pnl_pct=realized_pnl_pct,
                 rationale=reason,
+                is_live=False,
                 executed_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
             )
             session.add(trade)
 
             # Update cash and snapshot
-            snap_res = await session.execute(select(PortfolioSnapshot).order_by(desc(PortfolioSnapshot.timestamp)))
+            snap_res = await session.execute(
+                select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == False).order_by(desc(PortfolioSnapshot.timestamp))
+            )
             snapshot = snap_res.scalars().first()
             cash_eur = (snapshot.cash_eur if snapshot else settings.INITIAL_PAPER_CAPITAL) + proceeds_eur
 
             # Remaining active positions
             remaining_res = await session.execute(
-                select(Position).where(Position.status == "OPEN", Position.ticker != ticker.upper())
+                select(Position).where(Position.status == "OPEN", Position.is_live == False, Position.ticker != ticker.upper())
             )
             remaining = remaining_res.scalars().all()
             new_equity_eur = sum(p.current_price_eur * p.shares for p in remaining)
@@ -305,6 +314,7 @@ class PaperBroker(BaseBroker):
                 equity_eur=new_equity_eur,
                 total_value_eur=cash_eur + new_equity_eur,
                 open_positions_count=len(remaining),
+                is_live=False,
                 timestamp=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
             )
             session.add(new_snapshot)
@@ -366,7 +376,7 @@ class PaperBroker(BaseBroker):
                 be_row = be_cfg.scalars().first()
                 breakeven_trigger_pct = float(be_row.value) if be_row else 0.025
 
-                res = await session.execute(select(Position).where(Position.status == "OPEN"))
+                res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == False))
                 positions = res.scalars().all()
                 if not positions:
                     self._last_pnl_refresh = now
@@ -404,7 +414,7 @@ class PaperBroker(BaseBroker):
         await self.refresh_positions_pnl()
         triggered = []
         async with AsyncSessionLocal() as session:
-            res = await session.execute(select(Position).where(Position.status == "OPEN"))
+            res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == False))
             positions = res.scalars().all()
             tickers_to_close = []
 
@@ -452,7 +462,8 @@ class PaperBroker(BaseBroker):
             res = await session.execute(
                 select(OrderTrigger).where(
                     OrderTrigger.ticker == ticker.upper(),
-                    OrderTrigger.status == "PENDING"
+                    OrderTrigger.status == "PENDING",
+                    OrderTrigger.is_live == False
                 )
             )
             existing = res.scalars().first()
@@ -496,11 +507,13 @@ class PaperBroker(BaseBroker):
                 }
 
             # 4. Anti-Overlap Check: Capital overlap (Cannot commit more cash than you have, no budget)
-            snap_res = await session.execute(select(PortfolioSnapshot).order_by(desc(PortfolioSnapshot.timestamp)))
+            snap_res = await session.execute(
+                select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == False).order_by(desc(PortfolioSnapshot.timestamp))
+            )
             snapshot = snap_res.scalars().first()
             cash_eur = snapshot.cash_eur if snapshot else settings.INITIAL_PAPER_CAPITAL
 
-            pending_res = await session.execute(select(OrderTrigger).where(OrderTrigger.status == "PENDING"))
+            pending_res = await session.execute(select(OrderTrigger).where(OrderTrigger.status == "PENDING", OrderTrigger.is_live == False))
             pending_triggers = pending_res.scalars().all()
             pending_alloc = sum(t.allocation_eur for t in pending_triggers)
             available_cash = round(max(0.0, cash_eur - pending_alloc), 2)
@@ -529,6 +542,7 @@ class PaperBroker(BaseBroker):
                 consensus_score=consensus_score,
                 ai_rationale=ai_rationale,
                 status="PENDING",
+                is_live=False,
                 created_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
             )
             session.add(trigger)
@@ -566,7 +580,7 @@ class PaperBroker(BaseBroker):
     async def get_triggers(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
         """Retrieves order triggers with live distance % calculations."""
         async with AsyncSessionLocal() as session:
-            query = select(OrderTrigger).order_by(desc(OrderTrigger.created_at))
+            query = select(OrderTrigger).where(OrderTrigger.is_live == False).order_by(desc(OrderTrigger.created_at))
             if status:
                 query = query.where(OrderTrigger.status == status.upper())
             res = await session.execute(query)
@@ -582,10 +596,11 @@ class PaperBroker(BaseBroker):
                     if t.ticker not in quote_cache:
                         quote_cache[t.ticker] = await asyncio.to_thread(market_data_provider.get_stock_data, t.ticker)
                     latest_data = quote_cache[t.ticker]
-                    curr_price = latest_data["price"] if latest_data else t.current_price_at_creation
+                    curr_price = (latest_data["price"] if latest_data else t.current_price_at_creation) or t.target_price
                 
+                curr_price = curr_price or t.current_price_at_creation or t.target_price
                 # Distance % to trigger: ((target_price / curr_price) - 1) * 100
-                dist_pct = round(((t.target_price / curr_price) - 1.0) * 100, 2) if curr_price > 0 else 0.0
+                dist_pct = round(((t.target_price / curr_price) - 1.0) * 100, 2) if (curr_price and curr_price > 0) else 0.0
 
                 results.append({
                     "id": t.id,
@@ -614,7 +629,7 @@ class PaperBroker(BaseBroker):
         evaluates price condition, and executes automated buys.
         """
         async with AsyncSessionLocal() as session:
-            res = await session.execute(select(OrderTrigger).where(OrderTrigger.status == "PENDING"))
+            res = await session.execute(select(OrderTrigger).where(OrderTrigger.status == "PENDING", OrderTrigger.is_live == False))
             pending = res.scalars().all()
             if not pending:
                 return []

@@ -1,8 +1,9 @@
 import pytest
 from unittest.mock import patch
+from sqlalchemy import delete, select
 from config.settings import settings
 from src.db.session import init_db, AsyncSessionLocal
-from src.db.models import Trade, Position
+from src.db.models import Trade, Position, PortfolioSnapshot
 from src.trading.live import live_broker
 from src.trading.risk import calculate_position_allocation, risk_guardrail
 
@@ -120,6 +121,22 @@ async def test_live_broker_full_execution_lifecycle():
 
     ticker = "NVDA_LIVE_TEST"
     try:
+        # Clean up any residual test position from previous runs and ensure live test snapshot exists
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(Position).where(Position.ticker == ticker))
+            snap_res = await session.execute(
+                select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True)
+            )
+            if not snap_res.scalars().first():
+                session.add(PortfolioSnapshot(
+                    cash_eur=1000.0,
+                    equity_eur=0.0,
+                    total_value_eur=1000.0,
+                    is_live=True,
+                    open_positions_count=0
+                ))
+            await session.commit()
+
         # Mock quote for NVDA_LIVE_TEST so it doesn't make slow network calls
         mock_quote = {"price": 120.0, "currency": "USD", "name": "NVIDIA Corp"}
         with patch("src.trading.live.market_data_provider.get_stock_data", return_value=mock_quote):
@@ -164,8 +181,54 @@ async def test_live_broker_full_execution_lifecycle():
             positions_after = await live_broker.get_positions()
             assert not any(p["ticker"] == ticker for p in positions_after)
     finally:
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(Position).where(Position.ticker == ticker))
+            await session.commit()
         settings.TRADING_MODE = orig_mode
         settings.LIVE_TRADING_ENABLED = orig_live
         settings.KILL_SWITCH_ACTIVE = orig_kill
-        settings.ENFORCE_MARKET_HOURS = orig_enforce
         settings.LIVE_BROKER = orig_broker
+
+
+@pytest.mark.asyncio
+async def test_live_broker_get_triggers_has_current_price_and_distance():
+    """Verify live broker get_triggers returns current_price and distance_pct without undefined."""
+    from src.db.models import OrderTrigger
+    await init_db()
+
+    ticker = "TRIG_LIVE_TEST"
+    async with AsyncSessionLocal() as session:
+        await session.execute(delete(OrderTrigger).where(OrderTrigger.ticker == ticker))
+        t = OrderTrigger(
+            ticker=ticker,
+            name="Live Test Inc",
+            currency="EUR",
+            trigger_type="LIMIT_PULLBACK",
+            target_price=90.0,
+            current_price_at_creation=100.0,
+            stop_loss=85.0,
+            take_profit=110.0,
+            allocation_eur=500.0,
+            consensus_score=85,
+            ai_rationale="Test pullback",
+            status="PENDING",
+            is_live=True
+        )
+        session.add(t)
+        await session.commit()
+
+    try:
+        with patch.object(live_broker, "_fetch_ibkr_prices", return_value={ticker: 95.0}):
+            triggers = await live_broker.get_triggers()
+            found = next((tr for tr in triggers if tr["ticker"] == ticker), None)
+            assert found is not None
+            assert "current_price" in found
+            assert found["current_price"] == 95.0
+            assert "distance_pct" in found
+            # ((90 / 95) - 1) * 100 = -5.26
+            assert found["distance_pct"] == -5.26
+    finally:
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(OrderTrigger).where(OrderTrigger.ticker == ticker))
+            await session.commit()
+

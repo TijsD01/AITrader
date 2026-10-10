@@ -26,29 +26,8 @@ class TelegramAssistant:
         return bool(self.token and len(self.token) >= 10 and not self.token.startswith("your_"))
 
     def _chunk_text(self, text: str, max_len: int = 4000) -> List[str]:
-        """Splits a long message into safe Telegram chunks of <= max_len characters."""
-        if not text:
-            return [""]
-        if len(text) <= max_len:
-            return [text]
-        chunks = []
-        lines = text.split("\n")
-        curr = ""
-        for line in lines:
-            if len(curr) + len(line) + 1 > max_len:
-                if curr:
-                    chunks.append(curr.strip())
-                    curr = ""
-                rem = line
-                while len(rem) > max_len:
-                    chunks.append(rem[:max_len])
-                    rem = rem[max_len:]
-                curr = rem
-            else:
-                curr = f"{curr}\n{line}" if curr else line
-        if curr:
-            chunks.append(curr.strip())
-        return chunks
+        import textwrap
+        return textwrap.wrap(text, width=max_len, replace_whitespace=False, drop_whitespace=False) or [""]
 
     async def send_message(self, text: str, chat_id: Optional[Union[int, str]] = None, parse_mode: str = "HTML") -> bool:
         """Sends a notification to target chat_id (or configured chat_id) with chunking and fallback."""

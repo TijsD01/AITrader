@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     INITIAL_PAPER_CAPITAL: float = 10000.0  # €10,000
     MAX_POSITIONS: int = 8
     POSITION_SIZE_PCT: float = 0.08         # 8% of equity per trade
-    MAX_POSITION_SIZE_PCT: float = 0.12     # Hard cap 12%
+    MAX_POSITION_SIZE_PCT: float = 1.0      # Up to 100% position size allowed
     DEFAULT_STOP_LOSS_PCT: float = 0.04     # 4% stop loss
     DEFAULT_TAKE_PROFIT_PCT: float = 0.08   # 8% take profit (1:2 R:R)
     AUTO_BUY_ENABLED: bool = True           # Auto-execute high conviction signals
@@ -55,11 +55,11 @@ class Settings(BaseSettings):
     LIVE_BROKER: str = "ibkr"               # "ibkr" (Interactive Brokers) or "alpaca"
     KILL_SWITCH_ACTIVE: bool = False        # Emergency trading halt
     MAX_DAILY_LOSS_EUR: float = 500.0       # Daily drawdown stop (halts buys if exceeded)
-    MAX_SINGLE_ORDER_EUR: float = 2500.0    # Hard cap on any single order
+    MAX_SINGLE_ORDER_EUR: float = 10000.0   # Hard cap on any single order
 
     # Interactive Brokers (IBKR) Config (Supports EU & US equities)
-    IBKR_HOST: str = "127.0.0.1"
-    IBKR_PORT: int = 4001                   # 4001 for Live IB Gateway, 4002 for Paper
+    IBKR_HOST: str = "172.17.0.2"
+    IBKR_PORT: int = 4003                   # 4003 via socat gateway bridge
     IBKR_CLIENT_ID: int = 1
     IBKR_ACCOUNT_ID: Optional[str] = None
 

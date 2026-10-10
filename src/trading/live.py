@@ -29,6 +29,52 @@ class LiveBroker(BaseBroker):
         self._pnl_refresh_ttl: float = 10.0
         self._refresh_lock = asyncio.Lock()
         self._broker_client = None
+        self._ibkr_price_cache: Dict[str, Tuple[float, float]] = {}
+
+    async def _fetch_ibkr_prices(self, tickers: List[Tuple[str, str]]) -> Dict[str, float]:
+        """
+        Fetches current or delayed market prices directly from IBKR via ib_async.
+        Uses in-memory TTL cache (30s) to minimize socket connections and roundtrips.
+        """
+        now = time.time()
+        needed = [
+            (t, c) for t, c in tickers
+            if t not in self._ibkr_price_cache or (now - self._ibkr_price_cache[t][0]) > 30.0
+        ]
+        if not needed:
+            return {t: self._ibkr_price_cache[t][1] for t, _ in tickers if t in self._ibkr_price_cache}
+
+        if settings.LIVE_BROKER.lower() == "ibkr":
+            try:
+                from ib_async import IB, Stock
+                ib = IB()
+                await ib.connectAsync(
+                    host=settings.IBKR_HOST,
+                    port=settings.IBKR_PORT,
+                    clientId=settings.IBKR_CLIENT_ID + 25,
+                    timeout=3,
+                    readonly=True
+                )
+                ib.reqMarketDataType(3)  # 3 = Delayed (supports accounts without paid live subscriptions)
+                contracts = [
+                    Stock(t.split(".")[0], "SMART", c.upper())
+                    for t, c in needed
+                ]
+                await ib.qualifyContractsAsync(*contracts)
+                stream = [ib.reqMktData(c, "", False, False) for c in contracts]
+                await asyncio.sleep(1.0)
+                for (orig_ticker, _), tk in zip(needed, stream):
+                    p = tk.marketPrice()
+                    if p != p or p <= 0:
+                        p = tk.last if (tk.last == tk.last and tk.last > 0) else tk.close
+                    if p and p == p and p > 0:
+                        self._ibkr_price_cache[orig_ticker] = (time.time(), float(p))
+                ib.disconnect()
+            except Exception as e:
+                logger.debug(f"IBKR live market data note: {e}")
+
+        return {t: self._ibkr_price_cache[t][1] for t, _ in tickers if t in self._ibkr_price_cache}
+
 
     async def _dispatch_real_order(
         self,
@@ -54,7 +100,7 @@ class LiveBroker(BaseBroker):
                     clientId=settings.IBKR_CLIENT_ID,
                     timeout=3
                 )
-                contract = Stock(ticker.upper(), "SMART", currency.upper())
+                contract = Stock(ticker.upper().split(".")[0], "SMART", currency.upper())
                 await ib.qualifyContractsAsync(contract)
                 bracket = ib.bracketOrder(
                     action="BUY",
@@ -107,7 +153,7 @@ class LiveBroker(BaseBroker):
                     clientId=settings.IBKR_CLIENT_ID,
                     timeout=3
                 )
-                contract = Stock(ticker.upper(), "SMART", currency.upper())
+                contract = Stock(ticker.upper().split(".")[0], "SMART", currency.upper())
                 await ib.qualifyContractsAsync(contract)
                 order = MarketOrder("SELL", shares)
                 placed = ib.placeOrder(contract, order)
@@ -158,22 +204,32 @@ class LiveBroker(BaseBroker):
         """Fetches live portfolio state (from broker and local mirror)."""
         await self.refresh_positions_pnl()
         async with AsyncSessionLocal() as session:
-            res = await session.execute(select(PortfolioSnapshot).order_by(desc(PortfolioSnapshot.timestamp)))
+            res = await session.execute(
+                select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True).order_by(desc(PortfolioSnapshot.timestamp))
+            )
             snapshot = res.scalars().first()
 
-            pos_res = await session.execute(select(Position).where(Position.status == "OPEN"))
+            pos_res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == True))
             positions = pos_res.scalars().all()
 
-            trig_res = await session.execute(select(OrderTrigger).where(OrderTrigger.status == "PENDING"))
+            trig_res = await session.execute(select(OrderTrigger).where(OrderTrigger.status == "PENDING", OrderTrigger.is_live == True))
             pending_triggers = trig_res.scalars().all()
             pending_alloc = sum(t.allocation_eur for t in pending_triggers)
 
-            cash = snapshot.cash_eur if snapshot else settings.INITIAL_PAPER_CAPITAL
+            cash = snapshot.cash_eur if snapshot else 0.0
             available_cash = max(0.0, cash - pending_alloc)
             equity = sum(round(p.current_price_eur * p.shares, 2) for p in positions)
             total_val = round(cash + equity, 2)
             unrealized_pnl = sum(round(p.unrealized_pnl_eur, 2) for p in positions)
             daily_loss = await self.get_daily_realized_loss_eur()
+
+            # Baseline initial capital for live trading
+            first_snap_res = await session.execute(
+                select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True).order_by(PortfolioSnapshot.timestamp.asc())
+            )
+            first_snap = first_snap_res.scalars().first()
+            initial_cap = first_snap.total_value_eur if first_snap else total_val
+            total_return_pct = round(((total_val / initial_cap) - 1.0) * 100, 2) if initial_cap > 0 else 0.0
 
             return {
                 "broker": settings.LIVE_BROKER.upper(),
@@ -188,6 +244,8 @@ class LiveBroker(BaseBroker):
                 "equity_eur": round(equity, 2),
                 "total_value_eur": total_val,
                 "unrealized_pnl_eur": round(unrealized_pnl, 2),
+                "total_return_pct": total_return_pct,
+                "initial_capital_eur": round(initial_cap, 2),
                 "daily_realized_loss_eur": round(daily_loss, 2),
                 "max_daily_loss_limit_eur": settings.MAX_DAILY_LOSS_EUR,
                 "open_positions_count": len(positions),
@@ -198,7 +256,7 @@ class LiveBroker(BaseBroker):
         """Returns all open live positions."""
         await self.refresh_positions_pnl()
         async with AsyncSessionLocal() as session:
-            res = await session.execute(select(Position).where(Position.status == "OPEN"))
+            res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == True))
             positions = res.scalars().all()
             return [
                 {
@@ -270,17 +328,19 @@ class LiveBroker(BaseBroker):
                 auto_buy_enabled = (cfg.value.lower() == "true") if cfg else settings.AUTO_BUY_ENABLED
 
             # 5. Get cash and positions
-            pos_res = await session.execute(select(Position).where(Position.status == "OPEN"))
+            pos_res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == True))
             open_positions = pos_res.scalars().all()
 
-            snap_res = await session.execute(select(PortfolioSnapshot).order_by(desc(PortfolioSnapshot.timestamp)))
+            snap_res = await session.execute(
+                select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True).order_by(desc(PortfolioSnapshot.timestamp))
+            )
             snapshot = snap_res.scalars().first()
-            cash_eur = snapshot.cash_eur if snapshot else settings.INITIAL_PAPER_CAPITAL
+            cash_eur = snapshot.cash_eur if snapshot else 0.0
             equity_eur = sum(p.current_price_eur * p.shares for p in open_positions)
             total_eur = cash_eur + equity_eur
 
             # Reserved cash for other triggers
-            trig_query = select(OrderTrigger).where(OrderTrigger.status == "PENDING")
+            trig_query = select(OrderTrigger).where(OrderTrigger.status == "PENDING", OrderTrigger.is_live == True)
             if trigger_id:
                 trig_query = trig_query.where(OrderTrigger.id != trigger_id)
             trig_res = await session.execute(trig_query)
@@ -398,6 +458,7 @@ class LiveBroker(BaseBroker):
                 equity_eur=new_equity_eur,
                 total_value_eur=new_cash_eur + new_equity_eur,
                 open_positions_count=len(open_positions) + 1,
+                is_live=True,
                 timestamp=utc_now
             )
             session.add(new_snapshot)
@@ -473,12 +534,14 @@ class LiveBroker(BaseBroker):
             )
             session.add(trade)
 
-            snap_res = await session.execute(select(PortfolioSnapshot).order_by(desc(PortfolioSnapshot.timestamp)))
+            snap_res = await session.execute(
+                select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True).order_by(desc(PortfolioSnapshot.timestamp))
+            )
             snapshot = snap_res.scalars().first()
-            cash_eur = (snapshot.cash_eur if snapshot else settings.INITIAL_PAPER_CAPITAL) + proceeds_eur
+            cash_eur = (snapshot.cash_eur if snapshot else 0.0) + proceeds_eur
 
             remaining_res = await session.execute(
-                select(Position).where(Position.status == "OPEN", Position.ticker != ticker.upper())
+                select(Position).where(Position.status == "OPEN", Position.is_live == True, Position.ticker != ticker.upper())
             )
             remaining = remaining_res.scalars().all()
             new_equity_eur = sum(p.current_price_eur * p.shares for p in remaining)
@@ -488,6 +551,7 @@ class LiveBroker(BaseBroker):
                 equity_eur=new_equity_eur,
                 total_value_eur=cash_eur + new_equity_eur,
                 open_positions_count=len(remaining),
+                is_live=True,
                 timestamp=utc_now
             )
             session.add(new_snapshot)
@@ -536,29 +600,31 @@ class LiveBroker(BaseBroker):
         """Creates an armed price trigger for live execution."""
         async with AsyncSessionLocal() as session:
             pos_res = await session.execute(
-                select(Position).where(Position.ticker == ticker.upper(), Position.status == "OPEN")
+                select(Position).where(Position.ticker == ticker.upper(), Position.status == "OPEN", Position.is_live == True)
             )
             if pos_res.scalars().first():
                 return {"success": False, "message": f"Active position already exists for {ticker.upper()}."}
 
             res = await session.execute(
-                select(OrderTrigger).where(OrderTrigger.ticker == ticker.upper(), OrderTrigger.status == "PENDING")
+                select(OrderTrigger).where(OrderTrigger.ticker == ticker.upper(), OrderTrigger.status == "PENDING", OrderTrigger.is_live == True)
             )
             if res.scalars().first():
                 return {"success": False, "message": f"A pending trigger already exists for {ticker.upper()}."}
 
-            snap_res = await session.execute(select(PortfolioSnapshot).order_by(desc(PortfolioSnapshot.timestamp)))
+            snap_res = await session.execute(
+                select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True).order_by(desc(PortfolioSnapshot.timestamp))
+            )
             snapshot = snap_res.scalars().first()
-            cash_eur = snapshot.cash_eur if snapshot else settings.INITIAL_PAPER_CAPITAL
+            cash_eur = snapshot.cash_eur if snapshot else 0.0
 
-            pending_res = await session.execute(select(OrderTrigger).where(OrderTrigger.status == "PENDING"))
+            pending_res = await session.execute(select(OrderTrigger).where(OrderTrigger.status == "PENDING", OrderTrigger.is_live == True))
             pending_triggers = pending_res.scalars().all()
             pending_alloc = sum(t.allocation_eur for t in pending_triggers)
             available_cash = round(max(0.0, cash_eur - pending_alloc), 2)
 
             # Apply full budget utilization
             if (allocation_eur is None or allocation_eur <= 0) or settings.FULL_BUDGET_UTILIZATION:
-                pos_count_res = await session.execute(select(Position).where(Position.status == "OPEN"))
+                pos_count_res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == True))
                 current_open = len(pos_count_res.scalars().all())
                 calc_alloc = calculate_position_allocation(
                     available_cash=available_cash,
@@ -621,15 +687,37 @@ class LiveBroker(BaseBroker):
             return {"success": True, "message": f"Trigger #{trigger_id} for {trigger.ticker} cancelled."}
 
     async def get_triggers(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Retrieves order triggers."""
+        """Retrieves order triggers with current price and live distance % calculations."""
         async with AsyncSessionLocal() as session:
             query = select(OrderTrigger).order_by(desc(OrderTrigger.created_at))
             if status:
                 query = query.where(OrderTrigger.status == status.upper())
             res = await session.execute(query)
             triggers = res.scalars().all()
-            return [
-                {
+            if not triggers:
+                return []
+
+            unique_tickers = list({(t.ticker, t.currency) for t in triggers if t.status == "PENDING"})
+            ib_prices = await self._fetch_ibkr_prices(unique_tickers) if unique_tickers else {}
+
+            results = []
+            quote_cache = {}
+            for t in triggers:
+                curr_price = ib_prices.get(t.ticker)
+                if not curr_price:
+                    is_open, _ = check_market_hours(t.ticker)
+                    if not is_open:
+                        curr_price = t.current_price_at_creation
+                    else:
+                        if t.ticker not in quote_cache:
+                            quote_cache[t.ticker] = await asyncio.to_thread(market_data_provider.get_stock_data, t.ticker)
+                        latest_data = quote_cache[t.ticker]
+                        curr_price = latest_data["price"] if latest_data else t.current_price_at_creation
+
+                curr_price = curr_price or t.current_price_at_creation or t.target_price
+                dist_pct = round(((t.target_price / curr_price) - 1.0) * 100, 2) if curr_price > 0 else 0.0
+
+                results.append({
                     "id": t.id,
                     "ticker": t.ticker,
                     "name": t.name,
@@ -637,6 +725,8 @@ class LiveBroker(BaseBroker):
                     "trigger_type": t.trigger_type,
                     "target_price": round(t.target_price, 2),
                     "current_price_at_creation": round(t.current_price_at_creation, 2),
+                    "current_price": round(curr_price, 2),
+                    "distance_pct": dist_pct,
                     "stop_loss": round(t.stop_loss, 2) if t.stop_loss else None,
                     "take_profit": round(t.take_profit, 2) if t.take_profit else None,
                     "allocation_eur": round(t.allocation_eur, 2),
@@ -646,14 +736,13 @@ class LiveBroker(BaseBroker):
                     "is_live": t.is_live,
                     "created_at": t.created_at.strftime("%Y-%m-%d %H:%M") if t.created_at else "",
                     "triggered_at": t.triggered_at.strftime("%Y-%m-%d %H:%M") if t.triggered_at else None
-                }
-                for t in triggers
-            ]
+                })
+            return results
 
     async def check_and_execute_triggers(self) -> List[Dict[str, Any]]:
         """Evaluates pending triggers and executes live orders when conditions are met."""
         async with AsyncSessionLocal() as session:
-            res = await session.execute(select(OrderTrigger).where(OrderTrigger.status == "PENDING"))
+            res = await session.execute(select(OrderTrigger).where(OrderTrigger.status == "PENDING", OrderTrigger.is_live == True))
             pending = res.scalars().all()
             if not pending:
                 return []
@@ -664,10 +753,16 @@ class LiveBroker(BaseBroker):
                 if not is_open:
                     continue
 
-                data = await asyncio.to_thread(market_data_provider.get_stock_data, t.ticker)
-                if not data:
+                curr_price = None
+                if settings.LIVE_BROKER.lower() == "ibkr":
+                    ib_prices = await self._fetch_ibkr_prices([(t.ticker, t.currency)])
+                    curr_price = ib_prices.get(t.ticker)
+                if not curr_price:
+                    data = await asyncio.to_thread(market_data_provider.get_stock_data, t.ticker)
+                    if data:
+                        curr_price = data["price"]
+                if not curr_price:
                     continue
-                curr_price = data["price"]
 
                 condition_met = False
                 if t.trigger_type == "LIMIT_PULLBACK" and curr_price <= t.target_price:
@@ -703,7 +798,7 @@ class LiveBroker(BaseBroker):
         await self.refresh_positions_pnl()
         triggered = []
         async with AsyncSessionLocal() as session:
-            res = await session.execute(select(Position).where(Position.status == "OPEN"))
+            res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == True))
             positions = res.scalars().all()
             tickers_to_close = []
 
@@ -728,20 +823,27 @@ class LiveBroker(BaseBroker):
                 return
 
             async with AsyncSessionLocal() as session:
-                res = await session.execute(select(Position).where(Position.status == "OPEN"))
+                res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == True))
                 positions = res.scalars().all()
                 if not positions:
                     self._last_pnl_refresh = now
                     return
+
+                unique_pos = list({(p.ticker, p.currency) for p in positions})
+                ib_prices = await self._fetch_ibkr_prices(unique_pos) if (unique_pos and settings.LIVE_BROKER.lower() == "ibkr") else {}
 
                 for p in positions:
                     is_open, _ = check_market_hours(p.ticker)
                     if not is_open and p.current_price_native and p.current_price_native > 0:
                         continue
 
-                    data = await asyncio.to_thread(market_data_provider.get_stock_data, p.ticker)
-                    if data:
-                        curr_price = data["price"]
+                    curr_price = ib_prices.get(p.ticker)
+                    if not curr_price:
+                        data = await asyncio.to_thread(market_data_provider.get_stock_data, p.ticker)
+                        if data:
+                            curr_price = data["price"]
+
+                    if curr_price:
                         p.current_price_native = curr_price
                         p.current_price_eur = currency_service.to_eur(curr_price, p.currency)
                         curr_val_eur = p.current_price_eur * p.shares
@@ -757,6 +859,113 @@ class LiveBroker(BaseBroker):
         and aligns the local database snapshot.
         """
         logger.info(f"Syncing account state with {settings.LIVE_BROKER.upper()}...")
+        broker = settings.LIVE_BROKER.lower()
+        if broker == "ibkr":
+            try:
+                from ib_async import IB
+                ib = IB()
+                await ib.connectAsync(
+                    host=settings.IBKR_HOST,
+                    port=settings.IBKR_PORT,
+                    clientId=settings.IBKR_CLIENT_ID + 10,
+                    timeout=5
+                )
+                summary_items = await ib.accountSummaryAsync()
+                ib_cash = None
+                ib_total = None
+                ib_equity = None
+                for s in summary_items:
+                    if s.currency in (settings.BASE_CURRENCY, "EUR", "BASE"):
+                        if s.tag in ("TotalCashValue", "CashBalance") and ib_cash is None:
+                            ib_cash = float(s.value)
+                        elif s.tag == "NetLiquidation" and ib_total is None:
+                            ib_total = float(s.value)
+                        elif s.tag == "GrossPositionValue" and ib_equity is None:
+                            ib_equity = float(s.value)
+
+                ib_positions = ib.positions()
+                ib.disconnect()
+
+                async with AsyncSessionLocal() as session:
+                    res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == True))
+                    existing_live = {p.ticker: p for p in res.scalars().all()}
+
+                    ib_tickers = set()
+                    for p in ib_positions:
+                        sym = p.contract.symbol.upper()
+                        ib_tickers.add(sym)
+                        shares = float(p.position)
+                        cost_native = float(p.avgCost)
+                        curr_code = p.contract.currency or "USD"
+                        cost_eur = currency_service.to_eur(cost_native, curr_code) * shares
+                        if sym in existing_live:
+                            pos = existing_live[sym]
+                            pos.shares = shares
+                            pos.cost_basis_eur = cost_eur
+                        else:
+                            new_pos = Position(
+                                ticker=sym,
+                                name=sym,
+                                currency=curr_code,
+                                shares=shares,
+                                entry_price_native=cost_native,
+                                current_price_native=cost_native,
+                                highest_price_native=cost_native,
+                                entry_price_eur=currency_service.to_eur(cost_native, curr_code),
+                                current_price_eur=currency_service.to_eur(cost_native, curr_code),
+                                cost_basis_eur=cost_eur,
+                                status="OPEN",
+                                is_live=True
+                            )
+                            session.add(new_pos)
+
+                    for sym, pos in existing_live.items():
+                        if sym not in ib_tickers:
+                            pos.status = "CLOSED"
+
+                    if ib_cash is not None:
+                        equity_val = ib_equity if ib_equity is not None else 0.0
+                        total_val = ib_total if ib_total is not None else (ib_cash + equity_val)
+                        snapshot = PortfolioSnapshot(
+                            cash_eur=ib_cash,
+                            equity_eur=equity_val,
+                            total_value_eur=total_val,
+                            daily_pnl_eur=0.0,
+                            daily_pnl_pct=0.0,
+                            open_positions_count=len(ib_positions),
+                            is_live=True
+                        )
+                        session.add(snapshot)
+                    await session.commit()
+            except Exception as e:
+                logger.warning(f"IBKR sync communication note: {e}")
+        elif broker == "alpaca":
+            try:
+                from alpaca.trading.client import TradingClient
+                if settings.ALPACA_API_KEY and settings.ALPACA_SECRET_KEY:
+                    client = TradingClient(
+                        api_key=settings.ALPACA_API_KEY,
+                        secret_key=settings.ALPACA_SECRET_KEY,
+                        paper=not settings.LIVE_TRADING_ENABLED
+                    )
+                    acct = client.get_account()
+                    alpaca_cash = float(acct.cash)
+                    alpaca_portfolio = float(acct.portfolio_value)
+                    async with AsyncSessionLocal() as session:
+                        snapshot = PortfolioSnapshot(
+                            cash_eur=alpaca_cash,
+                            equity_eur=alpaca_portfolio - alpaca_cash,
+                            total_value_eur=alpaca_portfolio,
+                            daily_pnl_eur=0.0,
+                            daily_pnl_pct=0.0,
+                            open_positions_count=0,
+                            is_live=True
+                        )
+                        session.add(snapshot)
+                        await session.commit()
+            except Exception as e:
+                logger.warning(f"Alpaca sync communication note: {e}")
+
         await self.refresh_positions_pnl()
         summary = await self.get_portfolio_summary()
         logger.info(

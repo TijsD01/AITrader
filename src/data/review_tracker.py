@@ -241,17 +241,22 @@ class ReviewTracker:
         best_pick = max(tracked_picks, key=lambda x: x["pnl_pct"]) if tracked_picks else None
         worst_pick = min(tracked_picks, key=lambda x: x["pnl_pct"]) if tracked_picks else None
 
-        # 3. Portfolio Evolution
-        oldest_digest = digests[-1]
-        oldest_state = oldest_digest.portfolio_state or {}
-        old_val = oldest_state.get("total_value_eur") or 10000.0
+        # 3. Dynamic Mode-Aware Portfolio Evolution
+        from src.trading.broker import active_broker
+        curr_summary = await active_broker.get_portfolio_summary()
+        curr_val = curr_summary.get("total_value_eur", 0.0)
+        curr_mode = curr_summary.get("trading_mode", "PAPER")
 
-        async with AsyncSessionLocal() as session:
-            latest_snap_res = await session.execute(
-                select(PortfolioSnapshot).order_by(desc(PortfolioSnapshot.timestamp))
-            )
-            latest_snap = latest_snap_res.scalars().first()
-            curr_val = latest_snap.total_value_eur if latest_snap else old_val
+        matching_digests = [
+            d for d in digests
+            if (d.portfolio_state or {}).get("trading_mode", "PAPER") == curr_mode
+        ]
+
+        if matching_digests:
+            oldest_matching = matching_digests[-1]
+            old_val = (oldest_matching.portfolio_state or {}).get("total_value_eur") or curr_val
+        else:
+            old_val = curr_summary.get("initial_capital_eur") or curr_val
 
         delta_val = round(curr_val - old_val, 2)
         delta_pct = round(((curr_val / old_val) - 1.0) * 100, 2) if old_val > 0 else 0.0

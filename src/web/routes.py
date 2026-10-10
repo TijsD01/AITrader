@@ -58,6 +58,8 @@ class SettingsUpdateRequest(BaseModel):
     gemini_api_key: Optional[str] = None
     telegram_bot_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
+    trading_mode: Optional[str] = None
+    live_trading_enabled: Optional[bool] = None
 
 @router.get("/api/market-status")
 async def get_market_status():
@@ -66,16 +68,23 @@ async def get_market_status():
 # 1. Portfolio & Metrics
 @router.get("/api/portfolio")
 async def get_portfolio():
-    return await paper_broker.get_portfolio_summary()
+    return await active_broker.get_portfolio_summary()
+
+@router.api_route("/api/portfolio/sync", methods=["GET", "POST"])
+async def sync_portfolio():
+    return await active_broker.sync_account_state()
 
 @router.get("/api/positions")
 async def get_positions():
-    return await paper_broker.get_positions()
+    return await active_broker.get_positions()
 
 @router.get("/api/trades")
 async def get_trades(limit: int = 30):
     async with AsyncSessionLocal() as session:
-        res = await session.execute(select(Trade).order_by(desc(Trade.executed_at)).limit(limit))
+        is_live = settings.TRADING_MODE.upper() == "LIVE" and settings.LIVE_TRADING_ENABLED and not settings.KILL_SWITCH_ACTIVE
+        res = await session.execute(
+            select(Trade).where(Trade.is_live == is_live).order_by(desc(Trade.executed_at)).limit(limit)
+        )
         trades = res.scalars().all()
         return [
             {
@@ -182,7 +191,7 @@ async def manual_buy(req: BuyRequest):
     if not data:
         raise HTTPException(status_code=404, detail=f"Stock data not found for '{ticker}'.")
 
-    summary = await paper_broker.get_portfolio_summary()
+    summary = await active_broker.get_portfolio_summary()
     available_cash = summary.get("available_cash_eur", 0.0)
     if available_cash < 20.0:
         raise HTTPException(status_code=400, detail=f"Insufficient available cash (€{available_cash:.2f}) to execute buy order.")
@@ -190,7 +199,7 @@ async def manual_buy(req: BuyRequest):
     report = await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
     alloc_eur = _calculate_safe_allocation(available_cash, req.allocation_eur, report["risk"], summary.get("open_positions_count", 0))
 
-    res = await paper_broker.execute_buy(
+    res = await active_broker.execute_buy(
         ticker=ticker,
         name=data.get("name", ticker),
         price_native=data["price"],
@@ -215,7 +224,7 @@ async def manual_sell(req: SellRequest):
     if not is_open:
         raise HTTPException(status_code=400, detail=open_msg)
 
-    res = await paper_broker.execute_sell(ticker, reason=req.reason)
+    res = await active_broker.execute_sell(ticker, reason=req.reason)
     if not res.get("success"):
         raise HTTPException(status_code=400, detail=res.get("message"))
     return res
@@ -371,6 +380,8 @@ async def get_settings():
             "base_currency": settings.BASE_CURRENCY,
             "max_positions": settings.MAX_POSITIONS,
             "llm_provider": settings.LLM_PROVIDER,
+            "trading_mode": settings.TRADING_MODE,
+            "live_trading_enabled": settings.LIVE_TRADING_ENABLED,
             "has_antigravity": bool(settings.LLM_PROVIDER == "antigravity" and llm_client.has_active_key()),
             "has_gemini_key": bool(settings.GEMINI_API_KEY and not settings.GEMINI_API_KEY.startswith("your_")),
             "has_telegram": bool(settings.TELEGRAM_BOT_TOKEN and not settings.TELEGRAM_BOT_TOKEN.startswith("your_"))
@@ -416,6 +427,29 @@ async def update_settings(req: SettingsUpdateRequest):
             else:
                 session.add(SystemConfig(key="ENFORCE_MARKET_HOURS", value=val))
             settings.ENFORCE_MARKET_HOURS = req.enforce_market_hours
+
+        if req.trading_mode is not None:
+            mode_val = req.trading_mode.strip().upper()
+            if mode_val in ("PAPER", "LIVE"):
+                settings.TRADING_MODE = mode_val
+                if mode_val == "LIVE" and req.live_trading_enabled is None:
+                    settings.LIVE_TRADING_ENABLED = True
+                res = await session.execute(select(SystemConfig).where(SystemConfig.key == "TRADING_MODE"))
+                cfg = res.scalars().first()
+                if cfg:
+                    cfg.value = mode_val
+                else:
+                    session.add(SystemConfig(key="TRADING_MODE", value=mode_val))
+
+        if req.live_trading_enabled is not None:
+            settings.LIVE_TRADING_ENABLED = req.live_trading_enabled
+            res = await session.execute(select(SystemConfig).where(SystemConfig.key == "LIVE_TRADING_ENABLED"))
+            cfg = res.scalars().first()
+            val = str(req.live_trading_enabled).lower()
+            if cfg:
+                cfg.value = val
+            else:
+                session.add(SystemConfig(key="LIVE_TRADING_ENABLED", value=val))
 
         await session.commit()
     return {"success": True, "message": "Settings updated successfully."}

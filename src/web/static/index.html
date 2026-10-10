@@ -41,9 +41,9 @@
       </div>
       <div>
         <h1 class="text-base sm:text-lg font-bold tracking-tight text-white flex items-center gap-2">
-          AlphaAgent <span class="text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-semibold">Multi-Agent</span>
+          AlphaAgent <span id="tradingModeBadge" class="text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-semibold uppercase">PAPER</span>
         </h1>
-        <p class="text-xs text-slate-400 hidden sm:block">Autonomous Hedge Fund Committee & Paper Trading</p>
+        <p class="text-xs text-slate-400 hidden sm:block">Autonomous Hedge Fund Committee & Multi-Agent Trading</p>
       </div>
     </div>
 
@@ -138,7 +138,7 @@
         <div class="bg-cardBg border border-borderCol rounded-xl p-4 shadow-sm relative overflow-hidden">
           <div class="text-xs text-slate-400 font-medium">Unrealized PnL</div>
           <div id="metricUnrealizedPnl" class="text-xl sm:text-2xl font-bold mt-1 text-slate-300">€0.00</div>
-          <div class="text-xs text-slate-400 mt-2">Open paper positions</div>
+          <div id="metricUnrealizedPnlSub" class="text-xs text-slate-400 mt-2">Open paper positions</div>
           <div class="absolute -right-2 -bottom-2 opacity-5 text-4xl text-amber-400">
             <i class="fa-solid fa-scale-balanced"></i>
           </div>
@@ -562,11 +562,23 @@
           <i class="fa-solid fa-sliders text-emerald-400"></i> Trading & Risk Settings
         </h2>
 
+        <!-- Trading Mode (Paper vs Live) -->
+        <div class="flex items-center justify-between border-b border-borderCol/60 pb-4">
+          <div>
+            <label class="text-sm font-semibold text-white">Execution Mode</label>
+            <p class="text-xs text-slate-400">Switch dynamically between Paper Simulation and Live Broker execution.</p>
+          </div>
+          <select id="settingTradingMode" onchange="saveSettings()" class="bg-slate-800 border border-slate-700 text-white text-xs rounded-lg px-3 py-1.5 focus:outline-none focus:border-emerald-500 font-medium">
+            <option value="PAPER">Paper Trading</option>
+            <option value="LIVE">Live Trading (IBKR)</option>
+          </select>
+        </div>
+
         <!-- Auto-Buy Toggle -->
         <div class="flex items-center justify-between">
           <div>
             <label class="text-sm font-semibold text-white">Automated Buying</label>
-            <p class="text-xs text-slate-400">Allow agent committee to automatically place paper buy orders on high conviction signals.</p>
+            <p class="text-xs text-slate-400">Allow agent committee to automatically place buy orders on high conviction signals.</p>
           </div>
           <input type="checkbox" id="settingAutoBuy" onchange="saveSettings()" class="w-5 h-5 accent-emerald-500 rounded cursor-pointer">
         </div>
