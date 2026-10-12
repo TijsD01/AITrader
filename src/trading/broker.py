@@ -28,6 +28,16 @@ class ActiveBrokerProxy:
 
 active_broker = ActiveBrokerProxy()
 
+async def check_broker_status(force: bool = False, probe_live: bool = False) -> Dict[str, Any]:
+    """
+    Checks connection status.
+    If probe_live is True, explicitly probes the LiveBroker even when currently in paper mode.
+    Otherwise checks the currently active broker.
+    """
+    if probe_live:
+        return await live_broker.check_connection(force=force)
+    return await active_broker.check_connection(force=force)
+
 __all__ = [
     "BaseBroker",
     "PaperBroker",
@@ -35,5 +45,6 @@ __all__ = [
     "paper_broker",
     "live_broker",
     "get_active_broker",
-    "active_broker"
+    "active_broker",
+    "check_broker_status"
 ]

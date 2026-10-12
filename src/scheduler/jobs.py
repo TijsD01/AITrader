@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 class TradingScheduler:
     def __init__(self):
         self.scheduler = AsyncIOScheduler(timezone=settings.TIMEZONE)
+        # Serializes trigger/stop checks so a manual refresh cannot overlap a scheduled run
+        self._monitor_lock = asyncio.Lock()
 
     async def _scheduled_market_session(self, market: str, session: str):
         """Safeguard for scheduled cron jobs: only run on weekdays."""
@@ -363,23 +365,91 @@ class TradingScheduler:
         except Exception as session_err:
             logger.error(f"Error in run_market_session({market}, {session}): {session_err}", exc_info=True)
 
-    async def monitor_open_positions(self):
+    async def monitor_open_positions(self) -> List[Dict[str, Any]]:
         """Monitors open positions for stop-loss and take-profit triggers."""
+        async with self._monitor_lock:
+            return await self._check_stops_and_targets()
+
+    async def _check_stops_and_targets(self) -> List[Dict[str, Any]]:
         try:
             triggered_sells = await paper_broker.check_stops_and_targets()
             if triggered_sells:
                 logger.info(f"Position monitor processed {len(triggered_sells)} exits: {[s.get('ticker') for s in triggered_sells]}")
+            return triggered_sells
         except Exception as e:
             logger.error(f"Error checking stops and targets: {e}")
+            return []
 
-    async def monitor_price_triggers(self):
-        """Monitors pending order triggers and executes automatic buys when price levels are hit."""
+    async def monitor_price_triggers(self) -> List[Dict[str, Any]]:
+        """Syncs the account balance, then executes automatic buys for pending triggers whose price levels are hit."""
+        async with self._monitor_lock:
+            try:
+                # Cash only: the full sync reconciles positions and is reserved for manual refreshes
+                await paper_broker.sync_cash_balance()
+            except Exception as e:
+                logger.error(f"Cash balance sync failed, continuing with last known balance: {e}")
+            return await self._check_price_triggers()
+
+    async def _sync_account_balance(self) -> Dict[str, Any]:
+        """Runs the full broker sync (cash and positions) for a manual refresh."""
+        try:
+            return await paper_broker.sync_account_state()
+        except Exception as e:
+            logger.error(f"Account balance sync failed, continuing with last known balance: {e}")
+            return {}
+
+    async def _check_price_triggers(self) -> List[Dict[str, Any]]:
         try:
             executed_triggers = await paper_broker.check_and_execute_triggers()
             for t in executed_triggers:
                 await telegram_bot.notify_trigger_executed(t)
+            return executed_triggers
         except Exception as e:
             logger.error(f"Error checking and executing price triggers: {e}")
+            return []
+
+    @staticmethod
+    async def _pending_trigger_allocations(db_session) -> Dict[int, tuple]:
+        """Returns {trigger_id: (ticker, allocation_eur)} for all pending triggers."""
+        res = await db_session.execute(
+            select(OrderTrigger.id, OrderTrigger.ticker, OrderTrigger.allocation_eur).where(OrderTrigger.status == "PENDING")
+        )
+        return {tid: (ticker, alloc) for tid, ticker, alloc in res.all()}
+
+    async def refresh_market_data_now(self) -> Dict[str, Any]:
+        """
+        Manual market data pull: drops cached quotes for held positions and pending triggers,
+        syncs the account balance, resizes triggers, then runs the trigger and stop/target checks.
+        """
+        async with self._monitor_lock:
+            async with AsyncSessionLocal() as db_session:
+                pos_res = await db_session.execute(select(Position.ticker).where(Position.status == "OPEN"))
+                allocs_before = await self._pending_trigger_allocations(db_session)
+                tickers = set(pos_res.scalars().all()) | {ticker for ticker, _ in allocs_before.values()}
+
+            market_data_provider.invalidate(tickers)
+            get_active_broker()._last_pnl_refresh = 0.0
+
+            # The balance sync resizes triggers as part of its portfolio summary
+            summary = await self._sync_account_balance()
+            async with AsyncSessionLocal() as db_session:
+                allocs_after = await self._pending_trigger_allocations(db_session)
+            resized = [tid for tid, alloc in allocs_after.items() if allocs_before.get(tid) != alloc]
+            executed = await self._check_price_triggers()
+            closed = await self._check_stops_and_targets()
+
+            logger.info(
+                f"Manual market data refresh: {len(tickers)} tickers, {len(resized)} triggers resized, "
+                f"{len(executed)} triggers executed, {len(closed)} positions closed."
+            )
+            return {
+                "success": True,
+                "tickers_refreshed": len(tickers),
+                "triggers_resized": len(resized),
+                "triggers_executed": len(executed),
+                "positions_closed": len(closed),
+                "cash_eur": summary.get("cash_eur"),
+            }
 
     async def scan_market_opportunities(self):
         """

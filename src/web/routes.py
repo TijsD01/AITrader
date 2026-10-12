@@ -5,10 +5,10 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select, desc
 
-from config.settings import settings
+from config.settings import settings, update_env_file
 from src.db.session import AsyncSessionLocal
 from src.db.models import Position, Trade, PortfolioSnapshot, AnalysisReport, WatchlistItem, SystemConfig, MarketDigest, TradeLesson
-from src.trading.broker import active_broker as paper_broker, get_active_broker, active_broker, live_broker
+from src.trading.broker import active_broker as paper_broker, get_active_broker, active_broker, live_broker, check_broker_status
 from src.trading.risk import calculate_position_allocation
 from src.data.market import market_data_provider
 from src.screener.scanner import market_scanner
@@ -54,16 +54,42 @@ class SettingsUpdateRequest(BaseModel):
     min_consensus_score: Optional[int] = None
     trigger_min_score: Optional[int] = None
     position_size_pct: Optional[float] = None
+    max_positions: Optional[int] = None
     enforce_market_hours: Optional[bool] = None
     gemini_api_key: Optional[str] = None
     telegram_bot_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
     trading_mode: Optional[str] = None
     live_trading_enabled: Optional[bool] = None
+    max_capital_usage_pct: Optional[float] = None
+    max_deployable_capital_eur: Optional[float] = None
+    clear_max_deployable_capital: Optional[bool] = None
+    ibkr_host: Optional[str] = None
+    ibkr_port: Optional[int] = None
+    ibkr_client_id: Optional[int] = None
+    ibkr_account_id: Optional[str] = None
+    ibkr_pricing_tier: Optional[str] = None
+    max_fee_drag_pct: Optional[float] = None
 
 @router.get("/api/market-status")
 async def get_market_status():
     return get_market_statuses()
+
+@router.get("/api/broker/status")
+async def get_broker_status(probe_live: bool = False, force: bool = False):
+    """Returns active broker connection status, latency, and diagnostics."""
+    return await check_broker_status(force=force, probe_live=probe_live)
+
+@router.post("/api/broker/ping")
+async def ping_broker(probe_live: bool = False):
+    """Forces an immediate connectivity ping to the broker."""
+    return await check_broker_status(force=True, probe_live=probe_live)
+
+@router.post("/api/broker/reconnect")
+async def reconnect_broker():
+    """Forces an immediate disconnection and fresh reconnect to the live broker."""
+    return await live_broker.reconnect()
+
 
 # 1. Portfolio & Metrics
 @router.get("/api/portfolio")
@@ -97,6 +123,7 @@ async def get_trades(limit: int = 30):
                 "price_eur": round(t.price_eur, 2),
                 "currency": t.currency,
                 "total_eur": round(t.total_eur, 2),
+                "fee_eur": round(t.fee_eur, 2) if hasattr(t, "fee_eur") and t.fee_eur is not None else 0.0,
                 "realized_pnl_eur": round(t.realized_pnl_eur, 2) if t.realized_pnl_eur is not None else None,
                 "realized_pnl_pct": round(t.realized_pnl_pct, 2) if t.realized_pnl_pct is not None else None,
                 "consensus_score": t.consensus_score,
@@ -169,13 +196,22 @@ async def get_screener_candidates(market: str = "ALL"):
     return await asyncio.to_thread(market_scanner.scan_universe, market=market, limit=12)
 
 # 5. Trading Actions
-def _calculate_safe_allocation(available_cash: float, requested_alloc: Optional[float], risk_rep: Dict[str, Any], current_positions_count: int = 0) -> float:
+def _calculate_safe_allocation(
+    available_cash: float,
+    requested_alloc: Optional[float],
+    risk_rep: Dict[str, Any],
+    current_positions_count: int = 0,
+    ticker: Optional[str] = None,
+    currency: Optional[str] = None
+) -> float:
     return calculate_position_allocation(
         available_cash=available_cash,
         current_positions_count=current_positions_count,
         requested_alloc=requested_alloc,
         recommended_size_pct=risk_rep.get("recommended_size_pct"),
-        full_budget_utilization=settings.FULL_BUDGET_UTILIZATION
+        full_budget_utilization=settings.FULL_BUDGET_UTILIZATION,
+        ticker=ticker,
+        currency=currency
     )
 
 @router.post("/api/trade/buy")
@@ -197,7 +233,14 @@ async def manual_buy(req: BuyRequest):
         raise HTTPException(status_code=400, detail=f"Insufficient available cash (€{available_cash:.2f}) to execute buy order.")
 
     report = await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
-    alloc_eur = _calculate_safe_allocation(available_cash, req.allocation_eur, report["risk"], summary.get("open_positions_count", 0))
+    alloc_eur = _calculate_safe_allocation(
+        available_cash,
+        req.allocation_eur,
+        report["risk"],
+        summary.get("open_positions_count", 0),
+        ticker=ticker,
+        currency=data.get("currency")
+    )
 
     res = await active_broker.execute_buy(
         ticker=ticker,
@@ -232,7 +275,7 @@ async def manual_sell(req: SellRequest):
 # 5b. AI Order Triggers (Limit Pullback & Breakout Buy Orders)
 @router.get("/api/triggers")
 async def get_triggers(status: Optional[str] = None):
-    return await paper_broker.get_triggers(status=status)
+    return await active_broker.get_triggers(status=status)
 
 @router.post("/api/triggers")
 async def create_trigger(req: CreateTriggerRequest):
@@ -241,7 +284,7 @@ async def create_trigger(req: CreateTriggerRequest):
     if not data:
         raise HTTPException(status_code=404, detail=f"Market data not found for '{ticker}'.")
 
-    summary = await paper_broker.get_portfolio_summary()
+    summary = await active_broker.get_portfolio_summary()
     available_cash = summary.get("available_cash_eur", 0.0)
     if available_cash < 20.0:
         raise HTTPException(status_code=400, detail=f"Insufficient available cash (€{available_cash:.2f}) to arm trigger.")
@@ -250,12 +293,19 @@ async def create_trigger(req: CreateTriggerRequest):
 
     target_price = req.target_price or report.get("entry_trigger_price", data["price"])
     trigger_type = req.trigger_type or report.get("trigger_type", "LIMIT_PULLBACK")
-    alloc_eur = _calculate_safe_allocation(available_cash, req.allocation_eur, report["risk"], summary.get("open_positions_count", 0))
+    alloc_eur = _calculate_safe_allocation(
+        available_cash,
+        req.allocation_eur,
+        report["risk"],
+        summary.get("open_positions_count", 0),
+        ticker=ticker,
+        currency=data.get("currency")
+    )
     sl = req.stop_loss or report["risk"]["stop_loss_price"]
     tp = req.take_profit or report["risk"]["take_profit_price"]
     rationale = req.ai_rationale or report.get("trigger_rationale", report["summary"])
 
-    res = await paper_broker.create_price_trigger(
+    res = await active_broker.create_price_trigger(
         ticker=ticker,
         name=data.get("name", ticker),
         currency=data["currency"],
@@ -280,7 +330,7 @@ async def create_trigger_from_ai(req: CreateTriggerFromAIRequest):
     if not data:
         raise HTTPException(status_code=404, detail=f"Market data not found for '{ticker}'.")
 
-    summary = await paper_broker.get_portfolio_summary()
+    summary = await active_broker.get_portfolio_summary()
     available_cash = summary.get("available_cash_eur", 0.0)
     if available_cash < 20.0:
         raise HTTPException(status_code=400, detail=f"Insufficient available cash (€{available_cash:.2f}) to arm trigger.")
@@ -289,10 +339,17 @@ async def create_trigger_from_ai(req: CreateTriggerFromAIRequest):
 
     trigger_price = report.get("entry_trigger_price", data["price"])
     trigger_type = report.get("trigger_type", "LIMIT_PULLBACK")
-    alloc_eur = _calculate_safe_allocation(available_cash, req.allocation_eur, report["risk"], summary.get("open_positions_count", 0))
+    alloc_eur = _calculate_safe_allocation(
+        available_cash,
+        req.allocation_eur,
+        report["risk"],
+        summary.get("open_positions_count", 0),
+        ticker=ticker,
+        currency=data.get("currency")
+    )
     rationale = report.get("trigger_rationale", report["summary"])
 
-    res = await paper_broker.create_price_trigger(
+    res = await active_broker.create_price_trigger(
         ticker=ticker,
         name=data.get("name", ticker),
         currency=data["currency"],
@@ -316,7 +373,7 @@ async def create_trigger_from_ai(req: CreateTriggerFromAIRequest):
 
 @router.delete("/api/triggers/{trigger_id}")
 async def cancel_trigger(trigger_id: int):
-    res = await paper_broker.cancel_price_trigger(trigger_id)
+    res = await active_broker.cancel_price_trigger(trigger_id)
     if not res.get("success"):
         raise HTTPException(status_code=400, detail=res.get("message"))
     return res
@@ -368,20 +425,31 @@ async def get_settings():
     async with AsyncSessionLocal() as session:
         cfg_res = await session.execute(select(SystemConfig))
         configs = {c.key: c.value for c in cfg_res.scalars().all()}
+        raw_cap = configs.get("MAX_DEPLOYABLE_CAPITAL_EUR")
+        cap_val = float(raw_cap) if raw_cap not in (None, "", "null", "None") else settings.MAX_DEPLOYABLE_CAPITAL_EUR
+
         return {
-            "auto_buy_enabled": configs.get("AUTO_BUY_ENABLED", "true") == "true",
+            "auto_buy_enabled": configs.get("AUTO_BUY_ENABLED", str(settings.AUTO_BUY_ENABLED)).lower() == "true",
             "min_consensus_score": int(configs.get("MIN_CONSENSUS_SCORE", settings.MIN_CONSENSUS_SCORE)),
             "trigger_min_score": int(configs.get("TRIGGER_MIN_SCORE", settings.TRIGGER_MIN_SCORE)),
             "position_size_pct": float(configs.get("POSITION_SIZE_PCT", settings.POSITION_SIZE_PCT)),
+            "max_capital_usage_pct": float(configs.get("MAX_CAPITAL_USAGE_PCT", settings.MAX_CAPITAL_USAGE_PCT)),
+            "max_deployable_capital_eur": cap_val,
             "atr_stop_multiplier": float(configs.get("ATR_STOP_MULTIPLIER", 1.75)),
             "take_profit_rr": float(configs.get("TAKE_PROFIT_RR", 2.1)),
             "breakeven_trigger_pct": float(configs.get("BREAKEVEN_TRIGGER_PCT", 0.025)),
-            "enforce_market_hours": configs.get("ENFORCE_MARKET_HOURS", "true") == "true",
+            "enforce_market_hours": configs.get("ENFORCE_MARKET_HOURS", str(settings.ENFORCE_MARKET_HOURS)).lower() == "true",
             "base_currency": settings.BASE_CURRENCY,
-            "max_positions": settings.MAX_POSITIONS,
+            "max_positions": int(configs.get("MAX_POSITIONS", settings.MAX_POSITIONS)),
             "llm_provider": settings.LLM_PROVIDER,
-            "trading_mode": settings.TRADING_MODE,
-            "live_trading_enabled": settings.LIVE_TRADING_ENABLED,
+            "trading_mode": configs.get("TRADING_MODE", settings.TRADING_MODE),
+            "live_trading_enabled": configs.get("LIVE_TRADING_ENABLED", str(settings.LIVE_TRADING_ENABLED)).lower() == "true",
+            "ibkr_host": configs.get("IBKR_HOST", settings.IBKR_HOST),
+            "ibkr_port": int(configs.get("IBKR_PORT", settings.IBKR_PORT)),
+            "ibkr_client_id": int(configs.get("IBKR_CLIENT_ID", settings.IBKR_CLIENT_ID)),
+            "ibkr_account_id": configs.get("IBKR_ACCOUNT_ID", settings.IBKR_ACCOUNT_ID or ""),
+            "ibkr_pricing_tier": configs.get("IBKR_PRICING_TIER", getattr(settings, "IBKR_PRICING_TIER", "tiered")),
+            "max_fee_drag_pct": float(configs.get("MAX_FEE_DRAG_PCT", getattr(settings, "MAX_FEE_DRAG_PCT", 3.5))),
             "has_antigravity": bool(settings.LLM_PROVIDER == "antigravity" and llm_client.has_active_key()),
             "has_gemini_key": bool(settings.GEMINI_API_KEY and not settings.GEMINI_API_KEY.startswith("your_")),
             "has_telegram": bool(settings.TELEGRAM_BOT_TOKEN and not settings.TELEGRAM_BOT_TOKEN.startswith("your_"))
@@ -389,6 +457,7 @@ async def get_settings():
 
 @router.post("/api/settings")
 async def update_settings(req: SettingsUpdateRequest):
+    env_updates: Dict[str, Any] = {}
     async with AsyncSessionLocal() as session:
         if req.auto_buy_enabled is not None:
             res = await session.execute(select(SystemConfig).where(SystemConfig.key == "AUTO_BUY_ENABLED"))
@@ -398,6 +467,8 @@ async def update_settings(req: SettingsUpdateRequest):
                 cfg.value = val
             else:
                 session.add(SystemConfig(key="AUTO_BUY_ENABLED", value=val))
+            settings.AUTO_BUY_ENABLED = bool(req.auto_buy_enabled)
+            env_updates["AUTO_BUY_ENABLED"] = bool(req.auto_buy_enabled)
 
         if req.min_consensus_score is not None:
             res = await session.execute(select(SystemConfig).where(SystemConfig.key == "MIN_CONSENSUS_SCORE"))
@@ -407,6 +478,8 @@ async def update_settings(req: SettingsUpdateRequest):
                 cfg.value = val
             else:
                 session.add(SystemConfig(key="MIN_CONSENSUS_SCORE", value=val))
+            settings.MIN_CONSENSUS_SCORE = int(req.min_consensus_score)
+            env_updates["MIN_CONSENSUS_SCORE"] = int(req.min_consensus_score)
 
         if req.trigger_min_score is not None:
             res = await session.execute(select(SystemConfig).where(SystemConfig.key == "TRIGGER_MIN_SCORE"))
@@ -416,7 +489,66 @@ async def update_settings(req: SettingsUpdateRequest):
                 cfg.value = val
             else:
                 session.add(SystemConfig(key="TRIGGER_MIN_SCORE", value=val))
-            settings.TRIGGER_MIN_SCORE = req.trigger_min_score
+            settings.TRIGGER_MIN_SCORE = int(req.trigger_min_score)
+            env_updates["TRIGGER_MIN_SCORE"] = int(req.trigger_min_score)
+
+        if req.position_size_pct is not None:
+            pos_val = max(0.01, min(1.0, float(req.position_size_pct)))
+            res = await session.execute(select(SystemConfig).where(SystemConfig.key == "POSITION_SIZE_PCT"))
+            cfg = res.scalars().first()
+            val = str(pos_val)
+            if cfg:
+                cfg.value = val
+            else:
+                session.add(SystemConfig(key="POSITION_SIZE_PCT", value=val))
+            settings.POSITION_SIZE_PCT = pos_val
+            env_updates["POSITION_SIZE_PCT"] = pos_val
+
+        if req.max_positions is not None:
+            pos_count = max(1, min(50, int(req.max_positions)))
+            res = await session.execute(select(SystemConfig).where(SystemConfig.key == "MAX_POSITIONS"))
+            cfg = res.scalars().first()
+            val = str(pos_count)
+            if cfg:
+                cfg.value = val
+            else:
+                session.add(SystemConfig(key="MAX_POSITIONS", value=val))
+            settings.MAX_POSITIONS = pos_count
+            env_updates["MAX_POSITIONS"] = pos_count
+
+        if req.max_capital_usage_pct is not None:
+            pct_val = max(10.0, min(100.0, float(req.max_capital_usage_pct)))
+            res = await session.execute(select(SystemConfig).where(SystemConfig.key == "MAX_CAPITAL_USAGE_PCT"))
+            cfg = res.scalars().first()
+            val = str(pct_val)
+            if cfg:
+                cfg.value = val
+            else:
+                session.add(SystemConfig(key="MAX_CAPITAL_USAGE_PCT", value=val))
+            settings.MAX_CAPITAL_USAGE_PCT = pct_val
+            env_updates["MAX_CAPITAL_USAGE_PCT"] = pct_val
+
+        if req.clear_max_deployable_capital:
+            settings.MAX_DEPLOYABLE_CAPITAL_EUR = None
+            res = await session.execute(select(SystemConfig).where(SystemConfig.key == "MAX_DEPLOYABLE_CAPITAL_EUR"))
+            cfg = res.scalars().first()
+            if cfg:
+                cfg.value = ""
+            env_updates["MAX_DEPLOYABLE_CAPITAL_EUR"] = ""
+        elif req.max_deployable_capital_eur is not None:
+            if req.max_deployable_capital_eur <= 0:
+                settings.MAX_DEPLOYABLE_CAPITAL_EUR = None
+                val = ""
+            else:
+                settings.MAX_DEPLOYABLE_CAPITAL_EUR = float(req.max_deployable_capital_eur)
+                val = str(settings.MAX_DEPLOYABLE_CAPITAL_EUR)
+            res = await session.execute(select(SystemConfig).where(SystemConfig.key == "MAX_DEPLOYABLE_CAPITAL_EUR"))
+            cfg = res.scalars().first()
+            if cfg:
+                cfg.value = val
+            else:
+                session.add(SystemConfig(key="MAX_DEPLOYABLE_CAPITAL_EUR", value=val))
+            env_updates["MAX_DEPLOYABLE_CAPITAL_EUR"] = val
 
         if req.enforce_market_hours is not None:
             res = await session.execute(select(SystemConfig).where(SystemConfig.key == "ENFORCE_MARKET_HOURS"))
@@ -426,14 +558,17 @@ async def update_settings(req: SettingsUpdateRequest):
                 cfg.value = val
             else:
                 session.add(SystemConfig(key="ENFORCE_MARKET_HOURS", value=val))
-            settings.ENFORCE_MARKET_HOURS = req.enforce_market_hours
+            settings.ENFORCE_MARKET_HOURS = bool(req.enforce_market_hours)
+            env_updates["ENFORCE_MARKET_HOURS"] = bool(req.enforce_market_hours)
 
         if req.trading_mode is not None:
             mode_val = req.trading_mode.strip().upper()
             if mode_val in ("PAPER", "LIVE"):
                 settings.TRADING_MODE = mode_val
+                env_updates["TRADING_MODE"] = mode_val
                 if mode_val == "LIVE" and req.live_trading_enabled is None:
                     settings.LIVE_TRADING_ENABLED = True
+                    env_updates["LIVE_TRADING_ENABLED"] = True
                 res = await session.execute(select(SystemConfig).where(SystemConfig.key == "TRADING_MODE"))
                 cfg = res.scalars().first()
                 if cfg:
@@ -442,7 +577,7 @@ async def update_settings(req: SettingsUpdateRequest):
                     session.add(SystemConfig(key="TRADING_MODE", value=mode_val))
 
         if req.live_trading_enabled is not None:
-            settings.LIVE_TRADING_ENABLED = req.live_trading_enabled
+            settings.LIVE_TRADING_ENABLED = bool(req.live_trading_enabled)
             res = await session.execute(select(SystemConfig).where(SystemConfig.key == "LIVE_TRADING_ENABLED"))
             cfg = res.scalars().first()
             val = str(req.live_trading_enabled).lower()
@@ -450,15 +585,117 @@ async def update_settings(req: SettingsUpdateRequest):
                 cfg.value = val
             else:
                 session.add(SystemConfig(key="LIVE_TRADING_ENABLED", value=val))
+            env_updates["LIVE_TRADING_ENABLED"] = bool(req.live_trading_enabled)
+
+        if req.ibkr_host is not None:
+            h = req.ibkr_host.strip()
+            if h:
+                settings.IBKR_HOST = h
+                res = await session.execute(select(SystemConfig).where(SystemConfig.key == "IBKR_HOST"))
+                cfg = res.scalars().first()
+                if cfg:
+                    cfg.value = h
+                else:
+                    session.add(SystemConfig(key="IBKR_HOST", value=h))
+                env_updates["IBKR_HOST"] = h
+
+        if req.ibkr_port is not None:
+            p = int(req.ibkr_port)
+            if p > 0:
+                settings.IBKR_PORT = p
+                res = await session.execute(select(SystemConfig).where(SystemConfig.key == "IBKR_PORT"))
+                cfg = res.scalars().first()
+                val = str(p)
+                if cfg:
+                    cfg.value = val
+                else:
+                    session.add(SystemConfig(key="IBKR_PORT", value=val))
+                env_updates["IBKR_PORT"] = p
+
+        if req.ibkr_client_id is not None:
+            cid = int(req.ibkr_client_id)
+            settings.IBKR_CLIENT_ID = cid
+            res = await session.execute(select(SystemConfig).where(SystemConfig.key == "IBKR_CLIENT_ID"))
+            cfg = res.scalars().first()
+            val = str(cid)
+            if cfg:
+                cfg.value = val
+            else:
+                session.add(SystemConfig(key="IBKR_CLIENT_ID", value=val))
+            env_updates["IBKR_CLIENT_ID"] = cid
+
+        if req.ibkr_account_id is not None:
+            acc = req.ibkr_account_id.strip()
+            settings.IBKR_ACCOUNT_ID = acc or None
+            res = await session.execute(select(SystemConfig).where(SystemConfig.key == "IBKR_ACCOUNT_ID"))
+            cfg = res.scalars().first()
+            val = acc or ""
+            if cfg:
+                cfg.value = val
+            else:
+                session.add(SystemConfig(key="IBKR_ACCOUNT_ID", value=val))
+            env_updates["IBKR_ACCOUNT_ID"] = val
+
+        if req.ibkr_pricing_tier is not None:
+            tier_val = req.ibkr_pricing_tier.strip().lower()
+            if tier_val in ("tiered", "fixed"):
+                settings.IBKR_PRICING_TIER = tier_val
+                res = await session.execute(select(SystemConfig).where(SystemConfig.key == "IBKR_PRICING_TIER"))
+                cfg = res.scalars().first()
+                if cfg:
+                    cfg.value = tier_val
+                else:
+                    session.add(SystemConfig(key="IBKR_PRICING_TIER", value=tier_val))
+                env_updates["IBKR_PRICING_TIER"] = tier_val
+
+        if req.max_fee_drag_pct is not None:
+            drag_val = float(req.max_fee_drag_pct)
+            if 0.5 <= drag_val <= 15.0:
+                settings.MAX_FEE_DRAG_PCT = drag_val
+                res = await session.execute(select(SystemConfig).where(SystemConfig.key == "MAX_FEE_DRAG_PCT"))
+                cfg = res.scalars().first()
+                if cfg:
+                    cfg.value = str(drag_val)
+                else:
+                    session.add(SystemConfig(key="MAX_FEE_DRAG_PCT", value=str(drag_val)))
+                env_updates["MAX_FEE_DRAG_PCT"] = drag_val
+
+        if req.gemini_api_key is not None:
+            gk = req.gemini_api_key.strip()
+            if gk:
+                settings.GEMINI_API_KEY = gk
+                env_updates["GEMINI_API_KEY"] = gk
+
+        if req.telegram_bot_token is not None:
+            tt = req.telegram_bot_token.strip()
+            if tt:
+                settings.TELEGRAM_BOT_TOKEN = tt
+                env_updates["TELEGRAM_BOT_TOKEN"] = tt
+
+        if req.telegram_chat_id is not None:
+            tc = req.telegram_chat_id.strip()
+            if tc:
+                settings.TELEGRAM_CHAT_ID = tc
+                env_updates["TELEGRAM_CHAT_ID"] = tc
 
         await session.commit()
-    return {"success": True, "message": "Settings updated successfully."}
+        await active_broker.adjust_triggers_dynamically()
+
+    if env_updates:
+        update_env_file(env_updates)
+
+    return {"success": True, "message": "Settings updated and saved successfully."}
 
 @router.post("/api/scheduler/trigger")
 async def trigger_scan(market: str = "ALL"):
     """Allows triggering an immediate market session scan from the UI."""
     asyncio.create_task(trading_scheduler.run_market_session(market=market, session="MANUAL_SCAN"))
     return {"success": True, "message": f"Market scan triggered for {market} in background."}
+
+@router.post("/api/market-data/refresh")
+async def refresh_market_data():
+    """Manually pulls fresh market data and runs the trigger and stop/target checks immediately."""
+    return await trading_scheduler.refresh_market_data_now()
 
 class MarketSessionRequest(BaseModel):
     market: Optional[str] = "EU"

@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 from typing import Optional
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -38,7 +39,16 @@ class Settings(BaseSettings):
     # Portfolio & Risk Management
     BASE_CURRENCY: str = "EUR"
     INITIAL_PAPER_CAPITAL: float = 10000.0  # €10,000
+    MAX_CAPITAL_USAGE_PCT: float = 100.0    # 10% to 100%: % of deposited account cash allowed to be traded
+    MAX_DEPLOYABLE_CAPITAL_EUR: Optional[float] = None  # Optional hard EUR cap on deployable capital
     MAX_POSITIONS: int = 8
+
+    @field_validator("MAX_DEPLOYABLE_CAPITAL_EUR", mode="before")
+    @classmethod
+    def _parse_deployable_capital(cls, v):
+        if v in ("", None) or (isinstance(v, str) and not v.strip()):
+            return None
+        return float(v)
     POSITION_SIZE_PCT: float = 0.08         # 8% of equity per trade
     MAX_POSITION_SIZE_PCT: float = 1.0      # Up to 100% position size allowed
     DEFAULT_STOP_LOSS_PCT: float = 0.04     # 4% stop loss
@@ -62,6 +72,11 @@ class Settings(BaseSettings):
     IBKR_PORT: int = 4003                   # 4003 via socat gateway bridge
     IBKR_CLIENT_ID: int = 1
     IBKR_ACCOUNT_ID: Optional[str] = None
+    IBKR_PRICING_TIER: str = "tiered"       # "tiered" (low min for retail) or "fixed"
+    MAX_FEE_DRAG_PCT: float = 3.8           # Max allowed round-trip fee as % of order (3.8% allows €100 EU orders)
+    MAX_PROFIT_EROSION_PCT: float = 48.0    # Max allowed profit consumed by commissions
+    MIN_ORDER_EUR_IBKR_EU: float = 100.0    # Floor order size for European equities on IBKR
+    MIN_ORDER_EUR_IBKR_US: float = 35.0     # Recommended min order for US equities on IBKR
 
     # Alpaca Config (Supports US equities)
     ALPACA_API_KEY: Optional[str] = None
@@ -83,3 +98,37 @@ settings = Settings()
 
 # Ensure data directory exists
 os.makedirs(settings.DATA_DIR, exist_ok=True)
+
+def update_env_file(updates: dict, env_path: Path = BASE_DIR / ".env") -> None:
+    """
+    Safely updates or appends key-value pairs in the .env file.
+    Preserves comments and existing structure.
+    """
+    if not env_path.exists():
+        return
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+        remaining_keys = set(updates.keys())
+        new_lines = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("#") or not stripped or "=" not in stripped:
+                new_lines.append(line)
+                continue
+            key = stripped.split("=", 1)[0].strip()
+            if key in updates:
+                val = updates[key]
+                val_str = str(val).lower() if isinstance(val, bool) else str(val) if val is not None else ""
+                new_lines.append(f"{key}={val_str}")
+                remaining_keys.discard(key)
+            else:
+                new_lines.append(line)
+        for key in remaining_keys:
+            val = updates[key]
+            val_str = str(val).lower() if isinstance(val, bool) else str(val) if val is not None else ""
+            new_lines.append(f"{key}={val_str}")
+        env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Failed to update .env: {e}")
+

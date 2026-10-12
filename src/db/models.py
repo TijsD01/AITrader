@@ -40,6 +40,7 @@ class Position(Base):
     unrealized_pnl_eur = Column(Float, default=0.0)
     unrealized_pnl_pct = Column(Float, default=0.0)
     
+    fees_eur = Column(Float, default=0.0)  # Total broker commissions and fees
     status = Column(String(20), default="OPEN")  # OPEN, CLOSED
     is_live = Column(Boolean, default=False)
     broker_order_id = Column(String(100), nullable=True)
@@ -59,6 +60,7 @@ class Trade(Base):
     price_native = Column(Float, nullable=False)
     price_eur = Column(Float, nullable=False)
     total_eur = Column(Float, nullable=False)
+    fee_eur = Column(Float, default=0.0)  # Broker commission and exchange fees
     
     realized_pnl_eur = Column(Float, nullable=True)  # Only for SELL
     realized_pnl_pct = Column(Float, nullable=True)

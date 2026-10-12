@@ -529,3 +529,90 @@ async def test_telegram_analyze_auto_arms_trigger_score_above_80():
             await session.execute(delete(OrderTrigger).where(OrderTrigger.ticker == "AUTO85"))
             await session.commit()
 
+
+@pytest.mark.asyncio
+async def test_dynamic_trigger_adjustment_based_on_cash_and_positions():
+    """Verify triggers dynamically adjust allocation_eur when cash balance or max positions change."""
+    from sqlalchemy import select, delete
+    from config.settings import settings
+    await init_db()
+
+    orig_max_positions = settings.MAX_POSITIONS
+    orig_full_budget = settings.FULL_BUDGET_UTILIZATION
+    settings.FULL_BUDGET_UTILIZATION = True
+    settings.MAX_POSITIONS = 4
+
+    test_ticker = "DYN_ADJUST_TEST"
+    try:
+        # 1. Snapshot cash at 4000 EUR
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(OrderTrigger).where(OrderTrigger.ticker == test_ticker))
+            snap = PortfolioSnapshot(
+                cash_eur=4000.0,
+                equity_eur=0.0,
+                total_value_eur=4000.0,
+                open_positions_count=0,
+                is_live=False,
+                timestamp=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+            )
+            session.add(snap)
+            await session.commit()
+
+        # 2. Arm trigger with initial 100 EUR allocation
+        trig = await paper_broker.create_price_trigger(
+            ticker=test_ticker,
+            name="Dynamic Adjust Co",
+            currency="EUR",
+            trigger_type="LIMIT_PULLBACK",
+            target_price=90.0,
+            current_price_at_creation=100.0,
+            stop_loss=85.0,
+            take_profit=110.0,
+            allocation_eur=100.0,
+            consensus_score=85,
+            ai_rationale="Testing dynamic adjustments"
+        )
+        assert trig["success"] is True
+        t_id = trig["trigger_id"]
+
+        # 3. Adjust triggers dynamically based on 4000 EUR cash across 4 slots -> 1000 EUR each
+        adjusted = await paper_broker.adjust_triggers_dynamically()
+        async with AsyncSessionLocal() as session:
+            res = await session.execute(select(OrderTrigger).where(OrderTrigger.id == t_id))
+            t = res.scalars().first()
+            assert t.allocation_eur == 1000.0
+
+        # 4. Cash doubles to 8000 EUR -> triggers dynamically adjust to 2000 EUR
+        async with AsyncSessionLocal() as session:
+            snap2 = PortfolioSnapshot(
+                cash_eur=8000.0,
+                equity_eur=0.0,
+                total_value_eur=8000.0,
+                open_positions_count=0,
+                is_live=False,
+                timestamp=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+            )
+            session.add(snap2)
+            await session.commit()
+
+        await paper_broker.adjust_triggers_dynamically()
+        async with AsyncSessionLocal() as session:
+            res = await session.execute(select(OrderTrigger).where(OrderTrigger.id == t_id))
+            t = res.scalars().first()
+            assert t.allocation_eur == 2000.0
+
+        # 5. User changes MAX_POSITIONS in settings from 4 to 2 slots -> triggers adjust to 4000 EUR (8000 / 2)
+        settings.MAX_POSITIONS = 2
+        await paper_broker.adjust_triggers_dynamically()
+        async with AsyncSessionLocal() as session:
+            res = await session.execute(select(OrderTrigger).where(OrderTrigger.id == t_id))
+            t = res.scalars().first()
+            assert t.allocation_eur == 4000.0
+
+    finally:
+        settings.MAX_POSITIONS = orig_max_positions
+        settings.FULL_BUDGET_UTILIZATION = orig_full_budget
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(OrderTrigger).where(OrderTrigger.ticker == test_ticker))
+            await session.commit()
+

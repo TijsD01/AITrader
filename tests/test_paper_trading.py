@@ -11,6 +11,7 @@ async def test_paper_broker_full_lifecycle():
     try:
         # 1. Initialize DB
         await init_db()
+        settings.ENFORCE_MARKET_HOURS = False
 
         # 2. Check initial portfolio balance
         summary = await paper_broker.get_portfolio_summary()

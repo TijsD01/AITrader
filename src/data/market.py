@@ -154,4 +154,10 @@ class MarketDataProvider:
             logger.error(f"Error compiling market data for {ticker_symbol}: {e}")
             return None
 
+    @staticmethod
+    def invalidate(ticker_symbols) -> None:
+        """Drops cached quotes so the next get_stock_data call fetches fresh data."""
+        for ticker_symbol in ticker_symbols:
+            _stock_cache.pop(ticker_symbol.upper().strip(), None)
+
 market_data_provider = MarketDataProvider()

@@ -97,6 +97,60 @@ Return JSON with exactly these keys:
                     size = size / 100.0
                 size = max(0.02, min(settings.MAX_POSITION_SIZE_PCT, size))
                 res["recommended_size_pct"] = round(size, 4)
+
+                # Economic viability & fee drag check on LLM response
+                try:
+                    from src.trading.fees import evaluate_trade_economic_viability, calculate_round_trip_fee
+                    from src.data.currency import currency_service
+                    from src.trading.risk import calculate_position_allocation
+
+                    curr_code = stock_data.get("currency", "EUR")
+                    est_alloc_eur = calculate_position_allocation(
+                        available_cash=portfolio_equity_eur if portfolio_equity_eur > 0 else 100.0,
+                        current_positions_count=0,
+                        recommended_size_pct=size,
+                        full_budget_utilization=settings.FULL_BUDGET_UTILIZATION,
+                        ticker=ticker,
+                        currency=curr_code
+                    )
+                    if est_alloc_eur <= 0:
+                        est_alloc_eur = 100.0
+
+                    price_eur = currency_service.to_eur(price, curr_code)
+                    est_shares = round(est_alloc_eur / price_eur, 4) if price_eur > 0 else 1.0
+                    tp_price = res.get("take_profit_price") or round(price * (1.0 + settings.DEFAULT_TAKE_PROFIT_PCT), 2)
+
+                    rt_info = calculate_round_trip_fee(
+                        ticker=ticker,
+                        shares=est_shares,
+                        entry_price=price,
+                        exit_price=tp_price,
+                        currency=curr_code
+                    )
+                    res["estimated_fee_eur"] = rt_info["round_trip_fee_eur"]
+                    res["fee_drag_pct"] = rt_info["round_trip_drag_pct"]
+
+                    viability = evaluate_trade_economic_viability(
+                        ticker=ticker,
+                        allocation_eur=est_alloc_eur,
+                        price_native=price,
+                        currency=curr_code,
+                        stop_loss_native=res.get("stop_loss_price"),
+                        take_profit_native=tp_price,
+                        broker=settings.LIVE_BROKER if settings.TRADING_MODE == "LIVE" else "paper",
+                        pricing_tier=getattr(settings, "IBKR_PRICING_TIER", "tiered"),
+                        max_fee_drag_pct=getattr(settings, "MAX_FEE_DRAG_PCT", 3.8),
+                        max_profit_erosion_pct=getattr(settings, "MAX_PROFIT_EROSION_PCT", 48.0)
+                    )
+                    if not viability["viable"]:
+                        res["approved"] = False
+                        if "risk_flags" not in res or not isinstance(res["risk_flags"], list):
+                            res["risk_flags"] = []
+                        res["risk_flags"].append(viability["reason"])
+                        res["risk_summary"] = f"Risk Officer REJECTED trade: {viability['reason']}"
+                except Exception as e:
+                    logger.warning(f"Error checking fee viability in LLM risk path: {e}")
+
                 return res
 
         # Deterministic Risk Math & AI Trigger Calculation
@@ -158,16 +212,78 @@ Return JSON with exactly these keys:
         if risk_pct > 5.5:
             risk_flags.append(f"Wide volatility band (risk {risk_pct:.1f}%)")
 
-        summary = (
-            f"Trade structure approved with {round(size_pct * 100, 1)}% allocation. "
-            f"AI Trigger: {trigger_type} @ {entry_trigger_price}. "
-            f"Stop-Loss anchored at {round(stop_loss, 2)} (-{risk_pct:.1f}%), "
-            f"Take-Profit set at {take_profit} (+{round(((take_profit/price)-1)*100, 1)}%), "
-            f"delivering a favorable {rr_ratio}:1 reward-to-risk ratio."
+        # Assess broker commission, fee drag, and economic viability
+        from src.trading.fees import evaluate_trade_economic_viability, calculate_round_trip_fee
+        from src.data.currency import currency_service
+        from src.trading.risk import calculate_position_allocation
+
+        curr_code = stock_data.get("currency", "EUR")
+        est_alloc_eur = calculate_position_allocation(
+            available_cash=portfolio_equity_eur if portfolio_equity_eur > 0 else 100.0,
+            current_positions_count=0,
+            recommended_size_pct=size_pct,
+            full_budget_utilization=settings.FULL_BUDGET_UTILIZATION,
+            ticker=ticker,
+            currency=curr_code
+        )
+        if est_alloc_eur <= 0:
+            est_alloc_eur = 100.0
+
+        price_eur = currency_service.to_eur(price, curr_code)
+        est_shares = round(est_alloc_eur / price_eur, 4) if price_eur > 0 else 1.0
+
+        rt_info = calculate_round_trip_fee(
+            ticker=ticker,
+            shares=est_shares,
+            entry_price=price,
+            exit_price=take_profit,
+            currency=curr_code
+        )
+        rt_fee_eur = rt_info["round_trip_fee_eur"]
+        rt_drag_pct = rt_info["round_trip_drag_pct"]
+
+        max_drag = getattr(settings, "MAX_FEE_DRAG_PCT", 3.8)
+        viability = evaluate_trade_economic_viability(
+            ticker=ticker,
+            allocation_eur=est_alloc_eur,
+            price_native=price,
+            currency=curr_code,
+            stop_loss_native=stop_loss,
+            take_profit_native=take_profit,
+            broker=settings.LIVE_BROKER if settings.TRADING_MODE == "LIVE" else "paper",
+            pricing_tier=getattr(settings, "IBKR_PRICING_TIER", "tiered"),
+            max_fee_drag_pct=max_drag,
+            max_profit_erosion_pct=getattr(settings, "MAX_PROFIT_EROSION_PCT", 48.0)
         )
 
+        approved = True
+        if not viability["viable"]:
+            approved = False
+            risk_flags.append(viability["reason"])
+        elif rt_drag_pct > max_drag:
+            approved = False
+            risk_flags.append(f"Excessive IBKR fee drag ({rt_drag_pct:.1f}% on est. €{est_alloc_eur:.0f} size > {max_drag}%)")
+        elif rt_drag_pct > 2.5:
+            risk_flags.append(f"Elevated IBKR fee drag ({rt_drag_pct:.1f}% on est. €{est_alloc_eur:.0f} size)")
+
+        if approved:
+            summary = (
+                f"Trade structure approved with {round(size_pct * 100, 1)}% allocation. "
+                f"AI Trigger: {trigger_type} @ {entry_trigger_price}. "
+                f"Stop-Loss anchored at {round(stop_loss, 2)} (-{risk_pct:.1f}%), "
+                f"Take-Profit set at {take_profit} (+{round(((take_profit/price)-1)*100, 1)}%), "
+                f"delivering a favorable {rr_ratio}:1 reward-to-risk ratio. "
+                f"Est. IBKR round-trip commission: €{rt_fee_eur:.2f} ({rt_drag_pct:.1f}% drag)."
+            )
+        else:
+            summary = (
+                f"Trade structure REJECTED by Risk Officer: {viability.get('reason', 'Excessive risk/fee drag')}. "
+                f"AI Trigger: {trigger_type} @ {entry_trigger_price}. "
+                f"Est. IBKR round-trip commission: €{rt_fee_eur:.2f} ({rt_drag_pct:.1f}% drag on est. €{est_alloc_eur:.0f} size)."
+            )
+
         return {
-            "approved": True,
+            "approved": approved,
             "entry_trigger_price": round(entry_trigger_price, 2),
             "trigger_type": trigger_type,
             "trigger_rationale": trigger_rationale,
@@ -175,6 +291,8 @@ Return JSON with exactly these keys:
             "take_profit_price": round(take_profit, 2),
             "risk_reward_ratio": rr_ratio,
             "recommended_size_pct": round(size_pct, 3),
+            "estimated_fee_eur": rt_fee_eur,
+            "fee_drag_pct": rt_drag_pct,
             "risk_flags": risk_flags,
             "risk_summary": summary
         }

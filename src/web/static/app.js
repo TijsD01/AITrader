@@ -1,6 +1,7 @@
 // Global State
 let allocationChart = null;
 let currentScreenerMarket = 'ALL';
+let currentAccountCash = 10000.0;
 
 // Initialize on DOM Load
 document.addEventListener('DOMContentLoaded', () => {
@@ -10,6 +11,7 @@ document.addEventListener('DOMContentLoaded', () => {
   setInterval(() => {
     loadPortfolio();
     loadMarketStatus();
+    loadBrokerStatus();
   }, 30000);
 });
 
@@ -34,6 +36,62 @@ function showToast(message, isError = false) {
   }, 3500);
 }
 
+// Tab Metadata for Mobile Dropdown & Navigation
+const TAB_CONFIG = {
+  portfolio: { label: 'Portfolio', icon: 'fa-solid fa-wallet' },
+  advice: { label: 'Daily Advice', icon: 'fa-solid fa-lightbulb' },
+  screener: { label: 'Market Screener', icon: 'fa-solid fa-magnifying-glass-chart' },
+  debate: { label: 'Committee Debate', icon: 'fa-solid fa-comments' },
+  triggers: { label: 'AI Triggers', icon: 'fa-solid fa-crosshairs' },
+  history: { label: 'Trade History', icon: 'fa-solid fa-clock-rotate-left' },
+  memory: { label: 'Memory Hub', icon: 'fa-solid fa-brain' },
+  settings: { label: 'Settings', icon: 'fa-solid fa-sliders' }
+};
+
+// Toggle Mobile Dropdown Menu
+function toggleMobileDropdown() {
+  const menu = document.getElementById('mobileDropdownMenu');
+  const backdrop = document.getElementById('mobileDropdownBackdrop');
+  const chevron = document.getElementById('mobileDropdownChevron');
+  if (!menu) return;
+  const isHidden = menu.classList.contains('hidden');
+  if (isHidden) {
+    menu.classList.remove('hidden');
+    if (backdrop) backdrop.classList.remove('hidden');
+    if (chevron) chevron.classList.add('rotate-180');
+  } else {
+    menu.classList.add('hidden');
+    if (backdrop) backdrop.classList.add('hidden');
+    if (chevron) chevron.classList.remove('rotate-180');
+  }
+}
+
+// Close Mobile Dropdown Menu
+function closeMobileDropdown() {
+  const menu = document.getElementById('mobileDropdownMenu');
+  const backdrop = document.getElementById('mobileDropdownBackdrop');
+  const chevron = document.getElementById('mobileDropdownChevron');
+  if (menu) menu.classList.add('hidden');
+  if (backdrop) backdrop.classList.add('hidden');
+  if (chevron) chevron.classList.remove('rotate-180');
+}
+
+// Global click-outside listener to close mobile dropdown
+document.addEventListener('click', (e) => {
+  const menu = document.getElementById('mobileDropdownMenu');
+  const btn = document.getElementById('mobileMenuDropdownBtn');
+  if (menu && !menu.classList.contains('hidden')) {
+    if (!menu.contains(e.target) && !btn?.contains(e.target)) {
+      closeMobileDropdown();
+    }
+  }
+});
+
+// Escape key listener to close dropdown
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeMobileDropdown();
+});
+
 // Tab Switching
 function switchTab(tabId) {
   // Hide all contents
@@ -52,28 +110,44 @@ function switchTab(tabId) {
     }
   });
 
-  // Update mobile nav
-  document.querySelectorAll('.mobile-tab-btn').forEach(btn => {
-    if (btn.dataset.tab === tabId) {
-      btn.classList.add('text-emerald-400');
-      btn.classList.remove('text-slate-400');
+  // Update mobile dropdown button header label and icon
+  const cfg = TAB_CONFIG[tabId] || { label: tabId, icon: 'fa-solid fa-bars' };
+  const mobileLabel = document.getElementById('mobileDropdownActiveText');
+  const mobileIcon = document.getElementById('mobileDropdownActiveIcon');
+  if (mobileLabel) mobileLabel.textContent = cfg.label;
+  if (mobileIcon) mobileIcon.className = `${cfg.icon} text-emerald-400 text-xs`;
+
+  // Update mobile dropdown items active state & checkmark
+  document.querySelectorAll('.mobile-dropdown-item').forEach(item => {
+    const isCurrent = item.dataset.tab === tabId;
+    const check = item.querySelector('.mobile-active-check');
+    if (isCurrent) {
+      item.classList.add('bg-emerald-500/15', 'text-emerald-400', 'border', 'border-emerald-500/30');
+      item.classList.remove('text-slate-300', 'hover:bg-slate-800/70');
+      if (check) check.classList.remove('hidden');
     } else {
-      btn.classList.remove('text-emerald-400');
-      btn.classList.add('text-slate-400');
+      item.classList.remove('bg-emerald-500/15', 'text-emerald-400', 'border', 'border-emerald-500/30');
+      item.classList.add('text-slate-300', 'hover:bg-slate-800/70');
+      if (check) check.classList.add('hidden');
     }
   });
 
+  // Auto-close dropdown menu
+  closeMobileDropdown();
+
   // Load specific tab data on switch
-  if (tabId === 'portfolio') loadPortfolio();
+  if (tabId === 'portfolio') { loadPortfolio(); loadBrokerStatus(); }
   if (tabId === 'advice') { loadRecommendations(); loadMarketReview(); loadWeeklyReviewComparison(); }
   if (tabId === 'screener') loadScreener();
   if (tabId === 'triggers') loadTriggers();
   if (tabId === 'history') { loadTrades(); loadLearningInsights(); }
-  if (tabId === 'settings') loadSettings();
+  if (tabId === 'memory') loadMemoryHub();
+  if (tabId === 'settings') { loadSettings(); loadBrokerStatus(); }
 }
 
 function loadAllData() {
   loadMarketStatus();
+  loadBrokerStatus();
   loadPortfolio();
   loadRecommendations();
   loadMarketReview();
@@ -139,9 +213,48 @@ async function loadPortfolio() {
       pnlSub.textContent = `Open ${isLive ? 'live' : 'paper'} positions`;
     }
 
+    currentAccountCash = summary.total_account_cash_eur ?? summary.cash_eur ?? 0;
+    const deployableCash = summary.available_cash_eur ?? summary.usable_capital_eur ?? summary.cash_eur;
+    const protectedReserve = summary.protected_reserve_eur || 0;
+    const maxUsagePct = summary.max_capital_usage_pct ?? 100;
+    const maxCapEur = summary.max_deployable_capital_eur;
+
     document.getElementById('metricTotalVal').textContent = `€${totalVal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
-    document.getElementById('metricCash').textContent = `€${summary.cash_eur.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+    document.getElementById('metricCash').textContent = `€${deployableCash.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
     document.getElementById('metricEquity').textContent = `€${equityVal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+
+    const limitBadge = document.getElementById('capitalLimitBadge');
+    if (limitBadge) {
+      if (maxUsagePct < 100 || (maxCapEur && maxCapEur > 0)) {
+        limitBadge.textContent = `${maxUsagePct}% limit${maxCapEur ? ` (Cap €${maxCapEur})` : ''}`;
+        limitBadge.className = 'text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 font-mono border border-amber-500/20';
+      } else {
+        limitBadge.textContent = '100%';
+        limitBadge.className = 'text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 font-mono border border-emerald-500/20';
+      }
+    }
+
+    const cashSub = document.getElementById('metricCashSub');
+    if (cashSub) {
+      const reservedTriggers = summary.reserved_triggers_eur || 0;
+      const triggersCount = summary.pending_triggers_count || 0;
+      const subParts = [];
+
+      if (reservedTriggers > 0) {
+        subParts.push(`<span class="text-sky-400 font-medium" title="Capital earmarked for pending order triggers"><i class="fa-solid fa-clock"></i> €${reservedTriggers.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} reserved (${triggersCount} trigger${triggersCount > 1 ? 's' : ''})</span>`);
+      }
+      if (protectedReserve > 0) {
+        subParts.push(`<span class="text-amber-400 font-medium"><i class="fa-solid fa-shield-halved"></i> €${protectedReserve.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} reserved</span>`);
+      }
+
+      if (subParts.length > 0) {
+        cashSub.innerHTML = `${subParts.join(' · ')} · Total €${currentAccountCash.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+      } else {
+        cashSub.textContent = `Full buffer · Total account cash €${currentAccountCash.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+      }
+    }
+
+    recalcCapitalPreview();
     
     const pnlElem = document.getElementById('metricUnrealizedPnl');
     const returnElem = document.getElementById('metricReturnBadge');
@@ -518,6 +631,7 @@ async function loadTrades() {
           <td class="py-3 px-4 text-slate-300">${t.shares}</td>
           <td class="py-3 px-4 text-slate-300">${t.price_native} ${t.currency}</td>
           <td class="py-3 px-4 text-slate-200 font-semibold">€${t.total_eur.toFixed(2)}</td>
+          <td class="py-3 px-4 text-slate-400 font-mono text-xs">€${(t.fee_eur !== undefined && t.fee_eur !== null) ? Number(t.fee_eur).toFixed(2) : '0.00'}</td>
           <td class="py-3 px-4">${pnlText}</td>
           <td class="py-3 px-4 text-slate-400 text-xs truncate max-w-xs">${t.rationale || ''}</td>
         </tr>
@@ -574,6 +688,182 @@ async function closePosition(ticker) {
   }
 }
 
+async function syncAccountWithBroker() {
+  showToast('⏳ Synchronizing portfolio & balances with broker...');
+  try {
+    const res = await fetch('/api/portfolio/sync', { method: 'POST' });
+    if (res.ok) {
+      showToast('Broker account state synced successfully.');
+      await loadPortfolio();
+      await loadBrokerStatus();
+    } else {
+      showToast('Failed to sync account with broker.', true);
+    }
+  } catch (e) {
+    showToast('Network error syncing with broker.', true);
+  }
+}
+
+// Broker Connection Status & Diagnostics
+let lastBrokerStatus = null;
+
+async function pingBrokerStatus(force = false) {
+  return await loadBrokerStatus(force);
+}
+
+async function loadBrokerStatus(force = false) {
+  const badge = document.getElementById('brokerStatusBadge');
+  const dot = document.getElementById('brokerStatusDot');
+  const text = document.getElementById('brokerStatusText');
+  const mobDot = document.getElementById('mobileBrokerStatusDot');
+  const mobText = document.getElementById('mobileBrokerStatusText');
+  const pingBtn = document.getElementById('settingsPingBtn');
+  const pingIcon = document.getElementById('settingsPingIcon');
+
+  if (force) {
+    if (dot) dot.className = 'w-2 h-2 rounded-full bg-amber-400 animate-ping';
+    if (text) text.textContent = 'Broker: Probing...';
+    if (mobDot) mobDot.className = 'w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping';
+    if (mobText) mobText.textContent = 'Broker: Probing...';
+    if (pingIcon) pingIcon.classList.add('fa-spin');
+    if (pingBtn) pingBtn.disabled = true;
+  }
+
+  try {
+    const url = force ? '/api/broker/ping' : '/api/broker/status';
+    const method = force ? 'POST' : 'GET';
+    const res = await fetch(url, { method });
+    let data;
+    if (res.ok) {
+      data = await res.json();
+    } else {
+      data = {
+        connected: false,
+        broker: lastBrokerStatus?.broker || 'BROKER',
+        trading_mode: lastBrokerStatus?.trading_mode || 'OFFLINE',
+        status: 'OFFLINE',
+        message: 'Broker status endpoint awaiting bot restart (HTTP ' + res.status + ').'
+      };
+    }
+    lastBrokerStatus = data;
+
+    const isConnected = !!data.connected;
+    const brokerName = data.broker || 'BROKER';
+    const isLive = (data.trading_mode || '').toUpperCase() === 'LIVE';
+
+    // 1. Update Header Badge & Mobile Pill
+    if (mobDot && mobText) {
+      if (isConnected) {
+        mobDot.className = 'w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse';
+        mobText.textContent = isLive ? `${brokerName}: Online` : `${brokerName}: Active`;
+      } else {
+        mobDot.className = 'w-1.5 h-1.5 rounded-full bg-rose-500';
+        mobText.textContent = `${brokerName}: Offline`;
+      }
+    }
+
+    if (badge && dot && text) {
+      if (isConnected) {
+        dot.className = 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse';
+        text.textContent = isLive ? `${brokerName}: Online` : `${brokerName}: Active`;
+        badge.className = 'flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-medium transition-colors cursor-pointer hover:border-emerald-400';
+        badge.title = `${brokerName} Connected (${data.latency_ms !== null && data.latency_ms !== undefined ? data.latency_ms + 'ms' : 'Ready'})\nClick to test connection`;
+      } else {
+        dot.className = 'w-2 h-2 rounded-full bg-rose-500';
+        text.textContent = `${brokerName}: Offline`;
+        badge.className = 'flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs font-medium transition-colors cursor-pointer hover:border-rose-400';
+        badge.title = `${brokerName} Disconnected: ${data.message || 'Unreachable'}\nClick to retest`;
+      }
+    }
+
+    // 2. Update Portfolio Tab Disconnect Alert Banner & Connected Strip
+    const banner = document.getElementById('brokerDisconnectBanner');
+    const bannerDetail = document.getElementById('brokerDisconnectDetail');
+    const bannerBroker = document.getElementById('bannerBrokerName');
+    const strip = document.getElementById('brokerConnectedStrip');
+    const stripBroker = document.getElementById('stripBrokerName');
+    const stripEndpoint = document.getElementById('stripBrokerEndpoint');
+    const stripLatency = document.getElementById('stripBrokerLatency');
+    const stripAccount = document.getElementById('stripBrokerAccount');
+
+    if (banner) {
+      if (isLive && !isConnected) {
+        banner.classList.remove('hidden');
+        if (bannerBroker) bannerBroker.textContent = brokerName;
+        if (bannerDetail) {
+          bannerDetail.textContent = data.message || `${brokerName} gateway is unreachable. Real-money orders cannot execute.`;
+        }
+      } else {
+        banner.classList.add('hidden');
+      }
+    }
+
+    if (strip) {
+      if (isLive && isConnected) {
+        strip.classList.remove('hidden');
+        if (stripBroker) stripBroker.textContent = brokerName;
+        if (stripEndpoint) stripEndpoint.textContent = data.host && data.port ? `${data.host}:${data.port}` : 'Connected';
+        if (stripLatency) stripLatency.textContent = data.latency_ms !== null && data.latency_ms !== undefined ? `${data.latency_ms} ms` : 'Ready';
+        if (stripAccount) stripAccount.textContent = data.account_id || (data.accounts && data.accounts.length ? data.accounts.join(', ') : 'Active');
+      } else {
+        strip.classList.add('hidden');
+      }
+    }
+
+    // 3. Update Settings Diagnostics Card (if present)
+    const diagName = document.getElementById('diagBrokerName');
+    const diagDot = document.getElementById('diagStatusDot');
+    const diagText = document.getElementById('diagStatusText');
+    const diagEndpoint = document.getElementById('diagBrokerEndpoint');
+    const diagLatency = document.getElementById('diagBrokerLatency');
+    const diagMsg = document.getElementById('diagBrokerMessage');
+
+    if (diagName) {
+      diagName.textContent = brokerName === 'IBKR' ? 'IBKR (Interactive Brokers)' : (brokerName === 'ALPACA' ? 'Alpaca Markets' : 'Paper Trading Engine');
+    }
+    if (diagDot && diagText) {
+      if (isConnected) {
+        diagDot.className = 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse';
+        diagText.textContent = 'Connected (Online)';
+        diagText.className = 'text-emerald-400 font-bold';
+      } else {
+        diagDot.className = 'w-2 h-2 rounded-full bg-rose-500';
+        diagText.textContent = 'Disconnected (Offline)';
+        diagText.className = 'text-rose-400 font-bold';
+      }
+    }
+    if (diagEndpoint) {
+      diagEndpoint.textContent = data.host && data.port ? `${data.host}:${data.port}` : (data.broker === 'PAPER' ? 'Local Memory DB' : 'Cloud REST API');
+    }
+    if (diagLatency) {
+      diagLatency.textContent = data.latency_ms !== null && data.latency_ms !== undefined ? `${data.latency_ms} ms` : 'N/A';
+    }
+    if (diagMsg) {
+      diagMsg.textContent = data.message || (isConnected ? 'Connection verified.' : 'Broker offline.');
+      diagMsg.className = isConnected ? 'text-emerald-300 font-mono text-[11px] leading-relaxed break-words' : 'text-rose-300 font-mono text-[11px] leading-relaxed break-words';
+    }
+
+    if (force) {
+      if (isConnected) {
+        showToast(`${brokerName} Connection Online (${data.latency_ms || 0}ms)`);
+      } else {
+        showToast(`${brokerName} Connection Offline: ${data.error || 'Check IB Gateway / 2FA'}`, true);
+      }
+    }
+  } catch (err) {
+    console.error('Failed to load broker status:', err);
+    if (badge && dot && text) {
+      dot.className = 'w-2 h-2 rounded-full bg-rose-500';
+      text.textContent = 'Broker: Error';
+      badge.className = 'flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs font-medium';
+    }
+    if (force) showToast('Failed to contact server for broker status', true);
+  } finally {
+    if (pingIcon) pingIcon.classList.remove('fa-spin');
+    if (pingBtn) pingBtn.disabled = false;
+  }
+}
+
 // Market Status Loader
 async function loadMarketStatus() {
   try {
@@ -583,15 +873,19 @@ async function loadMarketStatus() {
     const textEl = document.getElementById('marketStatusText');
     if (!badge || !textEl) return;
 
+    const mobMarketText = document.getElementById('mobileMarketStatusText');
     if (msData.is_weekend) {
       textEl.textContent = 'Weekend (Markets Closed)';
       badge.className = 'hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700 text-amber-400 text-xs font-medium';
+      if (mobMarketText) mobMarketText.textContent = 'Weekend (Closed)';
     } else if (msData.eu_market.is_open || msData.us_market.is_open) {
       textEl.textContent = `🇪🇺 EU: ${msData.eu_market.status} | 🇺🇸 US: ${msData.us_market.status}`;
       badge.className = 'hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-medium';
+      if (mobMarketText) mobMarketText.textContent = 'Markets: Open';
     } else {
       textEl.textContent = '🇪🇺 EU: CLOSED | 🇺🇸 US: CLOSED';
       badge.className = 'hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700 text-slate-400 text-xs font-medium';
+      if (mobMarketText) mobMarketText.textContent = 'Markets: Closed';
     }
   } catch (err) {
     console.debug('Failed to load market status:', err);
@@ -606,6 +900,8 @@ async function loadSettings() {
 
     document.getElementById('settingAutoBuy').checked = data.auto_buy_enabled;
     document.getElementById('autoBuyStatusText').textContent = data.auto_buy_enabled ? 'Active' : 'Paused';
+    const mobAutoBuy = document.getElementById('mobileAutoBuyText');
+    if (mobAutoBuy) mobAutoBuy.textContent = data.auto_buy_enabled ? 'On' : 'Off';
     document.getElementById('autoBuyBadge').className = data.auto_buy_enabled
       ? 'flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-medium'
       : 'flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700 text-slate-400 text-xs font-medium';
@@ -616,6 +912,24 @@ async function loadSettings() {
     const posSizePct = (data.position_size_pct * 100).toFixed(1);
     document.getElementById('settingPosSize').value = posSizePct;
     document.getElementById('posSizeLabel').textContent = `${posSizePct}%`;
+
+    if (data.max_positions !== undefined) {
+      const mpInput = document.getElementById('settingMaxPositions');
+      const mpLabel = document.getElementById('maxPositionsLabel');
+      if (mpInput) mpInput.value = data.max_positions;
+      if (mpLabel) mpLabel.textContent = `${data.max_positions} slots`;
+    }
+
+    const capitalUsagePct = data.max_capital_usage_pct ?? 100;
+    const capitalCapEur = data.max_deployable_capital_eur;
+    if (document.getElementById('settingCapitalUsagePct')) {
+      document.getElementById('settingCapitalUsagePct').value = capitalUsagePct;
+      updateCapitalUsageDisplay(capitalUsagePct);
+    }
+    if (document.getElementById('settingMaxDeployableEur')) {
+      document.getElementById('settingMaxDeployableEur').value = (capitalCapEur !== null && capitalCapEur !== undefined) ? capitalCapEur : '';
+    }
+    recalcCapitalPreview();
 
     const tgBadge = document.getElementById('telegramStatusBadge');
     if (data.has_telegram) {
@@ -648,19 +962,74 @@ async function loadSettings() {
       document.getElementById('settingMarketHours').checked = data.enforce_market_hours !== false;
     }
 
+    if (document.getElementById('settingIbkrHost') && data.ibkr_host) {
+      document.getElementById('settingIbkrHost').value = data.ibkr_host;
+    }
+    if (document.getElementById('settingIbkrPort') && data.ibkr_port) {
+      document.getElementById('settingIbkrPort').value = data.ibkr_port;
+    }
+    if (document.getElementById('settingIbkrClientId') && data.ibkr_client_id !== undefined) {
+      document.getElementById('settingIbkrClientId').value = data.ibkr_client_id;
+    }
+    if (document.getElementById('settingIbkrAccountId')) {
+      document.getElementById('settingIbkrAccountId').value = data.ibkr_account_id || '';
+    }
+
     await loadMarketStatus();
+    await loadBrokerStatus();
   } catch (e) {
     console.error('Failed to load settings:', e);
   }
+}
+
+function updateCapitalUsageDisplay(val) {
+  const lbl = document.getElementById('capitalUsagePctLabel');
+  if (lbl) {
+    lbl.textContent = `${val}%`;
+  }
+  recalcCapitalPreview();
+}
+
+function recalcCapitalPreview() {
+  const pctEl = document.getElementById('settingCapitalUsagePct');
+  const capEl = document.getElementById('settingMaxDeployableEur');
+  if (!pctEl) return;
+
+  const pct = parseFloat(pctEl.value) || 100;
+  const capRaw = capEl ? capEl.value.trim() : '';
+  const cap = (capRaw !== '' && !isNaN(parseFloat(capRaw)) && parseFloat(capRaw) > 0) ? parseFloat(capRaw) : null;
+
+  const totalCash = currentAccountCash || 10000.0;
+  let deployable = totalCash * (pct / 100.0);
+  if (cap !== null) {
+    deployable = Math.min(deployable, cap);
+  }
+  deployable = Math.max(0.0, Math.min(totalCash, deployable));
+  const reserve = Math.max(0.0, totalCash - deployable);
+
+  const previewTotal = document.getElementById('previewAccountTotal');
+  const previewDep = document.getElementById('previewDeployableCash');
+  const previewRes = document.getElementById('previewProtectedReserve');
+
+  if (previewTotal) previewTotal.textContent = `€${totalCash.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+  if (previewDep) previewDep.textContent = `€${deployable.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+  if (previewRes) previewRes.textContent = `€${reserve.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
 }
 
 async function saveSettings() {
   const autoBuy = document.getElementById('settingAutoBuy').checked;
   const minScore = parseInt(document.getElementById('settingMinScore').value);
   const posSizePct = parseFloat(document.getElementById('settingPosSize').value) / 100.0;
+  const maxPosEl = document.getElementById('settingMaxPositions');
+  const maxPositions = maxPosEl ? parseInt(maxPosEl.value, 10) : undefined;
   const enforceHours = document.getElementById('settingMarketHours') ? document.getElementById('settingMarketHours').checked : true;
   const tradingModeEl = document.getElementById('settingTradingMode');
   const tradingMode = tradingModeEl ? tradingModeEl.value : undefined;
+
+  const capPctEl = document.getElementById('settingCapitalUsagePct');
+  const capEurEl = document.getElementById('settingMaxDeployableEur');
+  const capitalUsagePct = capPctEl ? parseFloat(capPctEl.value) : undefined;
+  const capEurRaw = capEurEl ? capEurEl.value.trim() : '';
 
   try {
     const payload = {
@@ -669,10 +1038,33 @@ async function saveSettings() {
       position_size_pct: posSizePct,
       enforce_market_hours: enforceHours
     };
+    if (maxPositions !== undefined && !isNaN(maxPositions)) {
+      payload.max_positions = maxPositions;
+    }
+    if (capitalUsagePct !== undefined) {
+      payload.max_capital_usage_pct = capitalUsagePct;
+    }
+    if (capEurEl) {
+      if (capEurRaw === '' || parseFloat(capEurRaw) <= 0) {
+        payload.clear_max_deployable_capital = true;
+      } else {
+        payload.max_deployable_capital_eur = parseFloat(capEurRaw);
+      }
+    }
     if (tradingMode) {
       payload.trading_mode = tradingMode;
       payload.live_trading_enabled = (tradingMode === 'LIVE');
     }
+
+    const ibkrHostEl = document.getElementById('settingIbkrHost');
+    const ibkrPortEl = document.getElementById('settingIbkrPort');
+    const ibkrClientIdEl = document.getElementById('settingIbkrClientId');
+    const ibkrAccountIdEl = document.getElementById('settingIbkrAccountId');
+
+    if (ibkrHostEl && ibkrHostEl.value.trim()) payload.ibkr_host = ibkrHostEl.value.trim();
+    if (ibkrPortEl && !isNaN(parseInt(ibkrPortEl.value))) payload.ibkr_port = parseInt(ibkrPortEl.value);
+    if (ibkrClientIdEl && !isNaN(parseInt(ibkrClientIdEl.value))) payload.ibkr_client_id = parseInt(ibkrClientIdEl.value);
+    if (ibkrAccountIdEl) payload.ibkr_account_id = ibkrAccountIdEl.value.trim();
 
     const res = await fetch('/api/settings', {
       method: 'POST',
@@ -682,10 +1074,79 @@ async function saveSettings() {
     if (res.ok) {
       showToast('Settings saved successfully.');
       document.getElementById('autoBuyStatusText').textContent = autoBuy ? 'Active' : 'Paused';
+      const mobAutoBuy = document.getElementById('mobileAutoBuyText');
+      if (mobAutoBuy) mobAutoBuy.textContent = autoBuy ? 'On' : 'Off';
+      recalcCapitalPreview();
       await loadPortfolio();
+      await loadBrokerStatus();
+      if (typeof loadTriggers === 'function') await loadTriggers();
+    } else {
+      const err = await res.json();
+      showToast(err.detail || 'Failed to save settings.', true);
     }
   } catch (e) {
     showToast('Failed to save settings.', true);
+  }
+}
+
+async function saveBrokerConfig() {
+  const host = document.getElementById('settingIbkrHost')?.value.trim();
+  const port = parseInt(document.getElementById('settingIbkrPort')?.value);
+  const clientId = parseInt(document.getElementById('settingIbkrClientId')?.value);
+  const accountId = document.getElementById('settingIbkrAccountId')?.value.trim();
+
+  const payload = {};
+  if (host) payload.ibkr_host = host;
+  if (!isNaN(port) && port > 0) payload.ibkr_port = port;
+  if (!isNaN(clientId)) payload.ibkr_client_id = clientId;
+  if (accountId !== undefined) payload.ibkr_account_id = accountId;
+
+  const btn = document.getElementById('saveBrokerConfigBtn');
+  if (btn) btn.disabled = true;
+
+  try {
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (res.ok) {
+      showToast('IBKR Broker settings saved successfully.');
+      await loadBrokerStatus(true);
+    } else {
+      const err = await res.json();
+      showToast(err.detail || 'Failed to save broker configuration.', true);
+    }
+  } catch (e) {
+    showToast('Network error saving broker configuration.', true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function reconnectBroker() {
+  const btn = document.getElementById('settingsReconnectBtn');
+  const icon = document.getElementById('settingsReconnectIcon');
+  if (btn) btn.disabled = true;
+  if (icon) icon.className = 'fa-solid fa-spinner fa-spin';
+
+  showToast('Connecting to IBKR Gateway...');
+
+  try {
+    const res = await fetch('/api/broker/reconnect', { method: 'POST' });
+    const data = await res.json();
+    if (data.connected) {
+      showToast(`IBKR connected successfully (${data.latency_ms || 0}ms)!`);
+    } else {
+      showToast(`IBKR connection failed: ${data.error || data.message || 'Offline'}`, true);
+    }
+    await loadBrokerStatus(true);
+    await loadPortfolio();
+  } catch (e) {
+    showToast('Network error requesting broker reconnection.', true);
+  } finally {
+    if (btn) btn.disabled = false;
+    if (icon) icon.className = 'fa-solid fa-bolt';
   }
 }
 
@@ -708,6 +1169,31 @@ async function triggerQuickScan() {
   } catch (e) {
     showToast('Scan trigger failed.', true);
     btn.innerHTML = `<i class="fa-solid fa-radar"></i> <span class="hidden sm:inline">Run Scan</span>`;
+    btn.disabled = false;
+  }
+}
+
+// 9b. Manual Market Data Refresh
+async function refreshMarketData() {
+  const btn = document.getElementById('refreshDataBtn');
+  const idleHtml = `<i class="fa-solid fa-arrows-rotate text-xs sm:text-sm"></i> <span class="hidden sm:inline">Refresh Data</span>`;
+  btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> <span class="hidden sm:inline">Refreshing...</span>`;
+  btn.disabled = true;
+
+  try {
+    const res = await fetch('/api/market-data/refresh', { method: 'POST' });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      showToast(`Market data refreshed: ${data.tickers_refreshed} prices, ${data.triggers_resized} triggers resized, ${data.triggers_executed} bought, ${data.positions_closed} closed.`);
+      loadPortfolio();
+      loadTriggers();
+    } else {
+      showToast(data.detail || data.message || 'Market data refresh failed.', true);
+    }
+  } catch (e) {
+    showToast('Network error refreshing market data.', true);
+  } finally {
+    btn.innerHTML = idleHtml;
     btn.disabled = false;
   }
 }
@@ -764,6 +1250,10 @@ async function loadTriggers() {
                   </div>
                   <span class="text-[10px] text-slate-500 font-mono">#${t.id}</span>
                 </div>
+                ${t.allocation_eur > 0 ? '' : `
+                <div class="text-[11px] font-semibold text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg px-2.5 py-1.5 flex items-center gap-1.5" title="Higher-scored triggers hold the available cash or position slots. This trigger is funded automatically when cash or a slot frees up.">
+                  <i class="fa-solid fa-hourglass-half"></i> Unfunded, waiting for cash
+                </div>`}
 
                 <div class="grid grid-cols-2 gap-2 bg-slate-900/70 p-2.5 rounded-lg border border-borderCol text-xs">
                   <div>
@@ -896,7 +1386,8 @@ async function cancelTrigger(triggerId) {
     const data = await res.json();
     if (res.ok && data.success) {
       showToast(`Trigger #${triggerId} cancelled.`);
-      loadTriggers();
+      await loadTriggers();
+      await loadPortfolio();
     } else {
       showToast(data.detail || data.message || 'Failed to cancel trigger.', true);
     }
@@ -1265,4 +1756,175 @@ function renderWeeklyArchive() {
     `;
   }).join('');
 }
+
+// ==========================================
+// TENCENTDB AGENT MEMORY HUB CLIENT
+// ==========================================
+
+async function loadMemoryHub() {
+  await Promise.all([
+    loadColdStartRecap(),
+    loadMemoryAssets()
+  ]);
+}
+
+async function refreshMemoryHub() {
+  showToast('Refreshing TencentDB Agent Memory...', 'info');
+  await loadMemoryHub();
+  showToast('Memory Hub updated.', 'success');
+}
+
+async function loadColdStartRecap() {
+  const container = document.getElementById('memoryColdStartText');
+  if (!container) return;
+  try {
+    const res = await fetch('/v3/memory/cold-start');
+    const json = await res.json();
+    if (json.code === 0 && json.data) {
+      container.textContent = json.data.full_prompt_context || json.data.what_had_happened || 'No recent memory recorded.';
+    } else {
+      container.textContent = 'Failed to load cold start recap.';
+    }
+  } catch (err) {
+    container.textContent = `Error loading cold start memory: ${err.message}`;
+  }
+}
+
+async function loadMemoryAssets() {
+  try {
+    const res = await fetch('/v3/memory/assets');
+    const json = await res.json();
+    if (json.code === 0 && json.data) {
+      renderMemoryAssets(json.data);
+    }
+  } catch (err) {
+    console.error('Error fetching memory assets:', err);
+  }
+}
+
+function renderMemoryAssets(assets) {
+  // 1. L1 Atoms
+  const atoms = (assets.chat_memory && assets.chat_memory.l1_atoms) || [];
+  const atomsBadge = document.getElementById('atomsCountBadge');
+  const atomsContainer = document.getElementById('atomsListContainer');
+  if (atomsBadge) atomsBadge.textContent = `${atoms.length} Atoms`;
+  if (atomsContainer) {
+    if (atoms.length === 0) {
+      atomsContainer.innerHTML = `<div class="text-xs text-slate-500 italic p-3">No atoms extracted yet.</div>`;
+    } else {
+      atomsContainer.innerHTML = atoms.map(a => `
+        <div class="p-2.5 bg-slate-900/70 border border-slate-800 rounded-lg text-xs space-y-1">
+          <div class="flex items-center justify-between">
+            <span class="font-bold text-cyan-300 font-mono">[${(a.type || 'fact').toUpperCase()}] ${a.subject || ''}</span>
+            <span class="text-[10px] text-slate-500">${Math.round((a.confidence || 1) * 100)}% conf</span>
+          </div>
+          <div class="text-slate-300">${a.content}</div>
+        </div>
+      `).join('');
+    }
+  }
+
+  // 2. Skills
+  const skills = assets.skills || [];
+  const skillsBadge = document.getElementById('skillsCountBadge');
+  const skillsContainer = document.getElementById('skillsListContainer');
+  if (skillsBadge) skillsBadge.textContent = `${skills.length} Skills`;
+  if (skillsContainer) {
+    if (skills.length === 0) {
+      skillsContainer.innerHTML = `<div class="text-xs text-slate-500 italic p-3">No skill playbooks registered.</div>`;
+    } else {
+      skillsContainer.innerHTML = skills.map(s => `
+        <div class="p-3 bg-slate-900/70 border border-slate-800 rounded-lg text-xs space-y-1.5">
+          <div class="flex items-center justify-between">
+            <span class="font-bold text-emerald-300">${s.name}</span>
+            <span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 font-mono">${s.category || 'skill'}</span>
+          </div>
+          <div class="text-slate-400">${s.description}</div>
+          <div class="text-[11px] text-slate-500 bg-slate-950/60 p-2 rounded border border-slate-900">
+            <strong class="text-slate-400">Steps:</strong> ${(s.execution_steps || []).join(' → ')}
+          </div>
+        </div>
+      `).join('');
+    }
+  }
+
+  // 3. Wiki
+  const wiki = assets.llm_wiki || [];
+  const wikiBadge = document.getElementById('wikiCountBadge');
+  const wikiContainer = document.getElementById('wikiListContainer');
+  if (wikiBadge) wikiBadge.textContent = `${wiki.length} Pages`;
+  if (wikiContainer) {
+    if (wiki.length === 0) {
+      wikiContainer.innerHTML = `<div class="text-xs text-slate-500 italic p-3">No wiki pages registered.</div>`;
+    } else {
+      wikiContainer.innerHTML = wiki.map(w => `
+        <div class="p-3 bg-slate-900/70 border border-slate-800 rounded-lg text-xs space-y-1">
+          <div class="font-bold text-blue-300 flex items-center justify-between">
+            <span>${w.title}</span>
+            <span class="text-[10px] font-mono text-slate-500">${w.page_id}</span>
+          </div>
+          <div class="text-slate-400 line-clamp-2">${(w.content_md || '').split('\n').slice(2, 5).join(' ')}</div>
+          <div class="flex flex-wrap gap-1 mt-1">
+            ${(w.tags || []).map(t => `<span class="text-[9px] px-1.5 py-0.2 bg-blue-500/10 text-blue-400 rounded">#${t}</span>`).join('')}
+          </div>
+        </div>
+      `).join('');
+    }
+  }
+
+  // 4. L3 Core & Code-Graph
+  const l3 = (assets.chat_memory && assets.chat_memory.l3_core) || {};
+  const graph = assets.code_graph || [];
+  const coreContainer = document.getElementById('coreAndGraphContainer');
+  if (coreContainer) {
+    coreContainer.innerHTML = `
+      <div class="p-3 bg-slate-900/70 border border-slate-800 rounded-lg text-xs space-y-1.5 mb-2">
+        <div class="font-bold text-purple-300 flex items-center justify-between">
+          <span>${l3.persona_name || 'Committee Persona'}</span>
+          <span class="text-[10px] text-purple-400 bg-purple-500/10 px-1.5 py-0.5 rounded font-mono">L3 Core</span>
+        </div>
+        <div class="text-slate-300 font-semibold">${l3.core_profile || ''}</div>
+        <div class="text-slate-400 text-[11px] bg-slate-950/60 p-2 rounded border border-slate-900 whitespace-pre-wrap">${l3.cumulative_wisdom || ''}</div>
+      </div>
+      <div class="space-y-1.5">
+        <div class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Indexed Code-Graph Symbols</div>
+        ${graph.map(g => `
+          <div class="p-2 bg-slate-950/60 border border-slate-800/80 rounded text-[11px] flex items-center justify-between">
+            <div>
+              <span class="text-emerald-400 font-mono font-bold">${g.symbol_name}</span>
+              <span class="text-slate-500 text-[10px] ml-1">(${g.symbol_type})</span>
+            </div>
+            <span class="text-slate-500 font-mono text-[10px]">${g.file_path}:${g.line_start || 1}</span>
+          </div>
+        `).join('')}
+      </div>
+    `;
+  }
+}
+
+async function openExtractModal() {
+  const sample = prompt("Enter text, trade rationale, or interaction to extract assets from (or leave blank to extract from recent system activity):");
+  if (sample === null) return;
+  showToast("Running TencentDB Agent Memory Asset Extraction...", "info");
+  try {
+    const res = await fetch("/v3/memory/extract", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        raw_text: sample || "Investigated BESI.AS pullback entry at €175.88. Enforced Euronext minimum €100 order size to limit IBKR tiered commission drag to 3.8%.",
+        sync_to_store: true
+      })
+    });
+    const json = await res.json();
+    if (json.code === 0) {
+      showToast(`Asset extraction completed: ${json.data.extracted_atoms_count} atoms extracted!`, "success");
+      await loadMemoryHub();
+    } else {
+      showToast(`Extraction failed: ${json.message}`, "error");
+    }
+  } catch (err) {
+    showToast(`Extraction error: ${err.message}`, "error");
+  }
+}
+
 

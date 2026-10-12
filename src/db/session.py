@@ -30,8 +30,10 @@ def _run_migrations(connection):
     migrations = [
         ("positions", "is_live", "BOOLEAN DEFAULT 0"),
         ("positions", "broker_order_id", "VARCHAR(100)"),
+        ("positions", "fees_eur", "FLOAT DEFAULT 0.0"),
         ("trades", "is_live", "BOOLEAN DEFAULT 0"),
         ("trades", "broker_order_id", "VARCHAR(100)"),
+        ("trades", "fee_eur", "FLOAT DEFAULT 0.0"),
         ("order_triggers", "is_live", "BOOLEAN DEFAULT 0"),
         ("order_triggers", "broker_order_id", "VARCHAR(100)"),
         ("portfolio_snapshots", "is_live", "BOOLEAN DEFAULT 0")
@@ -84,23 +86,99 @@ async def init_db():
                 )
                 session.add(item)
                 
-        # Check system config
-        res = await session.execute(select(SystemConfig).where(SystemConfig.key == "AUTO_BUY_ENABLED"))
-        cfg = res.scalars().first()
-        if not cfg:
-            session.add(SystemConfig(key="AUTO_BUY_ENABLED", value=str(settings.AUTO_BUY_ENABLED).lower()))
-            session.add(SystemConfig(key="MIN_CONSENSUS_SCORE", value=str(settings.MIN_CONSENSUS_SCORE)))
-            session.add(SystemConfig(key="TRIGGER_MIN_SCORE", value=str(settings.TRIGGER_MIN_SCORE)))
-            session.add(SystemConfig(key="POSITION_SIZE_PCT", value=str(settings.POSITION_SIZE_PCT)))
-        else:
-            # Check if TRIGGER_MIN_SCORE already exists
-            trig_cfg = await session.execute(select(SystemConfig).where(SystemConfig.key == "TRIGGER_MIN_SCORE"))
-            if not trig_cfg.scalars().first():
-                session.add(SystemConfig(key="TRIGGER_MIN_SCORE", value=str(settings.TRIGGER_MIN_SCORE)))
+        # Check and seed system configs
+        cfg_res = await session.execute(select(SystemConfig))
+        db_configs = {c.key: c.value for c in cfg_res.scalars().all()}
 
-            # Check if ENFORCE_MARKET_HOURS already exists in DB
-            emh_cfg = await session.execute(select(SystemConfig).where(SystemConfig.key == "ENFORCE_MARKET_HOURS"))
-            if not emh_cfg.scalars().first():
-                session.add(SystemConfig(key="ENFORCE_MARKET_HOURS", value="true"))
+        # Seed missing keys with settings defaults
+        defaults_to_seed = {
+            "AUTO_BUY_ENABLED": str(settings.AUTO_BUY_ENABLED).lower(),
+            "MIN_CONSENSUS_SCORE": str(settings.MIN_CONSENSUS_SCORE),
+            "TRIGGER_MIN_SCORE": str(settings.TRIGGER_MIN_SCORE),
+            "POSITION_SIZE_PCT": str(settings.POSITION_SIZE_PCT),
+            "ENFORCE_MARKET_HOURS": str(settings.ENFORCE_MARKET_HOURS).lower(),
+            "MAX_CAPITAL_USAGE_PCT": str(settings.MAX_CAPITAL_USAGE_PCT),
+            "MAX_DEPLOYABLE_CAPITAL_EUR": str(settings.MAX_DEPLOYABLE_CAPITAL_EUR) if settings.MAX_DEPLOYABLE_CAPITAL_EUR is not None else "",
+            "MAX_POSITIONS": str(settings.MAX_POSITIONS),
+            "TRADING_MODE": settings.TRADING_MODE,
+            "LIVE_TRADING_ENABLED": str(settings.LIVE_TRADING_ENABLED).lower(),
+            "IBKR_HOST": settings.IBKR_HOST,
+            "IBKR_PORT": str(settings.IBKR_PORT),
+            "IBKR_CLIENT_ID": str(settings.IBKR_CLIENT_ID),
+            "IBKR_ACCOUNT_ID": settings.IBKR_ACCOUNT_ID or "",
+        }
+
+        seeded_any = False
+        for k, v in defaults_to_seed.items():
+            if k not in db_configs:
+                session.add(SystemConfig(key=k, value=v))
+                db_configs[k] = v
+                seeded_any = True
+
+        if seeded_any:
+            await session.commit()
+
+        # Synchronize all persisted DB configurations into in-memory settings singleton
+        if "AUTO_BUY_ENABLED" in db_configs:
+            settings.AUTO_BUY_ENABLED = db_configs["AUTO_BUY_ENABLED"].strip().lower() == "true"
+        if "MIN_CONSENSUS_SCORE" in db_configs:
+            try:
+                settings.MIN_CONSENSUS_SCORE = int(db_configs["MIN_CONSENSUS_SCORE"])
+            except Exception:
+                pass
+        if "TRIGGER_MIN_SCORE" in db_configs:
+            try:
+                settings.TRIGGER_MIN_SCORE = int(db_configs["TRIGGER_MIN_SCORE"])
+            except Exception:
+                pass
+        if "POSITION_SIZE_PCT" in db_configs:
+            try:
+                settings.POSITION_SIZE_PCT = float(db_configs["POSITION_SIZE_PCT"])
+            except Exception:
+                pass
+        if "ENFORCE_MARKET_HOURS" in db_configs:
+            settings.ENFORCE_MARKET_HOURS = db_configs["ENFORCE_MARKET_HOURS"].strip().lower() == "true"
+        if "MAX_CAPITAL_USAGE_PCT" in db_configs:
+            try:
+                settings.MAX_CAPITAL_USAGE_PCT = float(db_configs["MAX_CAPITAL_USAGE_PCT"])
+            except Exception:
+                pass
+        if "MAX_DEPLOYABLE_CAPITAL_EUR" in db_configs:
+            try:
+                v = db_configs["MAX_DEPLOYABLE_CAPITAL_EUR"].strip()
+                settings.MAX_DEPLOYABLE_CAPITAL_EUR = float(v) if v and v not in ("None", "null") else None
+            except Exception:
+                pass
+        if "MAX_POSITIONS" in db_configs:
+            try:
+                settings.MAX_POSITIONS = max(1, int(db_configs["MAX_POSITIONS"]))
+            except Exception:
+                pass
+        if "TRADING_MODE" in db_configs:
+            m = db_configs["TRADING_MODE"].strip().upper()
+            if m in ("PAPER", "LIVE"):
+                settings.TRADING_MODE = m
+        if "LIVE_TRADING_ENABLED" in db_configs:
+            settings.LIVE_TRADING_ENABLED = db_configs["LIVE_TRADING_ENABLED"].strip().lower() == "true"
+        if "IBKR_HOST" in db_configs:
+            h = db_configs["IBKR_HOST"].strip()
+            if h:
+                settings.IBKR_HOST = h
+        if "IBKR_PORT" in db_configs:
+            try:
+                p = int(db_configs["IBKR_PORT"])
+                if p > 0:
+                    settings.IBKR_PORT = p
+            except Exception:
+                pass
+        if "IBKR_CLIENT_ID" in db_configs:
+            try:
+                settings.IBKR_CLIENT_ID = int(db_configs["IBKR_CLIENT_ID"])
+            except Exception:
+                pass
+        if "IBKR_ACCOUNT_ID" in db_configs:
+            aid = db_configs["IBKR_ACCOUNT_ID"].strip()
+            settings.IBKR_ACCOUNT_ID = aid if aid else None
 
         await session.commit()
+

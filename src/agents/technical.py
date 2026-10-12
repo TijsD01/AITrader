@@ -11,7 +11,22 @@ class TechnicalAnalystAgent:
     async def analyze(stock_data: Dict[str, Any]) -> Dict[str, Any]:
         ticker = stock_data["ticker"]
         t = stock_data["technicals"]
-        price = t["price"]
+        price = t.get("price", stock_data.get("price", 0.0))
+        ema20 = t.get("ema20", price)
+        ema50 = t.get("ema50", price)
+        sma200 = t.get("sma200", price)
+        above_ema20 = t.get("above_ema20", price >= ema20)
+        above_ema50 = t.get("above_ema50", price >= ema50)
+        above_sma200 = t.get("above_sma200", price >= sma200)
+        rsi14 = t.get("rsi14", 50.0)
+        macd = t.get("macd", 0.0)
+        macd_signal = t.get("macd_signal", 0.0)
+        macd_hist = t.get("macd_hist", 0.0)
+        support_20d = t.get("support_20d", round(price * 0.95, 2))
+        resistance_20d = t.get("resistance_20d", round(price * 1.05, 2))
+        return_5d_pct = t.get("return_5d_pct", 0.0)
+        return_1m_pct = t.get("return_1m_pct", 0.0)
+        volume_surge_ratio = t.get("volume_surge_ratio", 1.0)
 
         system_prompt = (
             "You are a Senior Quantitative Technical Analyst at a top Wall Street & European hedge fund. "
@@ -23,13 +38,13 @@ class TechnicalAnalystAgent:
 Ticker: {ticker}
 Current Price: {price} {stock_data.get('currency', 'USD')}
 Technical Indicators:
-- EMA 20: {t['ema20']}, EMA 50: {t['ema50']}, SMA 200: {t['sma200']}
-- Price vs EMAs: Above EMA20={t['above_ema20']}, Above EMA50={t['above_ema50']}, Above SMA200={t['above_sma200']}
-- RSI (14): {t['rsi14']}
-- MACD Line: {t['macd']}, Signal: {t['macd_signal']}, Histogram: {t['macd_hist']}
-- Support (20d): {t['support_20d']}, Resistance (20d): {t['resistance_20d']}
-- 5-Day Return: {t['return_5d_pct']}%, 1-Month Return: {t['return_1m_pct']}%
-- Volume Surge: {t['volume_surge_ratio']}x average
+- EMA 20: {ema20}, EMA 50: {ema50}, SMA 200: {sma200}
+- Price vs EMAs: Above EMA20={above_ema20}, Above EMA50={above_ema50}, Above SMA200={above_sma200}
+- RSI (14): {rsi14}
+- MACD Line: {macd}, Signal: {macd_signal}, Histogram: {macd_hist}
+- Support (20d): {support_20d}, Resistance (20d): {resistance_20d}
+- 5-Day Return: {return_5d_pct}%, 1-Month Return: {return_1m_pct}%
+- Volume Surge: {volume_surge_ratio}x average
 
 Return JSON with exactly these keys:
 {{
@@ -49,17 +64,17 @@ Return JSON with exactly these keys:
         # High-precision Quantitative Fallback
         score = 50
         drivers = []
-        if t["above_ema50"] and t["above_sma200"]:
+        if above_ema50 and above_sma200:
             score += 20
-            drivers.append(f"Golden Trend: Price is trading above both 50 EMA ({t['ema50']}) and 200 SMA ({t['sma200']}).")
-        elif t["above_ema20"]:
+            drivers.append(f"Golden Trend: Price is trading above both 50 EMA ({ema50}) and 200 SMA ({sma200}).")
+        elif above_ema20:
             score += 10
-            drivers.append(f"Short-term bullish momentum above 20 EMA ({t['ema20']}).")
+            drivers.append(f"Short-term bullish momentum above 20 EMA ({ema20}).")
         else:
             score -= 15
             drivers.append("Bearish price action trading below short-term moving averages.")
 
-        rsi = t["rsi14"]
+        rsi = rsi14
         if 48 <= rsi <= 68:
             score += 15
             drivers.append(f"Healthy bullish momentum on RSI-14 ({rsi}).")
@@ -73,28 +88,28 @@ Return JSON with exactly these keys:
             score -= 10
             drivers.append(f"Weak momentum with depressed RSI ({rsi}).")
 
-        if t["macd_hist"] > 0:
+        if macd_hist > 0:
             score += 10
             drivers.append("Positive MACD histogram confirms expanding upward momentum.")
 
-        if t["volume_surge_ratio"] >= 1.2:
+        if volume_surge_ratio >= 1.2:
             score += 5
-            drivers.append(f"Institutional volume surge at {t['volume_surge_ratio']}x average.")
+            drivers.append(f"Institutional volume surge at {volume_surge_ratio}x average.")
 
         bias = "BULLISH" if score >= 65 else ("BEARISH" if score <= 40 else "NEUTRAL")
         confidence = min(95, max(10, score))
 
         summary = (
             f"{bias} outlook with {confidence}% confidence. "
-            f"{' '.join(drivers[:2])} Immediate key resistance sits at {t['resistance_20d']} "
-            f"with tactical support at {t['support_20d']}."
+            f"{' '.join(drivers[:2])} Immediate key resistance sits at {resistance_20d} "
+            f"with tactical support at {support_20d}."
         )
 
         return {
             "bias": bias,
             "confidence": confidence,
             "key_drivers": drivers,
-            "support_level": t["support_20d"],
-            "resistance_level": t["resistance_20d"],
+            "support_level": support_20d,
+            "resistance_level": resistance_20d,
             "analysis_summary": summary
         }

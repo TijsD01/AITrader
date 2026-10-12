@@ -12,7 +12,11 @@ from config.settings import settings
 from src.db.session import init_db
 from src.scheduler.jobs import trading_scheduler
 from src.telegram.bot import telegram_bot
+from src.trading.broker import live_broker
 from src.web.routes import router
+from src.memory.store import memory_store
+from src.memory.routes import memory_router
+from src.memory.proxy import proxy_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,6 +31,9 @@ async def lifespan(app: FastAPI):
     # Startup actions
     logger.info("Initializing database...")
     await init_db()
+
+    logger.info("Initializing TencentDB Agent Memory storage...")
+    await memory_store.init_db()
     
     logger.info("Starting background scheduler...")
     trading_scheduler.start()
@@ -42,6 +49,8 @@ async def lifespan(app: FastAPI):
     trading_scheduler.stop()
     await telegram_bot.stop()
     telegram_task.cancel()
+    logger.info("Disconnecting broker clients...")
+    await live_broker.disconnect()
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -58,6 +67,8 @@ app.add_middleware(
 )
 
 app.include_router(router)
+app.include_router(memory_router)
+app.include_router(proxy_router)
 
 # Mount static directory
 if not os.path.exists(STATIC_DIR):
