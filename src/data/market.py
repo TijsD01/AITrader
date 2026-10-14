@@ -28,8 +28,8 @@ class MarketDataProvider:
 
         try:
             ticker = yf.Ticker(ticker_symbol)
-            # Fetch 6 months of daily data to calculate 200 SMA and indicators
-            hist = ticker.history(period="6mo")
+            # Fetch 1 year of daily data (~250 bars) so the 200-day SMA is a real 200-day SMA
+            hist = ticker.history(period="1y")
             if hist.empty or len(hist) < 20:
                 logger.warning(f"Insufficient historical data for {ticker_symbol}")
                 return None
