@@ -105,8 +105,15 @@ Synthesize the debate and return JSON with:
             res = await llm_client.generate_json(system_prompt, user_prompt)
             if res and "action" in res and "consensus_score" in res:
                 res_action = res["action"]
-                if not risk_rep.get("approved", True) and res_action in ("BUY", "STRONG_BUY"):
-                    res_action = "HOLD"
+                try:
+                    res_score = int(res["consensus_score"])
+                except (TypeError, ValueError):
+                    res_score = 0
+                # Risk Officer veto: downgrade and cap the score, since triggers are armed on score alone
+                if not risk_rep.get("approved", True):
+                    if res_action in ("BUY", "STRONG_BUY"):
+                        res_action = "HOLD"
+                    res_score = min(res_score, 55)
                 
                 # Asynchronously log decision to TencentDB Agent Memory L0 and trigger asset extraction
                 try:
@@ -116,8 +123,8 @@ Synthesize the debate and return JSON with:
                     asyncio.create_task(agent_memory_client.log_interaction(
                         session_id=f"committee_{ticker}_{int(time.time())}",
                         role="assistant",
-                        content=f"Deliberation on {ticker} ({res_action}, Score {res.get('consensus_score')}/100):\n{res.get('debate_transcript', '')}\n\nVerdict: {res.get('verdict_summary', '')}",
-                        metadata={"ticker": ticker, "action": res_action, "consensus_score": res.get("consensus_score"), "price": price},
+                        content=f"Deliberation on {ticker} ({res_action}, Score {res_score}/100):\n{res.get('debate_transcript', '')}\n\nVerdict: {res.get('verdict_summary', '')}",
+                        metadata={"ticker": ticker, "action": res_action, "consensus_score": res_score, "price": price},
                         trigger_extraction=True
                     ))
                 except Exception:
@@ -129,7 +136,7 @@ Synthesize the debate and return JSON with:
                     "currency": curr,
                     "price": price,
                     "action": res_action,
-                    "consensus_score": int(res["consensus_score"]),
+                    "consensus_score": res_score,
                     "summary": res.get("verdict_summary", ""),
                     "debate_transcript": res.get("debate_transcript", ""),
                     "entry_trigger_price": risk_rep.get("entry_trigger_price", price),

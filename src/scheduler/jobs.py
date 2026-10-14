@@ -258,7 +258,7 @@ class TradingScheduler:
                     elif ticker in pending_tickers:
                         logger.info(f"Skipping trigger for {ticker}: pending trigger already active (anti-overlap).")
                         report["status_type"] = "TRIGGER_PENDING"
-                    elif report["consensus_score"] >= trigger_min_score:
+                    elif report["consensus_score"] >= trigger_min_score and report["risk"].get("approved", True):
                         # Automatically arm trigger for setups scoring >= 80
                         curr_summary = await paper_broker.get_portfolio_summary()
                         available_cash = curr_summary.get("available_cash_eur", 0.0)
@@ -501,7 +501,7 @@ class TradingScheduler:
                         break
 
                     report = await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
-                    if report["consensus_score"] >= trigger_min_score:
+                    if report["consensus_score"] >= trigger_min_score and report["risk"].get("approved", True):
                         alloc = calculate_position_allocation(
                             available_cash=avail,
                             current_positions_count=len(open_tickers),
