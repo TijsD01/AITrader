@@ -281,5 +281,79 @@ def is_trigger_expired(created_at, now=None, max_age_days: Optional[int] = None)
     now = now or datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
     return (now - created_at) > datetime.timedelta(days=days)
 
+def apply_risk_budget(
+    allocation_eur: float,
+    price_native: Optional[float],
+    stop_loss_native: Optional[float],
+    portfolio_value_eur: float,
+    risk_pct: Optional[float] = None
+) -> float:
+    """
+    Caps an automated buy so that hitting its stop loses at most risk_pct % of the portfolio
+    (equal risk per trade instead of equal money per trade). A wide stop gets a smaller position.
+    Leaves the allocation unchanged when there is no usable stop or the cap is switched off.
+    """
+    pct = settings.RISK_PER_TRADE_PCT if risk_pct is None else risk_pct
+    if not pct or pct <= 0 or not price_native or price_native <= 0 or not stop_loss_native or portfolio_value_eur <= 0:
+        return allocation_eur
+    stop_distance = (price_native - stop_loss_native) / price_native
+    if stop_distance <= 0:
+        return allocation_eur
+    cap = portfolio_value_eur * (pct / 100.0) / stop_distance
+    return round(min(allocation_eur, cap), 2)
+
+def compute_trailing_stop(
+    entry_price: Optional[float],
+    current_stop: Optional[float],
+    highest_price: Optional[float],
+    atr: Optional[float],
+    breakeven_trigger_pct: float,
+    atr_mult: Optional[float] = None
+) -> Optional[float]:
+    """
+    Returns the ratcheted stop for a position; never lower than current_stop.
+    Once the high-water mark is breakeven_trigger_pct above entry, the stop moves to at least entry + 1%.
+    With atr_mult > 0 it then trails at highest_price - atr_mult x ATR, so winners can run
+    while a reversal still locks in most of the gain.
+    """
+    if not entry_price or entry_price <= 0 or not highest_price:
+        return current_stop
+    if (highest_price / entry_price) - 1.0 < breakeven_trigger_pct:
+        return current_stop
+    candidate = entry_price * 1.01
+    mult = settings.TRAILING_STOP_ATR_MULT if atr_mult is None else atr_mult
+    if mult and mult > 0 and atr and atr > 0:
+        candidate = max(candidate, highest_price - mult * atr)
+    candidate = round(candidate, 2)
+    if current_stop is not None and current_stop >= candidate:
+        return current_stop
+    return candidate
+
+def regime_index_for_ticker(ticker: str, currency: Optional[str] = None) -> str:
+    """The market index whose trend decides whether new entries in this ticker are allowed."""
+    from src.trading.fees import is_european_ticker
+    return settings.REGIME_INDEX_EU if is_european_ticker(ticker, currency) else settings.REGIME_INDEX_US
+
+def check_market_regime(ticker: str, currency: Optional[str] = None) -> Tuple[bool, str]:
+    """
+    Market regime filter: blocks new automated entries while the ticker's market index trades
+    below its REGIME_SMA_DAYS moving average. Returns (allowed, reason). Fails open when the
+    index data cannot be fetched. Blocking (fetches index data); call it via asyncio.to_thread.
+    """
+    if not settings.REGIME_FILTER_ENABLED:
+        return True, ""
+    from src.data.market import market_data_provider
+    index_symbol = regime_index_for_ticker(ticker, currency)
+    regime = market_data_provider.get_index_regime(index_symbol, settings.REGIME_SMA_DAYS)
+    if not regime:
+        logger.warning(f"Regime filter: no data for {index_symbol}, allowing entry in {ticker}.")
+        return True, ""
+    if regime["above_sma"]:
+        return True, ""
+    return False, (
+        f"Market regime filter: {index_symbol} ({regime['price']}) is below its "
+        f"{regime['sma_days']}-day average ({regime['sma']}); no new entries in a falling market."
+    )
+
 import sys
 risk_guardrail = sys.modules[__name__]

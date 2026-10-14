@@ -67,6 +67,17 @@ class Settings(BaseSettings):
     TRIGGER_EXPIRY_DAYS: int = 7            # Pending price triggers older than this are marked EXPIRED
     ENFORCE_MARKET_HOURS: bool = True       # When true, trades are strictly blocked when markets are closed
 
+    # Research-backed strategy controls (see analyse/onderzoekspapers.md in the project files)
+    REGIME_FILTER_ENABLED: bool = True      # No new automated entries while the market index is below its long-term average
+    REGIME_SMA_DAYS: int = 200              # Moving-average length for the regime filter
+    REGIME_INDEX_EU: str = "^STOXX50E"      # Index that sets the regime for European tickers
+    REGIME_INDEX_US: str = "^GSPC"          # Index that sets the regime for US tickers
+    RISK_PER_TRADE_PCT: float = 0.5         # Automated buys lose at most this % of portfolio value at the stop (0 = off)
+    TRAILING_STOP_ATR_MULT: float = 2.5     # Past the breakeven step, trail the stop at highest price minus N x ATR (0 = off)
+    SENTIMENT_ANONYMIZE: bool = True        # Hide company name and ticker from the news-sentiment prompt
+    SENTIMENT_VETO_SCORE: float = -0.4      # News sentiment at or below this blocks a buy; positive news adds nothing
+    LEARNER_MIN_TRADES: int = 20            # Closed trades required between automatic learner recalibrations
+
     # Real Money Trading & Broker Scheme
     TRADING_MODE: str = "PAPER"             # "PAPER" or "LIVE"
     LIVE_TRADING_ENABLED: bool = False      # Explicit safety interlock for real money

@@ -10,7 +10,7 @@ from src.db.models import Position, Trade, PortfolioSnapshot, SystemConfig, Orde
 from src.db.session import AsyncSessionLocal
 from src.data.currency import currency_service
 from src.data.market import market_data_provider
-from src.trading.risk import risk_guardrail, get_effective_deployable_cash, calculate_position_allocation, allocate_pending_triggers, evaluate_trigger_condition, is_trigger_expired, validate_trigger_levels
+from src.trading.risk import risk_guardrail, get_effective_deployable_cash, calculate_position_allocation, allocate_pending_triggers, evaluate_trigger_condition, is_trigger_expired, validate_trigger_levels, apply_risk_budget, compute_trailing_stop, check_market_regime
 from src.data.market_hours import check_market_hours
 from src.trading.base import BaseBroker
 
@@ -169,6 +169,10 @@ class PaperBroker(BaseBroker):
             pending_triggers = trig_res.scalars().all()
             other_committed = sum(t.allocation_eur for t in pending_triggers)
             available_cash = max(0.0, usable_cash - other_committed)
+
+            # Automated buys risk the same share of the portfolio at their stop
+            if not is_manual:
+                allocation_eur = apply_risk_budget(allocation_eur, price_native, stop_loss_native, total_eur)
 
             # Validate risk guardrails
             valid, msg = risk_guardrail.validate_buy_order(
@@ -430,7 +434,7 @@ class PaperBroker(BaseBroker):
                 from src.trading.learner import trade_learner
                 post_mortem = await trade_learner.conduct_trade_post_mortem(trade.id)
                 lesson_text = post_mortem.get("lesson") if post_mortem else None
-                calib = await trade_learner.calibrate_internal_parameters(trade.id)
+                calib = await trade_learner.calibrate_internal_parameters(trade.id, automatic=True)
                 adjustments = calib.get("adjustments", []) if calib else []
             except Exception as learn_err:
                 logger.error(f"Error in trade learning post-mortem/calibration for trade #{trade.id}: {learn_err}")
@@ -495,11 +499,14 @@ class PaperBroker(BaseBroker):
                         p.current_price_eur = currency_service.to_eur(curr_price, p.currency)
                         if curr_price > p.highest_price_native:
                             p.highest_price_native = curr_price
-                            # Dynamic Trailing Stop: If price moves up past breakeven_trigger_pct, ratchet up stop loss to breakeven or higher
-                            gain_pct = (curr_price / p.entry_price_native) - 1.0
-                            if gain_pct >= breakeven_trigger_pct and (p.stop_loss_native is None or p.stop_loss_native < p.entry_price_native):
-                                p.stop_loss_native = round(p.entry_price_native * 1.01, 2)  # Secure breakeven + 1%
-                                logger.info(f"Trailing Stop ratcheted to breakeven for {p.ticker} at {p.stop_loss_native} (+{gain_pct*100:.1f}%)")
+                            # Trailing stop: past breakeven_trigger_pct the stop moves to breakeven + 1%, then trails by N x ATR
+                            new_stop = compute_trailing_stop(
+                                p.entry_price_native, p.stop_loss_native, p.highest_price_native,
+                                data.get("technicals", {}).get("atr14"), breakeven_trigger_pct
+                            )
+                            if new_stop is not None and new_stop != p.stop_loss_native:
+                                p.stop_loss_native = new_stop
+                                logger.info(f"Trailing stop raised for {p.ticker} to {new_stop} (high {p.highest_price_native})")
                         
                         # Calculate unrealized PnL
                         curr_val_eur = p.current_price_eur * p.shares
@@ -851,6 +858,11 @@ class PaperBroker(BaseBroker):
                     continue
 
                 if condition_met:
+                    # Market regime filter: the trigger stays armed (and expires as usual) while the index is in a downtrend
+                    regime_ok, regime_msg = await asyncio.to_thread(check_market_regime, t.ticker, t.currency)
+                    if not regime_ok:
+                        logger.info(f"Trigger #{t.id} for {t.ticker} held back: {regime_msg}")
+                        continue
                     logger.info(f"🎯 AI Trigger hit for {t.ticker}: {t.trigger_type} at {curr_price} (Target: {t.target_price})")
                     trade_res = await self.execute_buy(
                         ticker=t.ticker,

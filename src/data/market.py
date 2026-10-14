@@ -11,6 +11,8 @@ logger = logging.getLogger(__name__)
 _stock_cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
 _CACHE_TTL_OPEN: float = 60.0
 _CACHE_TTL_CLOSED: float = 1800.0
+_regime_cache: Dict[str, tuple[float, Optional[Dict[str, Any]]]] = {}
+_REGIME_CACHE_TTL: float = 3600.0
 
 class MarketDataProvider:
     @staticmethod
@@ -93,6 +95,10 @@ class MarketDataProvider:
             support_20d = float(recent_20["Low"].min())
             resistance_20d = float(recent_20["High"].max())
 
+            # 52-week high (George & Hwang 2004: nearness to it predicts returns better than past return)
+            high_52w = float(highs.max())
+            pct_below_52w_high = ((high_52w - current_price) / high_52w) * 100 if high_52w > 0 else 0.0
+
             # Volume comparison
             avg_vol_20 = float(volumes.tail(20).mean())
             last_vol = float(volumes.iloc[-1])
@@ -125,6 +131,8 @@ class MarketDataProvider:
                     "atr14": round(atr14, 2),
                     "support_20d": round(support_20d, 2),
                     "resistance_20d": round(resistance_20d, 2),
+                    "high_52w": round(high_52w, 2),
+                    "pct_below_52w_high": round(max(0.0, pct_below_52w_high), 2),
                     "volume_surge_ratio": volume_surge_ratio,
                     "return_1d_pct": round(ret_1d, 2),
                     "return_5d_pct": round(ret_5d, 2),
@@ -158,6 +166,39 @@ class MarketDataProvider:
         except Exception as e:
             logger.error(f"Error compiling market data for {ticker_symbol}: {e}")
             return None
+
+    @staticmethod
+    def get_index_regime(index_symbol: str, sma_days: int = 200) -> Optional[Dict[str, Any]]:
+        """
+        Returns the index's last close and its sma_days moving average, cached for an hour.
+        None when the history is unavailable or too short.
+        """
+        key = f"{index_symbol.upper()}:{sma_days}"
+        now = time.time()
+        cached = _regime_cache.get(key)
+        if cached and (now - cached[0]) < _REGIME_CACHE_TTL:
+            return cached[1]
+        result = None
+        try:
+            period = "2y" if sma_days > 200 else "1y"
+            closes = yf.Ticker(index_symbol).history(period=period)["Close"].dropna()
+            if len(closes) >= sma_days:
+                last = float(closes.iloc[-1])
+                sma = float(closes.tail(sma_days).mean())
+                result = {
+                    "index": index_symbol,
+                    "price": round(last, 2),
+                    "sma": round(sma, 2),
+                    "sma_days": sma_days,
+                    "above_sma": last >= sma,
+                }
+            else:
+                logger.warning(f"Not enough history for {index_symbol} to compute a {sma_days}-day average.")
+        except Exception as e:
+            logger.error(f"Error fetching regime data for {index_symbol}: {e}")
+        # A failed fetch is retried after 10 minutes instead of on every trigger check
+        _regime_cache[key] = (now if result is not None else now - _REGIME_CACHE_TTL + 600.0, result)
+        return result
 
     @staticmethod
     def invalidate(ticker_symbols) -> None:

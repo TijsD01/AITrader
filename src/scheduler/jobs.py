@@ -12,7 +12,7 @@ from src.screener.scanner import market_scanner
 from src.data.market import market_data_provider
 from src.agents.committee import investment_committee
 from src.trading.broker import active_broker as paper_broker, get_active_broker, active_broker
-from src.trading.risk import calculate_position_allocation
+from src.trading.risk import calculate_position_allocation, check_market_regime
 from src.telegram.bot import telegram_bot
 from sqlalchemy import select, desc
 from src.db.session import AsyncSessionLocal
@@ -275,8 +275,12 @@ class TradingScheduler:
                         # Automatically arm trigger for approved buy setups scoring >= 80
                         curr_summary = await paper_broker.get_portfolio_summary()
                         available_cash = curr_summary.get("available_cash_eur", 0.0)
+                        regime_ok, regime_msg = await asyncio.to_thread(check_market_regime, ticker, data.get("currency"))
 
-                        if available_cash < 20.0:
+                        if not regime_ok:
+                            logger.info(f"Skipping trigger for {ticker}: {regime_msg}")
+                            report["status_type"] = "REGIME_FILTER"
+                        elif available_cash < 20.0:
                             logger.info(f"Skipping trigger for {ticker}: insufficient available cash (€{available_cash:.2f}).")
                             report["status_type"] = "INSUFFICIENT_CASH"
                         else:
@@ -512,6 +516,12 @@ class TradingScheduler:
                     avail = summary.get("available_cash_eur", 0.0)
                     if avail < 20.0:
                         break
+
+                    # Regime filter before the committee: no LLM calls for entries that would be blocked anyway
+                    regime_ok, regime_msg = await asyncio.to_thread(check_market_regime, tk, data.get("currency"))
+                    if not regime_ok:
+                        logger.info(f"Opportunity Scanner skipped {tk}: {regime_msg}")
+                        continue
 
                     report = await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
                     if self._should_arm_trigger(report, trigger_min_score):

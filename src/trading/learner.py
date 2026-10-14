@@ -1,7 +1,7 @@
 import logging
 import datetime
 from typing import Dict, Any, List, Optional
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, func
 
 from config.settings import settings
 from src.db.session import AsyncSessionLocal
@@ -203,13 +203,32 @@ class TradeLearner:
                 "lesson": lesson
             }
 
-    async def calibrate_internal_parameters(self, trade_id: Optional[int] = None) -> Dict[str, Any]:
+    async def calibrate_internal_parameters(self, trade_id: Optional[int] = None, automatic: bool = False) -> Dict[str, Any]:
         """
         Spins up an autonomous Strategy & Risk Calibration Agent to review historical
         win/loss patterns, latest closed trade diagnostics, and adaptive lessons,
         and dynamically calibrate internal trading parameters.
+
+        automatic=True (the call after each exit) only recalibrates once LEARNER_MIN_TRADES trades have
+        closed since the last calibration: a few outcomes are mostly noise, and tuning on them overfits.
+        Manual calibration (dashboard, Telegram) always runs.
         """
         async with AsyncSessionLocal() as session:
+            if automatic and settings.LEARNER_MIN_TRADES > 1:
+                last_res = await session.execute(select(SystemConfig).where(SystemConfig.key == "LAST_CALIBRATION_TIMESTAMP"))
+                last_row = last_res.scalars().first()
+                since_query = select(func.count(Trade.id)).where(Trade.order_type == "SELL")
+                if last_row and last_row.value:
+                    try:
+                        since_query = since_query.where(Trade.executed_at > datetime.datetime.fromisoformat(last_row.value))
+                    except ValueError:
+                        pass
+                closed_since = (await session.execute(since_query)).scalar() or 0
+                if closed_since < settings.LEARNER_MIN_TRADES:
+                    msg = f"Calibration waits for {settings.LEARNER_MIN_TRADES} closed trades ({closed_since} since the last one)."
+                    logger.info(msg)
+                    return {"success": False, "skipped": True, "message": msg, "adjustments": []}
+
             # 1. Fetch recent closed trades and lessons (last 20)
             res = await session.execute(
                 select(Trade).where(Trade.order_type == "SELL").order_by(desc(Trade.executed_at)).limit(20)

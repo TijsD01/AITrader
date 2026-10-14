@@ -103,7 +103,13 @@ class MarketScanner:
             score += 10
             notes.append(f"Volume Surge ({t['volume_surge_ratio']}x avg)")
 
-        # 5. Fundamental bonus / penalty
+        # 5. Near the 52-week high (George & Hwang 2004: a stronger momentum signal than past return)
+        pct_below_high = t.get("pct_below_52w_high")
+        if pct_below_high is not None and pct_below_high <= 5.0:
+            score += 10
+            notes.append(f"Within {pct_below_high}% of 52-week high")
+
+        # 6. Fundamental bonus / penalty
         rev_growth = f.get("revenue_growth")
         if rev_growth and rev_growth > 0.08:
             score += 5
