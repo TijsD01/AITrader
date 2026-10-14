@@ -350,6 +350,30 @@ def compute_trailing_stop(
         return current_stop
     return candidate
 
+def whole_share_count(
+    allocation_eur: float,
+    price_eur: float,
+    max_eur: Optional[float] = None,
+    round_up_pct: Optional[float] = None
+) -> int:
+    """
+    Whole number of shares closest to allocation_eur. Rounds up by one share only when that is
+    closer to the allocation, costs at most round_up_pct % above it and stays within max_eur
+    (the cash that is actually there). Returns 0 when even one share does not fit.
+    """
+    import math
+    if not allocation_eur or allocation_eur <= 0 or not price_eur or price_eur <= 0:
+        return 0
+    pct = settings.WHOLE_SHARE_ROUND_UP_PCT if round_up_pct is None else round_up_pct
+    ceiling = allocation_eur * (1.0 + max(0.0, pct) / 100.0)
+    if max_eur is not None:
+        ceiling = min(ceiling, max_eur)
+    down = int(math.floor(min(allocation_eur, ceiling) / price_eur + 1e-9))
+    up = down + 1
+    if up * price_eur <= ceiling + 1e-9 and (up * price_eur - allocation_eur) < (allocation_eur - down * price_eur):
+        return up
+    return down
+
 def regime_index_for_ticker(ticker: str, currency: Optional[str] = None) -> str:
     """The market index whose trend decides whether new entries in this ticker are allowed."""
     from src.trading.fees import is_european_ticker

@@ -19,7 +19,8 @@ from sqlalchemy import select, desc
 from src.db.session import AsyncSessionLocal
 from src.db.models import AnalysisReport, MarketDigest, Position, OrderTrigger, SystemConfig
 from src.data.review_tracker import review_tracker
-from src.trading.risk import check_market_regime
+from src.trading.risk import check_market_regime, whole_share_count
+from src.data.currency import currency_service
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,14 @@ class TradingScheduler:
             and report.get("action") in ("BUY", "STRONG_BUY")
             and report["risk"].get("approved", True)
         )
+
+    @staticmethod
+    def _fits_whole_share(allocation_eur: float, price_native: float, currency: str) -> bool:
+        """False when whole-share sizing is on and not even one share fits the allocation."""
+        if not settings.WHOLE_SHARES_ONLY:
+            return True
+        price_eur = currency_service.to_eur(price_native, currency)
+        return whole_share_count(allocation_eur, price_eur) >= 1
 
     async def _scheduled_market_session(self, market: str, session: str):
         """Safeguard for scheduled cron jobs: only run on weekdays."""
@@ -295,27 +304,31 @@ class TradingScheduler:
 
                             trigger_type, trigger_price, sl, tp = derive_trigger_levels(report, data["price"])
 
-                            trig_res = await paper_broker.create_price_trigger(
-                                ticker=ticker,
-                                name=data.get("name", ticker),
-                                currency=data["currency"],
-                                trigger_type=trigger_type,
-                                target_price=trigger_price,
-                                current_price_at_creation=data["price"],
-                                stop_loss=sl,
-                                take_profit=tp,
-                                allocation_eur=alloc_eur,
-                                consensus_score=report["consensus_score"],
-                                ai_rationale=report.get("trigger_rationale", report["summary"])
-                            )
-                            if trig_res.get("success"):
-                                pending_tickers.add(ticker)
-                                report["status_type"] = "TRIGGER_ARMED"
-                                armed_triggers.append(trig_res)
-                                await telegram_bot.notify_trigger_armed(trig_res)
+                            if not self._fits_whole_share(alloc_eur, trigger_price, data["currency"]):
+                                logger.info(f"Skipping trigger for {ticker}: one share costs more than the €{alloc_eur:.2f} allocation.")
+                                report["status_type"] = "SHARE_TOO_EXPENSIVE"
                             else:
-                                logger.warning(f"Could not auto-arm trigger for {ticker}: {trig_res.get('message')}")
-                                report["status_type"] = "ON_RADAR"
+                                trig_res = await paper_broker.create_price_trigger(
+                                    ticker=ticker,
+                                    name=data.get("name", ticker),
+                                    currency=data["currency"],
+                                    trigger_type=trigger_type,
+                                    target_price=trigger_price,
+                                    current_price_at_creation=data["price"],
+                                    stop_loss=sl,
+                                    take_profit=tp,
+                                    allocation_eur=alloc_eur,
+                                    consensus_score=report["consensus_score"],
+                                    ai_rationale=report.get("trigger_rationale", report["summary"])
+                                )
+                                if trig_res.get("success"):
+                                    pending_tickers.add(ticker)
+                                    report["status_type"] = "TRIGGER_ARMED"
+                                    armed_triggers.append(trig_res)
+                                    await telegram_bot.notify_trigger_armed(trig_res)
+                                else:
+                                    logger.warning(f"Could not auto-arm trigger for {ticker}: {trig_res.get('message')}")
+                                    report["status_type"] = "ON_RADAR"
                     else:
                         report["status_type"] = "ON_RADAR"
 
@@ -519,36 +532,38 @@ class TradingScheduler:
                     armed = False
                     if self._should_arm_trigger(report, trigger_min_score):
                         regime_ok, regime_msg = await asyncio.to_thread(check_market_regime, tk, data.get("currency"))
-                        if not regime_ok:
-                            logger.info(f"Opportunity Scanner skipped {tk}: {regime_msg}")
-                            continue
                         alloc = calculate_position_allocation(
                             available_cash=avail,
                             current_positions_count=len(open_tickers),
                             recommended_size_pct=report["risk"].get("recommended_size_pct"),
                             full_budget_utilization=settings.FULL_BUDGET_UTILIZATION
                         )
-
                         t_type, t_price, sl, tp = derive_trigger_levels(report, data["price"])
 
-                        trig_res = await paper_broker.create_price_trigger(
-                            ticker=tk,
-                            name=data.get("name", tk),
-                            currency=data["currency"],
-                            trigger_type=t_type,
-                            target_price=t_price,
-                            current_price_at_creation=data["price"],
-                            stop_loss=sl,
-                            take_profit=tp,
-                            allocation_eur=alloc,
-                            consensus_score=report["consensus_score"],
-                            ai_rationale=report.get("trigger_rationale", report["summary"])
-                        )
-                        if trig_res.get("success"):
-                            pending_tickers.add(tk)
-                            logger.info(f"Opportunity Scanner auto-armed trigger #{trig_res['trigger_id']} for {tk} (Score {report['consensus_score']}/100 >= {trigger_min_score})")
-                            await telegram_bot.notify_trigger_armed(trig_res)
-                            armed = True
+                        # Skip arming, but still let the shadow portfolios see the verdict below
+                        if not regime_ok:
+                            logger.info(f"Opportunity Scanner skipped {tk}: {regime_msg}")
+                        elif not self._fits_whole_share(alloc, t_price, data["currency"]):
+                            logger.info(f"Opportunity Scanner skipped {tk}: one share costs more than the €{alloc:.2f} allocation.")
+                        else:
+                            trig_res = await paper_broker.create_price_trigger(
+                                ticker=tk,
+                                name=data.get("name", tk),
+                                currency=data["currency"],
+                                trigger_type=t_type,
+                                target_price=t_price,
+                                current_price_at_creation=data["price"],
+                                stop_loss=sl,
+                                take_profit=tp,
+                                allocation_eur=alloc,
+                                consensus_score=report["consensus_score"],
+                                ai_rationale=report.get("trigger_rationale", report["summary"])
+                            )
+                            if trig_res.get("success"):
+                                pending_tickers.add(tk)
+                                logger.info(f"Opportunity Scanner auto-armed trigger #{trig_res['trigger_id']} for {tk} (Score {report['consensus_score']}/100 >= {trigger_min_score})")
+                                await telegram_bot.notify_trigger_armed(trig_res)
+                                armed = True
                     await shadow_portfolios.follow_report(report, data, followed_main=armed)
         except Exception as e:
             logger.error(f"Error in scan_market_opportunities: {e}")

@@ -100,6 +100,8 @@ class Settings(BaseSettings):
     SENTIMENT_ANONYMIZE: bool = True        # Hide company name and ticker from the news-sentiment prompt
     SENTIMENT_VETO_SCORE: float = -0.4      # News sentiment at or below this blocks a buy; positive news adds nothing
     LEARNER_MIN_TRADES: int = 20            # Closed trades required between automatic learner recalibrations
+    WHOLE_SHARES_ONLY: bool = True          # Buy whole shares only: IBKR's API rejects fractional quantities (paper mirrors live)
+    WHOLE_SHARE_ROUND_UP_PCT: float = 10.0  # May round up to one extra share if that costs at most this % above the allocation
 
     # Interactive Brokers (IBKR) Config (Supports EU & US equities)
     IBKR_HOST: str = "172.17.0.2"
