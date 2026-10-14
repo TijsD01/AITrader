@@ -360,6 +360,7 @@ button.ui-chip { cursor: pointer; }
   /* 44px tap targets */
   button, select, summary, [role="button"] { min-height: 44px; }
   .bottom-nav-btn { min-height: 56px; }
+  .ui-btn-sm, button.ui-btn-sm { min-height: 44px; }
   input:not([type="checkbox"]):not([type="radio"]):not([type="range"]) { min-height: 44px; }
   input[type="range"] { min-height: 44px; }
 
