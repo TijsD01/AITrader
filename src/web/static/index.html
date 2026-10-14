@@ -389,221 +389,194 @@
       </div>
     </section>
 
-    <!-- TAB 2: DAILY STOCK ADVICE -->
+    <!-- TAB 2: ADVICE -->
     <section id="tab-advice" class="tab-content hidden space-y-5">
-      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div>
-          <h2 class="text-base sm:text-lg font-bold text-white flex items-center gap-2">
-            <i class="fa-solid fa-lightbulb text-amber-400"></i> Daily Committee Stock Advice
-          </h2>
-          <p class="text-xs text-slate-400">Multi-agent evaluated opportunities ranked by consensus conviction</p>
+      <div class="ui-page-head">
+        <div class="min-w-0">
+          <h2 class="ui-page-title">Advice</h2>
+          <p class="ui-page-sub">Committee picks, ranked by conviction</p>
         </div>
-        <button onclick="loadRecommendations()" class="self-start sm:self-auto text-xs bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-1.5 rounded-lg flex items-center gap-1.5">
-          <i class="fa-solid fa-arrows-rotate"></i> Refresh Advice
+        <button type="button" onclick="loadRecommendations()" class="ui-btn ui-btn-sm">
+          <i class="fa-solid fa-arrows-rotate"></i> Refresh
         </button>
       </div>
 
-      <!-- Opening Market Review Card -->
-      <div id="marketReviewCard" class="bg-cardBg border border-borderCol rounded-xl p-4 sm:p-5 shadow-sm space-y-3">
-        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-borderCol pb-3">
-          <div class="flex flex-wrap items-center gap-2">
-            <span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-              <i class="fa-solid fa-newspaper mr-1"></i> Market Review
-            </span>
-            <span id="digestTimestamp" class="text-xs text-slate-400 font-mono">Today</span>
-            <span id="nextSessionBadge" class="text-xs px-2.5 py-0.5 rounded-full bg-cyan-500/10 text-cyan-300 border border-cyan-500/20 font-medium">
-              <i class="fa-regular fa-clock mr-1"></i> Next: Calculating...
-            </span>
-          </div>
-          <div class="flex flex-wrap items-center gap-2">
-            <div class="flex items-center bg-slate-900/80 p-0.5 rounded-lg border border-slate-700/80 text-xs font-medium">
-              <button onclick="loadMarketReview(null)" class="px-2 py-1 rounded text-slate-400 hover:text-white transition-colors" title="View Latest Digest">Latest</button>
-              <button onclick="loadMarketReview('EU')" class="px-2 py-1 rounded text-slate-400 hover:text-white transition-colors" title="View Latest EU Review">EU</button>
-              <button onclick="loadMarketReview('US')" class="px-2 py-1 rounded text-slate-400 hover:text-white transition-colors" title="View Latest US Review">US</button>
-            </div>
-            <button onclick="triggerMarketReview('EU')" class="text-xs bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all active:scale-95">
-              <i class="fa-solid fa-play text-emerald-400"></i> Run EU Review
-            </button>
-            <button onclick="triggerMarketReview('US')" class="text-xs bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all active:scale-95">
-              <i class="fa-solid fa-play text-blue-400"></i> Run US Review
-            </button>
-          </div>
+      <!-- Market review -->
+      <div id="marketReviewCard" class="ui-card ui-card-pad space-y-3">
+        <div class="min-w-0">
+          <div class="ui-eyebrow">Market review</div>
+          <h3 id="digestHeadline" class="text-[17px] font-bold text-white leading-snug mt-1">Opening Market Review</h3>
+          <div id="digestTimestamp" class="ui-num ui-faint text-[12px] mt-1">Today</div>
         </div>
-        <div>
-          <h3 id="digestHeadline" class="text-sm sm:text-base font-bold text-white">Opening Market Review</h3>
-          <p id="digestContent" class="text-xs text-slate-300 mt-1 leading-relaxed">Loading latest market opening digest...</p>
+        <div class="flex flex-wrap items-center gap-2">
+          <div class="adv-seg" role="group" aria-label="Review market">
+            <button type="button" onclick="loadMarketReview('')" data-review-market="" class="is-active" aria-pressed="true" title="Latest review">Latest</button>
+            <button type="button" onclick="loadMarketReview('EU')" data-review-market="EU" aria-pressed="false" title="Latest EU review">EU</button>
+            <button type="button" onclick="loadMarketReview('US')" data-review-market="US" aria-pressed="false" title="Latest US review">US</button>
+          </div>
+          <span id="nextSessionBadge" class="ui-chip adv-wrap"><i class="fa-regular fa-clock"></i> Next: calculating...</span>
         </div>
-        <div id="reviewTextContainer" class="hidden text-xs text-slate-300 bg-slate-900/60 p-3.5 rounded-lg border border-slate-800 font-mono whitespace-pre-wrap"></div>
+        <div id="digestContent" class="adv-prose">Loading the latest market review...</div>
+        <div id="reviewTextContainer" class="hidden ui-inset adv-prose p-3.5 whitespace-pre-wrap"></div>
+        <div class="flex flex-wrap gap-2 pt-1">
+          <button type="button" onclick="triggerMarketReview('EU')" class="ui-btn ui-btn-sm">
+            <i class="fa-solid fa-play"></i> Run EU review
+          </button>
+          <button type="button" onclick="triggerMarketReview('US')" class="ui-btn ui-btn-sm">
+            <i class="fa-solid fa-play"></i> Run US review
+          </button>
+        </div>
       </div>
 
-      <!-- Past-Week Review Comparison & Pick Follow-Through Card -->
-      <div id="weeklyReviewCard" class="bg-cardBg border border-borderCol rounded-xl p-4 sm:p-5 shadow-sm space-y-4">
-        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-borderCol pb-3">
-          <div>
-            <h3 class="text-sm sm:text-base font-bold text-white flex items-center gap-2">
-              <i class="fa-solid fa-scale-balanced text-indigo-400"></i> 7-Day Review Comparison & Pick Follow-Through
-            </h3>
-            <p class="text-xs text-slate-400">Tracks how recommendations from the past week performed against current live prices</p>
+      <!-- Picks -->
+      <div class="space-y-3">
+        <h3 class="ui-section-title">Picks <span id="adviceCount" class="ui-count ui-num"></span></h3>
+        <div id="adviceContainer" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          <!-- Dynamic Advice Cards -->
+        </div>
+      </div>
+
+      <!-- Past-week review comparison & pick follow-through -->
+      <div id="weeklyReviewCard" class="ui-card ui-card-pad space-y-4">
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0">
+            <h3 class="ui-section-title">Past 7 days</h3>
+            <p class="ui-page-sub">How last week's picks are doing at today's prices</p>
           </div>
-          <button onclick="loadWeeklyReviewComparison()" class="self-start sm:self-auto text-xs bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-1.5 rounded-lg flex items-center gap-1.5">
-            <i class="fa-solid fa-arrows-rotate"></i> Re-Calculate
+          <button type="button" onclick="loadWeeklyReviewComparison()" class="ui-btn ui-icon-btn" aria-label="Recalculate" title="Recalculate">
+            <i class="fa-solid fa-arrows-rotate"></i>
           </button>
         </div>
 
-        <!-- Metric Badges -->
-        <div class="grid grid-cols-2 sm:grid-cols-4 gap-2.5 sm:gap-3 text-xs">
-          <div class="bg-slate-900/60 p-2.5 sm:p-3 rounded-lg border border-slate-800 min-w-0">
-            <div class="text-slate-400 truncate">7-Day Win Rate</div>
-            <div id="weeklyWinRate" class="text-base sm:text-lg font-bold text-emerald-400 mt-0.5 truncate">--%</div>
-            <div id="weeklyWinCounts" class="text-[10px] text-slate-500 truncate">0 picks evaluated</div>
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+          <div class="ui-inset p-3 min-w-0">
+            <div class="ui-label truncate">Win rate</div>
+            <div id="weeklyWinRate" class="ui-num text-[17px] font-semibold text-white mt-1 truncate">--%</div>
+            <div id="weeklyWinCounts" class="ui-faint text-[12px] truncate">0 picks evaluated</div>
           </div>
-          <div class="bg-slate-900/60 p-2.5 sm:p-3 rounded-lg border border-slate-800 min-w-0">
-            <div class="text-slate-400 truncate">Portfolio Trajectory</div>
-            <div id="weeklyPortfolioDelta" class="text-base sm:text-lg font-bold text-white mt-0.5 truncate">€0.00 (+0.0%)</div>
-            <div id="weeklyPortfolioRange" class="text-[10px] text-slate-500 font-mono truncate">Past 7 days</div>
+          <div class="ui-inset p-3 min-w-0">
+            <div class="ui-label truncate">Portfolio</div>
+            <div id="weeklyPortfolioDelta" class="ui-num text-[17px] font-semibold text-white mt-1 truncate">€0.00 (+0.0%)</div>
+            <div id="weeklyPortfolioRange" class="ui-num ui-faint text-[12px] truncate">Past 7 days</div>
           </div>
-          <div class="bg-slate-900/60 p-2.5 sm:p-3 rounded-lg border border-slate-800 min-w-0">
-            <div class="text-slate-400 truncate">Best Pick Follow-Through</div>
-            <div id="weeklyBestPick" class="text-base sm:text-lg font-bold text-emerald-400 mt-0.5 truncate">--</div>
-            <div id="weeklyBestPickDetails" class="text-[10px] text-slate-500 truncate">No data</div>
+          <div class="ui-inset p-3 min-w-0">
+            <div class="ui-label truncate">Best pick</div>
+            <div id="weeklyBestPick" class="ui-num text-[17px] font-semibold text-white mt-1 truncate">--</div>
+            <div id="weeklyBestPickDetails" class="ui-faint text-[12px] truncate">No data</div>
           </div>
-          <div class="bg-slate-900/60 p-2.5 sm:p-3 rounded-lg border border-slate-800 min-w-0">
-            <div class="text-slate-400 truncate">Sessions Archived</div>
-            <div id="weeklySessionsCount" class="text-base sm:text-lg font-bold text-cyan-400 mt-0.5 truncate">0</div>
-            <div class="text-[10px] text-slate-500 truncate">Opens & Closes</div>
+          <div class="ui-inset p-3 min-w-0">
+            <div class="ui-label truncate">Sessions</div>
+            <div id="weeklySessionsCount" class="ui-num text-[17px] font-semibold text-white mt-1 truncate">0</div>
+            <div class="ui-faint text-[12px] truncate">Opens &amp; closes</div>
           </div>
         </div>
 
-        <!-- Tracked Picks List -->
+        <div class="space-y-2.5">
+          <div class="ui-eyebrow">Tracked picks</div>
+          <div id="weeklyTrackedPicksContainer" class="ui-list">
+            <div class="p-3.5 adv-prose">No picks recorded in the past 7 days yet. Run a market review to start tracking.</div>
+          </div>
+        </div>
+
         <div>
-          <h4 class="text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2.5 flex items-center gap-1.5">
-            <i class="fa-solid fa-crosshairs text-emerald-400"></i> Tracked Recommendations & Current Performance
-          </h4>
-          <div id="weeklyTrackedPicksContainer" class="space-y-2 text-xs">
-            <div class="text-slate-500 italic p-3 bg-slate-900/40 rounded-lg border border-slate-800/80">
-              No historical picks recorded in past 7 days yet. Run an Opening Review to start tracking.
-            </div>
-          </div>
-        </div>
-
-        <!-- Past Reviews Archive Accordion -->
-        <div class="pt-2 border-t border-borderCol/60">
-          <button onclick="toggleWeeklyArchive()" class="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1.5 font-semibold">
-            <i id="weeklyArchiveIcon" class="fa-solid fa-chevron-right text-[10px]"></i> View Archived Daily Reviews (<span id="archiveCountBadge">0</span>)
+          <button type="button" onclick="toggleWeeklyArchive()" class="ui-btn ui-btn-quiet w-full !justify-between !px-1" aria-controls="weeklyArchiveContainer">
+            <span>Archived reviews <span class="ui-num ui-faint">(<span id="archiveCountBadge">0</span>)</span></span>
+            <i id="weeklyArchiveIcon" class="fa-solid fa-chevron-right text-[12px]"></i>
           </button>
-          <div id="weeklyArchiveContainer" class="hidden mt-3 space-y-2">
+          <div id="weeklyArchiveContainer" class="hidden mt-2 space-y-2">
             <!-- Populated dynamically -->
           </div>
         </div>
       </div>
-
-      <div id="adviceContainer" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        <!-- Dynamic Advice Cards -->
-      </div>
     </section>
 
-    <!-- TAB 3: MARKET SCREENER -->
+    <!-- TAB 3: SCREENER -->
     <section id="tab-screener" class="tab-content hidden space-y-5">
-      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div>
-          <h2 class="text-base sm:text-lg font-bold text-white flex items-center gap-2">
-            <i class="fa-solid fa-magnifying-glass-chart text-cyan-400"></i> Algorithmic Momentum Screener
-          </h2>
-          <p class="text-xs text-slate-400">Pre-filtering US (S&P/Nasdaq) and EU (AEX, DAX, CAC) liquid leaders</p>
+      <div class="ui-page-head">
+        <div class="min-w-0">
+          <h2 class="ui-page-title">Screener</h2>
+          <p class="ui-page-sub">Momentum setups among liquid US and EU leaders</p>
         </div>
-        <!-- Market Filter Tabs -->
-        <div class="grid grid-cols-3 sm:flex items-center bg-slate-800 p-1 rounded-lg border border-slate-700 text-xs font-semibold">
-          <button onclick="filterScreener('ALL')" class="screener-filter-btn px-3 py-2 rounded-md bg-emerald-600 text-white" data-market="ALL">All Markets</button>
-          <button onclick="filterScreener('EU')" class="screener-filter-btn px-3 py-2 rounded-md text-slate-400 hover:text-white" data-market="EU">🇪🇺 European</button>
-          <button onclick="filterScreener('US')" class="screener-filter-btn px-3 py-2 rounded-md text-slate-400 hover:text-white" data-market="US">🇺🇸 US Stocks</button>
+        <div class="adv-seg" role="group" aria-label="Market">
+          <button type="button" onclick="filterScreener('ALL')" class="screener-filter-btn is-active" data-market="ALL" aria-pressed="true">All</button>
+          <button type="button" onclick="filterScreener('EU')" class="screener-filter-btn" data-market="EU" aria-pressed="false">EU</button>
+          <button type="button" onclick="filterScreener('US')" class="screener-filter-btn" data-market="US" aria-pressed="false">US</button>
         </div>
       </div>
 
-      <!-- Screener Cards Grid -->
-      <div id="screenerContainer" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      <div id="screenerContainer" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
         <!-- Dynamic Screener Cards -->
       </div>
     </section>
 
-    <!-- TAB 4: COMMITTEE DEBATE INSPECTOR -->
-    <section id="tab-debate" class="tab-content hidden space-y-6">
-      <!-- On Demand Search Bar -->
-      <div class="bg-cardBg border border-borderCol rounded-xl p-4 sm:p-5 shadow-sm">
-        <h2 class="text-sm sm:text-base font-bold text-white mb-2 flex items-center gap-2">
-          <i class="fa-solid fa-magnifying-glass text-emerald-400"></i> Convene Committee on Any Ticker
-        </h2>
-        <p class="text-xs text-slate-400 mb-4">Enter any US or European ticker symbol (e.g., <code>NVDA</code>, <code>AAPL</code>, <code>ASML.AS</code>, <code>INGA.AS</code>, <code>SAP.DE</code>)</p>
-        
-        <div class="flex flex-col sm:flex-row gap-2 max-w-lg">
-          <input type="text" id="analyzeInput" inputmode="text" autocapitalize="characters" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="go" placeholder="Ticker, e.g. NVDA or ASML.AS" class="bg-slate-900 border border-slate-700 rounded-lg px-3.5 py-2 text-sm text-white focus:outline-none focus:border-emerald-500 uppercase tracking-wider font-semibold flex-1">
-          <button onclick="runOnDemandAnalysis()" id="analyzeBtn" class="bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs sm:text-sm px-5 py-2 rounded-lg flex items-center justify-center gap-2 transition-all active:scale-95">
-            <i class="fa-solid fa-users-viewfinder"></i> Convene Debate
-          </button>
+    <!-- TAB 4: COMMITTEE DEBATE -->
+    <section id="tab-debate" class="tab-content hidden space-y-5">
+      <div class="ui-page-head">
+        <div class="min-w-0">
+          <h2 class="ui-page-title">Committee Debate</h2>
+          <p class="ui-page-sub">Run the full agent committee on any US or EU ticker</p>
         </div>
       </div>
 
-      <!-- Live Analysis / Debate Output -->
-      <div id="debateOutputArea" class="space-y-6 hidden">
-        <!-- Verdict Header Card -->
-        <div id="verdictCard" class="bg-cardBg border border-borderCol rounded-xl p-5 shadow-md">
+      <div class="ui-card ui-card-pad space-y-2.5">
+        <label for="analyzeInput" class="ui-label block">Ticker</label>
+        <div class="flex flex-col sm:flex-row gap-2 sm:max-w-lg">
+          <input type="text" id="analyzeInput" inputmode="text" autocapitalize="characters" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="go" placeholder="NVDA or ASML.AS" class="ui-input ui-num uppercase tracking-wider flex-1">
+          <button type="button" onclick="runOnDemandAnalysis()" id="analyzeBtn" class="ui-btn ui-btn-primary min-h-[48px]">
+            <i class="fa-solid fa-users-viewfinder"></i> Convene debate
+          </button>
+        </div>
+        <p class="ui-faint text-[13px]">For example <span class="ui-num">AAPL</span>, <span class="ui-num">INGA.AS</span> or <span class="ui-num">SAP.DE</span></p>
+      </div>
+
+      <div id="debateOutputArea" class="space-y-5 hidden">
+        <div id="verdictCard" class="ui-card ui-card-pad space-y-3">
           <!-- Filled by JS -->
         </div>
 
-        <!-- Specialist Agents Grid -->
-        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          <!-- Technical Agent Card -->
-          <div class="bg-cardBg border border-borderCol rounded-xl p-4 shadow-sm space-y-2">
-            <div class="flex items-center justify-between border-b border-borderCol/60 pb-2">
-              <span class="text-xs font-bold text-cyan-400 flex items-center gap-1.5">
-                <i class="fa-solid fa-chart-line"></i> Technical Analyst
-              </span>
-              <span id="techBiasBadge" class="text-xs px-2 py-0.5 rounded font-bold"></span>
+        <div class="space-y-3">
+          <h3 class="ui-section-title">Specialists</h3>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div class="ui-card ui-card-pad space-y-2">
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-[15px] font-semibold text-white flex items-center gap-2"><i class="fa-solid fa-chart-line ui-faint"></i> Technical</span>
+                <span id="techBiasBadge" class="ui-badge"></span>
+              </div>
+              <p id="techSummaryText" class="adv-prose"></p>
             </div>
-            <p id="techSummaryText" class="text-xs text-slate-300 leading-relaxed"></p>
-          </div>
-
-          <!-- Fundamental Agent Card -->
-          <div class="bg-cardBg border border-borderCol rounded-xl p-4 shadow-sm space-y-2">
-            <div class="flex items-center justify-between border-b border-borderCol/60 pb-2">
-              <span class="text-xs font-bold text-purple-400 flex items-center gap-1.5">
-                <i class="fa-solid fa-landmark"></i> Fundamental Analyst
-              </span>
-              <span id="fundValuationBadge" class="text-xs px-2 py-0.5 rounded font-bold"></span>
+            <div class="ui-card ui-card-pad space-y-2">
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-[15px] font-semibold text-white flex items-center gap-2"><i class="fa-solid fa-landmark ui-faint"></i> Fundamental</span>
+                <span id="fundValuationBadge" class="ui-badge"></span>
+              </div>
+              <p id="fundSummaryText" class="adv-prose"></p>
             </div>
-            <p id="fundSummaryText" class="text-xs text-slate-300 leading-relaxed"></p>
-          </div>
-
-          <!-- Sentiment Agent Card -->
-          <div class="bg-cardBg border border-borderCol rounded-xl p-4 shadow-sm space-y-2">
-            <div class="flex items-center justify-between border-b border-borderCol/60 pb-2">
-              <span class="text-xs font-bold text-amber-400 flex items-center gap-1.5">
-                <i class="fa-solid fa-newspaper"></i> Sentiment & News
-              </span>
-              <span id="sentMoodBadge" class="text-xs px-2 py-0.5 rounded font-bold"></span>
+            <div class="ui-card ui-card-pad space-y-2">
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-[15px] font-semibold text-white flex items-center gap-2"><i class="fa-solid fa-newspaper ui-faint"></i> Sentiment</span>
+                <span id="sentMoodBadge" class="ui-badge"></span>
+              </div>
+              <p id="sentSummaryText" class="adv-prose"></p>
             </div>
-            <p id="sentSummaryText" class="text-xs text-slate-300 leading-relaxed"></p>
-          </div>
-
-          <!-- Risk Agent Card -->
-          <div class="bg-cardBg border border-borderCol rounded-xl p-4 shadow-sm space-y-2">
-            <div class="flex items-center justify-between border-b border-borderCol/60 pb-2">
-              <span class="text-xs font-bold text-emerald-400 flex items-center gap-1.5">
-                <i class="fa-solid fa-shield-halved"></i> Risk Officer
-              </span>
-              <span id="riskApprovedBadge" class="text-xs px-2 py-0.5 rounded font-bold"></span>
+            <div class="ui-card ui-card-pad space-y-2">
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-[15px] font-semibold text-white flex items-center gap-2"><i class="fa-solid fa-shield-halved ui-faint"></i> Risk</span>
+                <span id="riskApprovedBadge" class="ui-badge"></span>
+              </div>
+              <p id="riskSummaryText" class="adv-prose"></p>
             </div>
-            <p id="riskSummaryText" class="text-xs text-slate-300 leading-relaxed"></p>
           </div>
         </div>
 
-        <!-- Multi-Turn Debate Transcript -->
-        <div class="bg-cardBg border border-borderCol rounded-xl p-5 shadow-sm space-y-3">
-          <h3 class="text-sm font-bold text-white flex items-center gap-2">
-            <i class="fa-solid fa-comments text-cyan-400"></i> Full Committee Debate Transcript
-          </h3>
-          <div id="debateTranscriptBox" class="text-xs sm:text-sm text-slate-200 leading-relaxed space-y-3 bg-slate-900/60 p-4 rounded-lg border border-slate-800 font-mono whitespace-pre-wrap">
+        <details class="ui-card adv-details">
+          <summary class="px-4 py-2">
+            <span class="ui-section-title">Transcript</span>
+            <i class="fa-solid fa-chevron-down text-[12px] ui-faint adv-chev"></i>
+          </summary>
+          <div class="px-4 pb-4">
+            <div id="debateTranscriptBox" class="ui-inset adv-prose p-3.5 whitespace-pre-wrap"></div>
           </div>
-        </div>
+        </details>
       </div>
     </section>
 
