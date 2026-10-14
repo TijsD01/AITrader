@@ -106,8 +106,10 @@ button:active { transform: scale(0.98); }
 .ui-label { font-size: 12px; font-weight: 500; color: var(--text-2); }
 .ui-eyebrow { font-size: 12px; font-weight: 600; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.06em; }
 
-/* Buttons */
-.ui-btn {
+/* Buttons. Each button rule also names `button.x` so it outranks Tailwind's
+   preflight reset ([type='button'] { background-color: transparent }), which
+   the Tailwind CDN injects after this stylesheet. */
+.ui-btn, button.ui-btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 8px;
   min-height: 44px; padding: 0 16px;
   border-radius: 12px; border: 1px solid var(--line-strong);
@@ -118,17 +120,17 @@ button:active { transform: scale(0.98); }
 }
 .ui-btn:hover { background: var(--surface-2); }
 .ui-btn:disabled { opacity: .55; cursor: not-allowed; }
-.ui-btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 700; }
+.ui-btn-primary, button.ui-btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 700; }
 .ui-btn-primary:hover { background: var(--accent-strong); border-color: var(--accent-strong); }
-.ui-btn-danger { background: transparent; border-color: var(--danger-line); color: var(--danger-text); }
+.ui-btn-danger, button.ui-btn-danger { background: transparent; border-color: var(--danger-line); color: var(--danger-text); }
 .ui-btn-danger:hover { background: var(--danger-surface); }
-.ui-btn-quiet { background: transparent; border-color: transparent; color: var(--text-2); padding: 0 10px; }
+.ui-btn-quiet, button.ui-btn-quiet { background: transparent; border-color: transparent; color: var(--text-2); padding: 0 10px; }
 .ui-btn-quiet:hover { background: var(--surface-2); color: var(--text); }
-.ui-btn-sm { min-height: 36px; padding: 0 12px; font-size: 13px; border-radius: 10px; }
-.ui-icon-btn { width: 44px; min-width: 44px; padding: 0; }
+.ui-btn-sm, button.ui-btn-sm { min-height: 36px; padding: 0 12px; font-size: 13px; border-radius: 10px; }
+.ui-icon-btn, button.ui-icon-btn { width: 44px; min-width: 44px; padding: 0; }
 
 /* Chips & badges */
-.ui-chip {
+.ui-chip, button.ui-chip {
   display: inline-flex; align-items: center; gap: 6px;
   min-height: 32px; padding: 0 12px; border-radius: 16px;
   background: var(--surface); border: 1px solid var(--line);
@@ -247,7 +249,7 @@ button.ui-chip { cursor: pointer; }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 #mobileDropdownMenu:not(.hidden) { animation: dropdownSlide .2s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
-.more-tile {
+.more-tile, button.more-tile {
   position: relative;
   display: flex; flex-direction: column; justify-content: space-between; gap: 10px;
   min-height: 92px; padding: 14px; text-align: left;
@@ -269,7 +271,7 @@ button.ui-chip { cursor: pointer; }
 .alloc-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--text-2); }
 .alloc-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; vertical-align: 0; }
 
-.control-tile {
+.control-tile, button.control-tile {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
   min-height: 64px; padding: 12px 14px; width: 100%; text-align: left;
   border-radius: 16px; background: var(--surface); border: 1px solid var(--line);
@@ -289,7 +291,7 @@ button.ui-chip { cursor: pointer; }
 .ui-switch.on::after { transform: translateX(16px); background: var(--bg); }
 
 /* Kill switch tile + engaged state (also used by the desktop header button) */
-.kill-tile { background: var(--danger-surface); border-color: var(--danger-line); color: var(--danger-text); }
+.kill-tile, button.kill-tile { background: var(--danger-surface); border-color: var(--danger-line); color: var(--danger-text); }
 .kill-tile .tile-label { color: #E59AA5; }
 .kill-switch-engaged {
   background-color: #C2334A !important;
@@ -302,7 +304,7 @@ button.ui-chip { cursor: pointer; }
 .kpi .kpi-value { font: 600 19px/1.2 var(--font-mono); letter-spacing: -0.02em; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .kpi .kpi-sub { font-size: 12px; color: var(--text-3); line-height: 1.35; }
 
-.trigger-link {
+.trigger-link, button.trigger-link {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   width: 100%; min-height: 60px; padding: 12px 14px; text-align: left;
   border-radius: 16px; background: #151A2E; border: 1px solid #2E3760; color: var(--text); cursor: pointer;
@@ -400,3 +402,7 @@ button.ui-chip { cursor: pointer; }
 }
 
 .mobile-active-check.hidden { display: none !important; }
+
+/* The "More" button looks pressed while its sheet is open */
+.bottom-nav-btn[aria-expanded="true"] { color: var(--text); }
+.bottom-nav-btn[aria-expanded="true"] .nav-pill { background: #2A3466; color: var(--accent-strong); }

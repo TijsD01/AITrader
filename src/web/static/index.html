@@ -46,346 +46,250 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js" integrity="sha384-dug+JxfBvklEQdJ4AYuBBAIScUz0bVN73xpy273gcAwHjb3qI0fXmuYNaNfdyYJG" crossorigin="anonymous"></script>
   <link rel="stylesheet" href="/static/style.css">
 </head>
-<body class="bg-darkBg text-slate-100 min-h-screen md:pb-8 flex flex-col font-sans antialiased overflow-x-hidden selection:bg-emerald-500 selection:text-white">
+<body class="bg-darkBg text-slate-100 min-h-screen md:pb-8 flex flex-col font-sans antialiased overflow-x-hidden selection:bg-indigo-500 selection:text-white">
 
-  <!-- Top Header Bar (compact on mobile: brand + mode + two actions) -->
-  <header class="sticky top-0 z-40 bg-cardBg/95 backdrop-blur-md border-b border-borderCol" style="padding-top: env(safe-area-inset-top);">
-    <div class="px-3 py-2 sm:px-6 sm:py-3 flex items-center justify-between gap-2 max-w-7xl mx-auto w-full">
-      <!-- Brand & Mode -->
-      <div class="flex items-center gap-2.5 sm:gap-3 min-w-0">
-        <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-emerald-500 to-cyan-500 flex items-center justify-center shadow-lg shadow-emerald-500/20 shrink-0">
-          <i class="fa-solid fa-brain text-white text-base sm:text-lg"></i>
+  <!-- App header: brand, mode and broker status, then Refresh + Scan -->
+  <header class="app-header">
+    <div class="px-4 py-2.5 sm:px-6 flex items-center justify-between gap-3 max-w-7xl mx-auto w-full">
+      <div class="flex items-center gap-2.5 min-w-0">
+        <div class="app-logo" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l5-5 4 4 8-9"></path><path d="M15 7h5v5"></path></svg>
         </div>
         <div class="min-w-0">
-          <h1 class="text-base md:text-lg font-bold tracking-tight text-white flex items-center gap-1.5">
-            <span>AlphaAgent</span>
-            <span id="tradingModeBadge" class="text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-semibold uppercase tracking-wider shrink-0">PAPER</span>
-          </h1>
-          <p class="text-xs text-slate-400 hidden lg:block truncate">Autonomous Hedge Fund Committee & Multi-Agent Trading</p>
+          <h1 class="text-base font-bold tracking-tight text-white leading-tight">AlphaAgent</h1>
+          <div class="flex items-center gap-1.5 text-xs text-slate-400 leading-tight mt-0.5 min-w-0">
+            <span id="tradingModeBadge" class="mode-tag">PAPER</span>
+            <span aria-hidden="true">&middot;</span>
+            <button type="button" onclick="pingBrokerStatus(true)" id="mobileBrokerStatusPill" class="flex items-center gap-1.5 min-w-0 text-slate-400 hover:text-white" title="Test the broker connection">
+              <span id="mobileBrokerStatusDot" class="ui-dot"></span>
+              <span id="mobileBrokerStatusText" class="truncate">Broker: Checking...</span>
+            </button>
+          </div>
         </div>
       </div>
 
-      <!-- Right Controls -->
-      <div class="flex items-center gap-2 sm:gap-2.5 shrink-0">
-        <!-- Manual Market Data Refresh Button -->
-        <button onclick="refreshMarketData()" id="refreshDataBtn" type="button" aria-label="Refresh data" title="Pull fresh prices and account balance, resize triggers, and run trigger & stop checks now" class="flex items-center justify-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold min-w-[44px] min-h-[44px] px-3 rounded-lg shadow-md transition-all active:scale-95 cursor-pointer">
-          <i class="fa-solid fa-arrows-rotate text-sm"></i>
-          <span class="hidden sm:inline">Refresh Data</span>
-        </button>
-
-        <!-- Quick Scan Button -->
-        <button onclick="triggerQuickScan()" id="scanBtn" type="button" aria-label="Run scan" class="flex items-center justify-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold min-w-[44px] min-h-[44px] px-3 rounded-lg shadow-md transition-all active:scale-95 cursor-pointer">
-          <i class="fa-solid fa-satellite-dish text-sm"></i>
-          <span class="hidden sm:inline">Run Scan</span>
-        </button>
-
-        <!-- Desktop Broker Connection Badge -->
-        <button onclick="pingBrokerStatus(true)" id="brokerStatusBadge" type="button" title="Broker Connection Status (Click to test)" class="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700 text-slate-400 text-xs font-medium hover:border-slate-500 transition-colors cursor-pointer">
-          <span id="brokerStatusDot" class="w-2 h-2 rounded-full bg-slate-500"></span>
+      <div class="flex items-center gap-2 shrink-0">
+        <!-- Desktop-only status badges -->
+        <button onclick="pingBrokerStatus(true)" id="brokerStatusBadge" type="button" title="Broker connection status (click to test)" class="hidden">
+          <span id="brokerStatusDot" class="ui-dot"></span>
           <span id="brokerStatusText">Broker: Checking...</span>
         </button>
-
-        <!-- Desktop Market Status Badge -->
-        <div id="marketStatusBadge" class="hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700 text-slate-400 text-xs font-medium">
-          <i class="fa-solid fa-clock text-slate-400"></i>
+        <div id="marketStatusBadge" class="hidden xl:flex ui-chip">
+          <i class="fa-regular fa-clock"></i>
           <span id="marketStatusText">Markets: Checking...</span>
         </div>
-
-        <!-- Desktop Auto-Buy Badge -->
-        <div id="autoBuyBadge" class="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-medium">
-          <span id="autoBuyDot" class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-          <span class="hidden lg:inline">Auto-Buy:</span> <span id="autoBuyStatusText">Active</span>
+        <div id="autoBuyBadge" class="hidden xl:flex ui-chip">
+          <span id="autoBuyDot" class="ui-dot"></span>
+          <span class="hidden lg:inline">Auto-buy:</span> <span id="autoBuyStatusText">Active</span>
         </div>
-
-        <!-- Desktop Kill Switch -->
-        <button onclick="toggleKillSwitch()" id="killSwitchBtnDesktop" type="button" title="Emergency kill switch: halt or resume all new automated buying" class="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs font-semibold hover:bg-rose-500/20 transition-colors cursor-pointer">
+        <button onclick="toggleKillSwitch()" id="killSwitchBtnDesktop" type="button" title="Emergency kill switch: halt or resume all new automated buying" class="hidden md:flex ui-btn ui-btn-sm ui-btn-danger">
           <i class="fa-solid fa-power-off"></i>
           <span class="kill-switch-label">Kill Switch</span>
         </button>
 
-        <!-- Desktop Currency Badge -->
-        <div class="hidden md:block px-2.5 py-1 rounded-lg bg-slate-800 text-xs font-semibold text-slate-300 border border-slate-700">
-          EUR (€)
-        </div>
+        <button onclick="refreshMarketData()" id="refreshDataBtn" type="button" aria-label="Refresh data" title="Pull fresh prices and account balance, resize triggers, and run trigger &amp; stop checks now" class="ui-btn ui-icon-btn">
+          <i class="fa-solid fa-arrows-rotate"></i>
+        </button>
+        <button onclick="triggerQuickScan()" id="scanBtn" type="button" aria-label="Run scan" class="ui-btn ui-btn-primary px-3.5">
+          <i class="fa-solid fa-satellite-dish"></i>
+          <span>Scan</span>
+        </button>
       </div>
     </div>
   </header>
 
-  <!-- Backdrop for Mobile "More" Sheet -->
-  <div id="mobileDropdownBackdrop" onclick="closeMobileDropdown()" class="hidden md:hidden fixed inset-0 z-30 bg-black/60 backdrop-blur-sm transition-opacity"></div>
+  <!-- Backdrop for the mobile "More" sheet -->
+  <div id="mobileDropdownBackdrop" onclick="closeMobileDropdown()" class="hidden md:hidden fixed inset-0 z-30 bg-black/60 backdrop-blur-sm"></div>
 
-  <!-- Mobile "More" Sheet (opens above the bottom nav) -->
-  <div id="mobileDropdownMenu" class="hidden md:hidden fixed inset-x-0 z-[35] border-t border-borderCol bg-cardBg shadow-2xl rounded-t-2xl" style="bottom: calc(60px + env(safe-area-inset-bottom)); max-height: calc(100dvh - 140px); overflow-y: auto; overscroll-behavior: contain;">
-    <div class="p-3 space-y-1">
-      <div class="flex items-center justify-between px-2 py-1 text-xs font-bold uppercase tracking-wider text-slate-400">
-        <span>More</span>
-        <span>EUR (€)</span>
-      </div>
-
-      <!-- Market Screener -->
-      <button type="button" onclick="switchTab('screener')" class="mobile-dropdown-item w-full flex items-center justify-between px-3 min-h-[56px] rounded-xl text-left text-sm font-medium transition-colors text-slate-300 hover:bg-slate-800/70" data-tab="screener">
-        <div class="flex items-center gap-3">
-          <div class="w-9 h-9 rounded-lg bg-cyan-500/10 text-cyan-400 flex items-center justify-center shrink-0 text-sm"><i class="fa-solid fa-magnifying-glass-chart"></i></div>
-          <div>
-            <div class="font-bold text-white text-sm">Market Screener</div>
-            <div class="text-xs text-slate-400">Liquid EU & US momentum candidates</div>
-          </div>
-        </div>
-        <i class="fa-solid fa-check text-xs text-emerald-400 mobile-active-check hidden"></i>
-      </button>
-
-      <!-- Committee Debate -->
-      <button type="button" onclick="switchTab('debate')" class="mobile-dropdown-item w-full flex items-center justify-between px-3 min-h-[56px] rounded-xl text-left text-sm font-medium transition-colors text-slate-300 hover:bg-slate-800/70" data-tab="debate">
-        <div class="flex items-center gap-3">
-          <div class="w-9 h-9 rounded-lg bg-purple-500/10 text-purple-400 flex items-center justify-center shrink-0 text-sm"><i class="fa-solid fa-comments"></i></div>
-          <div>
-            <div class="font-bold text-white text-sm">Committee Debate</div>
-            <div class="text-xs text-slate-400">Convene multi-agent debate on any ticker</div>
-          </div>
-        </div>
-        <i class="fa-solid fa-check text-xs text-emerald-400 mobile-active-check hidden"></i>
-      </button>
-
-      <!-- Memory Hub -->
-      <button type="button" onclick="switchTab('memory')" class="mobile-dropdown-item w-full flex items-center justify-between px-3 min-h-[56px] rounded-xl text-left text-sm font-medium transition-colors text-slate-300 hover:bg-slate-800/70" data-tab="memory">
-        <div class="flex items-center gap-3">
-          <div class="w-9 h-9 rounded-lg bg-purple-500/10 text-purple-400 flex items-center justify-center shrink-0 text-sm"><i class="fa-solid fa-brain"></i></div>
-          <div>
-            <div class="font-bold text-white text-sm">Memory Hub</div>
-            <div class="text-xs text-slate-400">TencentDB agent memory & code-graph</div>
-          </div>
-        </div>
-        <i class="fa-solid fa-check text-xs text-emerald-400 mobile-active-check hidden"></i>
-      </button>
-
-      <!-- Settings -->
-      <button type="button" onclick="switchTab('settings')" class="mobile-dropdown-item w-full flex items-center justify-between px-3 min-h-[56px] rounded-xl text-left text-sm font-medium transition-colors text-slate-300 hover:bg-slate-800/70" data-tab="settings">
-        <div class="flex items-center gap-3">
-          <div class="w-9 h-9 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center shrink-0 text-sm"><i class="fa-solid fa-sliders"></i></div>
-          <div>
-            <div class="font-bold text-white text-sm">Settings & Risk</div>
-            <div class="text-xs text-slate-400">Mode, broker & capital limits</div>
-          </div>
-        </div>
-        <i class="fa-solid fa-check text-xs text-emerald-400 mobile-active-check hidden"></i>
-      </button>
-
-      <!-- Quick Actions Footer -->
-      <div class="pt-3 mt-2 border-t border-borderCol/60 grid grid-cols-2 gap-2 text-sm">
-        <button type="button" onclick="triggerQuickScan(); closeMobileDropdown();" class="min-h-[48px] px-3 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 rounded-lg font-semibold flex items-center justify-center gap-1.5 active:scale-95 transition-all">
-          <i class="fa-solid fa-satellite-dish"></i> Run Scan
-        </button>
-        <button type="button" onclick="pingBrokerStatus(true); closeMobileDropdown();" class="min-h-[48px] px-3 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg font-semibold flex items-center justify-center gap-1.5 active:scale-95 transition-all">
-          <i class="fa-solid fa-wifi"></i> Ping Broker
-        </button>
-        <button type="button" onclick="refreshMarketData(); closeMobileDropdown();" class="col-span-2 min-h-[48px] px-3 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg font-semibold flex items-center justify-center gap-1.5 active:scale-95 transition-all">
-          <i class="fa-solid fa-arrows-rotate"></i> Refresh Market Data
-        </button>
-      </div>
+  <!-- Mobile "More" sheet (floats above the bottom dock) -->
+  <div id="mobileDropdownMenu" class="hidden md:hidden fixed z-[35] p-4" role="dialog" aria-label="More sections">
+    <div class="flex items-center justify-between px-1 pb-3">
+      <span class="text-base font-bold text-white">More</span>
+      <span class="text-xs text-slate-500 font-mono">EUR &euro;</span>
     </div>
+    <div class="grid grid-cols-2 gap-2.5">
+      <button type="button" onclick="switchTab('screener')" class="mobile-dropdown-item more-tile" data-tab="screener">
+        <i class="fa-solid fa-magnifying-glass-chart text-cyan-300"></i>
+        <span><span class="more-title">Screener</span><span class="more-sub">EU &amp; US momentum</span></span>
+        <i class="fa-solid fa-check text-xs text-indigo-300 mobile-active-check hidden absolute top-3.5 right-3.5"></i>
+      </button>
+      <button type="button" onclick="switchTab('debate')" class="mobile-dropdown-item more-tile" data-tab="debate">
+        <i class="fa-solid fa-comments text-violet-300"></i>
+        <span><span class="more-title">Debate</span><span class="more-sub">Ask the committee</span></span>
+        <i class="fa-solid fa-check text-xs text-indigo-300 mobile-active-check hidden absolute top-3.5 right-3.5"></i>
+      </button>
+      <button type="button" onclick="switchTab('memory')" class="mobile-dropdown-item more-tile" data-tab="memory">
+        <i class="fa-solid fa-brain text-amber-300"></i>
+        <span><span class="more-title">Memory</span><span class="more-sub">Agent memory hub</span></span>
+        <i class="fa-solid fa-check text-xs text-indigo-300 mobile-active-check hidden absolute top-3.5 right-3.5"></i>
+      </button>
+      <button type="button" onclick="switchTab('settings')" class="mobile-dropdown-item more-tile" data-tab="settings">
+        <i class="fa-solid fa-sliders text-emerald-300"></i>
+        <span><span class="more-title">Settings</span><span class="more-sub">Mode, broker, risk</span></span>
+        <i class="fa-solid fa-check text-xs text-indigo-300 mobile-active-check hidden absolute top-3.5 right-3.5"></i>
+      </button>
+    </div>
+    <button type="button" onclick="pingBrokerStatus(true); closeMobileDropdown();" class="ui-btn w-full mt-3">
+      <i class="fa-solid fa-wifi"></i> Ping broker
+    </button>
   </div>
 
-  <!-- Mobile Bottom Navigation -->
-  <nav id="bottomNav" class="md:hidden fixed bottom-0 inset-x-0 z-40 bg-cardBg/95 backdrop-blur-md border-t border-borderCol" style="padding-bottom: env(safe-area-inset-bottom);" aria-label="Main sections">
-    <div class="grid grid-cols-5">
-      <button type="button" onclick="switchTab('portfolio')" class="bottom-nav-btn" data-tab="portfolio"><i class="fa-solid fa-wallet"></i><span>Portfolio</span></button>
-      <button type="button" onclick="switchTab('triggers')" class="bottom-nav-btn" data-tab="triggers"><i class="fa-solid fa-crosshairs"></i><span>Triggers</span><b id="bottomNavTriggerBadge" class="hidden"></b></button>
-      <button type="button" onclick="switchTab('advice')" class="bottom-nav-btn" data-tab="advice"><i class="fa-solid fa-lightbulb"></i><span>Advice</span></button>
-      <button type="button" onclick="switchTab('history')" class="bottom-nav-btn" data-tab="history"><i class="fa-solid fa-clock-rotate-left"></i><span>History</span></button>
-      <button type="button" onclick="toggleMobileDropdown()" id="mobileMenuDropdownBtn" class="bottom-nav-btn" data-more="1" aria-haspopup="true" aria-expanded="false"><i id="mobileDropdownActiveIcon" class="fa-solid fa-ellipsis"></i><span id="mobileDropdownActiveText">More</span></button>
-    </div>
+  <!-- Mobile bottom dock -->
+  <nav id="bottomNav" class="md:hidden" aria-label="Main sections">
+    <button type="button" onclick="switchTab('portfolio')" class="bottom-nav-btn" data-tab="portfolio"><span class="nav-pill"><i class="fa-solid fa-house"></i></span><span>Home</span></button>
+    <button type="button" onclick="switchTab('triggers')" class="bottom-nav-btn" data-tab="triggers"><span class="nav-pill"><i class="fa-solid fa-crosshairs"></i><b id="bottomNavTriggerBadge" class="hidden"></b></span><span>Triggers</span></button>
+    <button type="button" onclick="switchTab('advice')" class="bottom-nav-btn" data-tab="advice"><span class="nav-pill"><i class="fa-regular fa-lightbulb"></i></span><span>Advice</span></button>
+    <button type="button" onclick="switchTab('history')" class="bottom-nav-btn" data-tab="history"><span class="nav-pill"><i class="fa-solid fa-clock-rotate-left"></i></span><span>History</span></button>
+    <button type="button" onclick="toggleMobileDropdown()" id="mobileMenuDropdownBtn" class="bottom-nav-btn" data-more="1" aria-haspopup="dialog" aria-expanded="false"><span class="nav-pill"><i id="mobileDropdownActiveIcon" class="fa-solid fa-table-cells-large"></i></span><span id="mobileDropdownActiveText">More</span></button>
   </nav>
 
-  <!-- Desktop Navigation Bar -->
-  <nav class="hidden md:flex bg-cardBg border-b border-borderCol px-6 py-2 space-x-1 text-sm font-medium">
-    <button onclick="switchTab('portfolio')" class="tab-btn px-4 py-2 rounded-lg transition-colors active-tab" data-tab="portfolio">
-      <i class="fa-solid fa-wallet mr-2"></i>Portfolio
-    </button>
-    <button onclick="switchTab('advice')" class="tab-btn px-4 py-2 rounded-lg text-slate-400 hover:text-white transition-colors" data-tab="advice">
-      <i class="fa-solid fa-lightbulb mr-2"></i>Daily Advice
-    </button>
-    <button onclick="switchTab('screener')" class="tab-btn px-4 py-2 rounded-lg text-slate-400 hover:text-white transition-colors" data-tab="screener">
-      <i class="fa-solid fa-magnifying-glass-chart mr-2"></i>Market Screener
-    </button>
-    <button onclick="switchTab('debate')" class="tab-btn px-4 py-2 rounded-lg text-slate-400 hover:text-white transition-colors" data-tab="debate">
-      <i class="fa-solid fa-comments mr-2"></i>Committee Debate
-    </button>
-    <button onclick="switchTab('triggers')" class="tab-btn px-4 py-2 rounded-lg text-slate-400 hover:text-white transition-colors" data-tab="triggers">
-      <i class="fa-solid fa-crosshairs mr-2"></i>AI Triggers
-    </button>
-    <button onclick="switchTab('history')" class="tab-btn px-4 py-2 rounded-lg text-slate-400 hover:text-white transition-colors" data-tab="history">
-      <i class="fa-solid fa-clock-rotate-left mr-2"></i>Trade History
-    </button>
-    <button onclick="switchTab('memory')" class="tab-btn px-4 py-2 rounded-lg text-slate-400 hover:text-white transition-colors" data-tab="memory">
-      <i class="fa-solid fa-brain mr-2"></i>Memory Hub
-    </button>
-    <button onclick="switchTab('settings')" class="tab-btn px-4 py-2 rounded-lg text-slate-400 hover:text-white transition-colors" data-tab="settings">
-      <i class="fa-solid fa-sliders mr-2"></i>Settings
-    </button>
+  <!-- Desktop tab bar -->
+  <nav class="hidden md:block border-b border-borderCol" aria-label="Sections">
+    <div class="max-w-7xl mx-auto px-6 py-2 flex gap-1 text-sm font-medium overflow-x-auto scrollbar-none">
+      <button onclick="switchTab('portfolio')" class="tab-btn px-3.5 py-2 whitespace-nowrap active-tab" data-tab="portfolio"><i class="fa-solid fa-house mr-2"></i>Home</button>
+      <button onclick="switchTab('triggers')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="triggers"><i class="fa-solid fa-crosshairs mr-2"></i>Triggers</button>
+      <button onclick="switchTab('advice')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="advice"><i class="fa-regular fa-lightbulb mr-2"></i>Advice</button>
+      <button onclick="switchTab('history')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="history"><i class="fa-solid fa-clock-rotate-left mr-2"></i>History</button>
+      <button onclick="switchTab('screener')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="screener"><i class="fa-solid fa-magnifying-glass-chart mr-2"></i>Screener</button>
+      <button onclick="switchTab('debate')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="debate"><i class="fa-solid fa-comments mr-2"></i>Debate</button>
+      <button onclick="switchTab('memory')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="memory"><i class="fa-solid fa-brain mr-2"></i>Memory</button>
+      <button onclick="switchTab('settings')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="settings"><i class="fa-solid fa-sliders mr-2"></i>Settings</button>
+    </div>
   </nav>
 
   <!-- Main Content Container -->
-  <main class="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-6 space-y-4 sm:space-y-6 min-w-0">
+  <main class="flex-1 max-w-7xl w-full mx-auto px-4 pt-2 pb-4 sm:p-6 space-y-4 sm:space-y-6 min-w-0">
 
-    <!-- TAB 1: PORTFOLIO -->
-    <section id="tab-portfolio" class="tab-content space-y-4 sm:space-y-6">
-      <!-- System Status Strip: broker, markets, auto-buy, kill switch (always visible at the top of Portfolio) -->
-      <div id="statusStrip" class="flex flex-wrap items-center gap-2 text-xs">
-        <button type="button" onclick="pingBrokerStatus(true)" id="mobileBrokerStatusPill" class="md:hidden flex items-center gap-2 min-h-[44px] px-3 rounded-full bg-slate-800 border border-slate-700 text-slate-300 cursor-pointer">
-          <span id="mobileBrokerStatusDot" class="w-2 h-2 rounded-full bg-slate-500"></span>
-          <span id="mobileBrokerStatusText">Broker: Checking...</span>
-        </button>
-        <div id="mobileMarketStatusPill" class="md:hidden flex items-center gap-2 min-h-[44px] px-3 rounded-full bg-slate-800 border border-slate-700 text-slate-300">
-          <i class="fa-regular fa-clock text-slate-400"></i>
-          <span id="mobileMarketStatusText">Markets: Checking...</span>
-        </div>
-        <button type="button" onclick="switchTab('settings')" id="mobileAutoBuyPill" class="md:hidden flex items-center gap-2 min-h-[44px] px-3 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 cursor-pointer" title="Open settings">
-          <span id="mobileAutoBuyDot" class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-          <span>Auto-Buy: <strong id="mobileAutoBuyText">On</strong></span>
-        </button>
-        <button type="button" onclick="toggleKillSwitch()" id="killSwitchBtn" class="flex items-center justify-center gap-2 min-h-[44px] px-4 rounded-full bg-rose-500/10 border border-rose-500/40 text-rose-300 font-semibold hover:bg-rose-500/20 cursor-pointer md:hidden ml-auto" title="Emergency kill switch: halt or resume all new automated buying">
-          <i class="fa-solid fa-power-off"></i>
-          <span class="kill-switch-label">Kill Switch</span>
-        </button>
-      </div>
+    <!-- TAB 1: HOME (PORTFOLIO) -->
+    <section id="tab-portfolio" class="tab-content space-y-3.5 sm:space-y-5">
 
-      <!-- Broker Offline Alert Banner (Shown in LIVE mode if disconnected) -->
-      <div id="brokerDisconnectBanner" class="hidden bg-rose-500/10 border border-rose-500/30 rounded-xl p-4 flex items-start gap-3 text-rose-200">
-        <i class="fa-solid fa-triangle-exclamation text-rose-400 text-lg mt-0.5"></i>
-        <div class="flex-1 text-xs">
-          <div class="font-bold text-sm text-rose-300 flex items-center justify-between">
-            <span>Broker Connection Offline &mdash; Live Order Execution Halted</span>
-            <span id="bannerBrokerName" class="text-xs px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/40">IBKR</span>
-          </div>
-          <p id="brokerDisconnectDetail" class="mt-1 text-slate-300">Broker gateway is currently unreachable. Live order routing and account synchronization cannot proceed until reconnected.</p>
-          <div class="mt-3 flex flex-wrap gap-2">
-            <button onclick="reconnectBroker()" class="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg font-semibold text-xs transition-colors flex items-center gap-1.5 shadow-sm active:scale-95 cursor-pointer">
-              <i class="fa-solid fa-bolt"></i> Reconnect Broker
-            </button>
-            <button onclick="switchTab('settings')" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-xs transition-colors cursor-pointer">
-              <i class="fa-solid fa-sliders mr-1"></i> Broker Diagnostics
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Broker Online Status Strip (Shown in LIVE mode when connected) -->
-      <div id="brokerConnectedStrip" class="hidden bg-emerald-500/10 border border-emerald-500/20 rounded-xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
-        <div class="flex items-center flex-wrap gap-2">
-          <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-          <span class="font-bold text-emerald-400"><span id="stripBrokerName">IBKR</span> Gateway Online</span>
-          <span class="text-slate-600">|</span>
-          <span class="text-slate-400">Endpoint: <strong id="stripBrokerEndpoint" class="text-slate-200 font-mono">172.17.0.2:4003</strong></span>
-          <span class="text-slate-600">|</span>
-          <span class="text-slate-400">Latency: <strong id="stripBrokerLatency" class="text-emerald-300">-- ms</strong></span>
-          <span class="text-slate-600 hidden sm:inline">|</span>
-          <span class="text-slate-400 hidden sm:inline">Account: <strong id="stripBrokerAccount" class="text-slate-200 font-mono">--</strong></span>
-        </div>
-        <div class="flex items-center gap-2">
-          <button onclick="syncAccountWithBroker()" class="px-2.5 py-1 bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-300 border border-emerald-500/30 rounded-lg text-[11px] font-medium transition-colors flex items-center gap-1 cursor-pointer">
-            <i class="fa-solid fa-arrows-rotate"></i> Sync Balances
-          </button>
-          <button onclick="pingBrokerStatus(true)" title="Ping Broker" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg text-[11px] font-medium transition-colors cursor-pointer">
-            <i class="fa-solid fa-wifi mr-1"></i> Ping
-          </button>
-        </div>
-      </div>
-
-      <!-- Metric Cards Grid -->
-      <div class="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-4">
-        <!-- Total Value -->
-        <div class="bg-cardBg border border-borderCol rounded-xl p-3 sm:p-4 shadow-sm relative overflow-hidden min-w-0">
-          <div class="text-[11px] sm:text-xs text-slate-400 font-medium truncate">Total Portfolio Value</div>
-          <div id="metricTotalVal" class="text-xl sm:text-2xl font-bold mt-1 text-white truncate">€10,000.00</div>
-          <div id="metricReturnBadge" class="text-[11px] sm:text-xs font-semibold text-emerald-400 mt-1.5 sm:mt-2 flex items-center gap-1">
-            <i class="fa-solid fa-arrow-trend-up"></i> +0.00%
-          </div>
-          <div class="absolute -right-2 -bottom-2 opacity-5 text-4xl text-emerald-400 pointer-events-none">
-            <i class="fa-solid fa-chart-pie"></i>
-          </div>
-        </div>
-
-        <!-- Available Cash -->
-        <div class="bg-cardBg border border-borderCol rounded-xl p-3 sm:p-4 shadow-sm relative overflow-hidden min-w-0">
-          <div class="text-[11px] sm:text-xs text-slate-400 font-medium flex items-center justify-between gap-1">
-            <span class="truncate">Deployable Cash</span>
-            <span id="capitalLimitBadge" class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 font-mono border border-emerald-500/20 shrink-0">100%</span>
-          </div>
-          <div id="metricCash" class="text-xl sm:text-2xl font-bold mt-1 text-white truncate">€10,000.00</div>
-          <div id="metricCashSub" class="text-[11px] sm:text-xs text-slate-400 mt-1.5 sm:mt-2 leading-tight">Buffer capital</div>
-          <div class="absolute -right-2 -bottom-2 opacity-5 text-4xl text-cyan-400 pointer-events-none">
-            <i class="fa-solid fa-money-bill-wave"></i>
-          </div>
-        </div>
-
-        <!-- Invested Equity -->
-        <div class="bg-cardBg border border-borderCol rounded-xl p-3 sm:p-4 shadow-sm relative overflow-hidden min-w-0">
-          <div class="text-[11px] sm:text-xs text-slate-400 font-medium truncate">Active Equity</div>
-          <div id="metricEquity" class="text-xl sm:text-2xl font-bold mt-1 text-white truncate">€0.00</div>
-          <div id="metricPosCount" class="text-[11px] sm:text-xs text-slate-400 mt-1.5 sm:mt-2 truncate">0 open holdings</div>
-          <div class="absolute -right-2 -bottom-2 opacity-5 text-4xl text-indigo-400 pointer-events-none">
-            <i class="fa-solid fa-layer-group"></i>
-          </div>
-        </div>
-
-        <!-- Unrealized PnL -->
-        <div class="bg-cardBg border border-borderCol rounded-xl p-3 sm:p-4 shadow-sm relative overflow-hidden min-w-0">
-          <div class="text-[11px] sm:text-xs text-slate-400 font-medium truncate">Unrealized PnL</div>
-          <div id="metricUnrealizedPnl" class="text-xl sm:text-2xl font-bold mt-1 text-slate-300 truncate">€0.00</div>
-          <div id="metricUnrealizedPnlSub" class="text-[11px] sm:text-xs text-slate-400 mt-1.5 sm:mt-2 truncate">Open paper positions</div>
-          <div class="absolute -right-2 -bottom-2 opacity-5 text-4xl text-amber-400 pointer-events-none">
-            <i class="fa-solid fa-scale-balanced"></i>
-          </div>
-        </div>
-      </div>
-
-      <!-- Pending Triggers Summary (tap to open the Triggers tab) -->
-      <button type="button" onclick="switchTab('triggers')" id="pendingTriggersSummary" class="w-full flex items-center justify-between gap-3 min-h-[52px] px-4 py-2 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-left cursor-pointer">
-        <span class="flex items-center gap-2.5 min-w-0">
-          <i class="fa-solid fa-crosshairs text-indigo-400"></i>
-          <span class="min-w-0">
-            <span id="pendingTriggersSummaryText" class="block text-sm font-semibold text-indigo-200">0 pending triggers</span>
-            <span id="pendingTriggersSummarySub" class="block text-xs text-slate-400">Automated limit orders waiting for their price</span>
-          </span>
-        </span>
-        <i class="fa-solid fa-chevron-right text-xs text-slate-400 shrink-0"></i>
-      </button>
-
-      <!-- Portfolio Allocation & Active Positions -->
-      <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-6">
-        <!-- Positions List -->
-        <div class="lg:col-span-2 bg-cardBg border border-borderCol rounded-xl p-3.5 sm:p-5 shadow-sm space-y-4">
-          <div class="flex items-center justify-between border-b border-borderCol/60 pb-3">
-            <h2 class="text-sm sm:text-base font-bold text-white flex items-center gap-2">
-              <i class="fa-solid fa-cubes text-emerald-400"></i> Open Positions
-            </h2>
-            <button type="button" onclick="loadPortfolio()" class="text-xs text-slate-400 hover:text-white flex items-center gap-1 px-2">
-              <i class="fa-solid fa-arrows-rotate"></i> Refresh
-            </button>
-          </div>
-
-          <!-- Position Cards container -->
-          <div id="positionsContainer" class="space-y-3">
-            <div class="text-center py-10 text-slate-400 text-sm">
-              <i class="fa-solid fa-circle-notch fa-spin text-2xl mb-2 text-emerald-400 block"></i>
-              Loading active positions...
+      <!-- Broker offline alert (LIVE mode only) -->
+      <div id="brokerDisconnectBanner" class="hidden ui-card ui-card-pad" style="background: var(--danger-surface); border-color: var(--danger-line);">
+        <div class="flex items-start gap-3">
+          <i class="fa-solid fa-triangle-exclamation text-rose-300 text-lg mt-0.5"></i>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center justify-between gap-2">
+              <span class="font-bold text-sm text-rose-200">Broker offline: live orders halted</span>
+              <span id="bannerBrokerName" class="ui-badge ui-badge-loss">IBKR</span>
+            </div>
+            <p id="brokerDisconnectDetail" class="mt-1 text-xs text-slate-300">Broker gateway is currently unreachable. Live order routing and account synchronization cannot proceed until reconnected.</p>
+            <div class="mt-3 flex flex-wrap gap-2">
+              <button type="button" onclick="reconnectBroker()" class="ui-btn ui-btn-sm" style="background:#C2334A;border-color:#C2334A;color:#fff"><i class="fa-solid fa-bolt"></i> Reconnect</button>
+              <button type="button" onclick="switchTab('settings')" class="ui-btn ui-btn-sm"><i class="fa-solid fa-sliders"></i> Diagnostics</button>
             </div>
           </div>
         </div>
+      </div>
 
-        <!-- Allocation Chart -->
-        <div class="bg-cardBg border border-borderCol rounded-xl p-3.5 sm:p-5 shadow-sm flex flex-col items-center justify-between">
-          <h2 class="text-sm sm:text-base font-bold text-white self-start flex items-center gap-2 mb-2">
-            <i class="fa-solid fa-chart-pie text-cyan-400"></i> Capital Allocation
-          </h2>
-          <div class="w-full max-w-[200px] sm:max-w-[240px] aspect-square flex items-center justify-center relative my-auto py-2">
+      <!-- Broker online strip (LIVE mode only) -->
+      <div id="brokerConnectedStrip" class="hidden ui-card px-4 py-3 flex flex-wrap items-center justify-between gap-2 text-xs">
+        <div class="flex items-center flex-wrap gap-x-3 gap-y-1 text-slate-400 min-w-0">
+          <span class="flex items-center gap-1.5 font-semibold text-emerald-300"><span class="ui-dot" style="background:var(--gain)"></span><span id="stripBrokerName">IBKR</span> online</span>
+          <span><strong id="stripBrokerEndpoint" class="text-slate-200 font-mono font-medium">172.17.0.2:4003</strong></span>
+          <span><strong id="stripBrokerLatency" class="text-slate-200 font-mono font-medium">-- ms</strong></span>
+          <span class="hidden sm:inline">Account <strong id="stripBrokerAccount" class="text-slate-200 font-mono font-medium">--</strong></span>
+        </div>
+        <div class="flex items-center gap-2">
+          <button type="button" onclick="syncAccountWithBroker()" class="ui-btn ui-btn-sm"><i class="fa-solid fa-arrows-rotate"></i> Sync</button>
+          <button type="button" onclick="pingBrokerStatus(true)" class="ui-btn ui-btn-sm"><i class="fa-solid fa-wifi"></i> Ping</button>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-3.5 sm:gap-5">
+        <div class="lg:col-span-2 space-y-3.5 sm:space-y-5 min-w-0">
+
+          <!-- Hero: total value, return, allocation bar -->
+          <section class="ui-card p-[18px] sm:p-6 space-y-4" aria-label="Portfolio value">
+            <div class="space-y-1">
+              <div class="ui-label text-[13px]">Portfolio value</div>
+              <div id="metricTotalVal" class="hero-value truncate">&euro;0.00</div>
+              <div id="metricReturnBadge" class="flex items-center gap-2 text-sm font-semibold text-slate-400">--</div>
+            </div>
+            <div class="space-y-2">
+              <div id="allocationBar" class="alloc-bar" role="img" aria-label="Capital allocation"><span style="flex:1;background:var(--line-strong)"></span></div>
+              <div class="flex justify-between gap-3 text-[13px] text-slate-400">
+                <span>Invested <strong id="metricEquity" class="ui-num text-white font-semibold">&euro;0.00</strong></span>
+                <span>Cash <strong id="metricTotalCash" class="ui-num text-white font-semibold">&euro;0.00</strong></span>
+              </div>
+              <div id="allocationLegend" class="alloc-legend"></div>
+            </div>
+          </section>
+
+          <!-- Controls: auto-buy and kill switch -->
+          <section class="grid grid-cols-2 gap-2.5" aria-label="Controls">
+            <button type="button" onclick="switchTab('settings')" id="mobileAutoBuyPill" class="control-tile" title="Open settings to change auto-buy">
+              <span class="min-w-0">
+                <span class="tile-label">Auto-buy</span>
+                <span class="tile-value" id="mobileAutoBuyText">On</span>
+              </span>
+              <span id="mobileAutoBuyDot" class="ui-switch on" aria-hidden="true"></span>
+            </button>
+            <button type="button" onclick="toggleKillSwitch()" id="killSwitchBtn" class="control-tile kill-tile" title="Emergency kill switch: halt or resume all new automated buying">
+              <span class="min-w-0">
+                <span class="tile-label">Kill switch</span>
+                <span class="tile-value kill-switch-label">Stop buying</span>
+              </span>
+              <i class="fa-solid fa-power-off text-xl"></i>
+            </button>
+          </section>
+
+          <!-- Market status + capital limit -->
+          <section class="flex flex-wrap gap-2" aria-label="Market status">
+            <span id="mobileMarketStatusPill" class="ui-chip"><span id="mobileMarketDot" class="ui-dot"></span><span id="mobileMarketStatusText">Markets: Checking...</span></span>
+            <span class="ui-chip">Cash limit <span id="capitalLimitBadge" class="ui-num text-slate-200">100%</span></span>
+          </section>
+
+          <!-- KPIs -->
+          <section class="grid grid-cols-2 gap-2.5" aria-label="Key figures">
+            <div class="ui-card kpi">
+              <span class="ui-label">Deployable cash</span>
+              <span id="metricCash" class="kpi-value">&euro;0.00</span>
+              <span id="metricCashSub" class="kpi-sub">Buffer capital</span>
+            </div>
+            <div class="ui-card kpi">
+              <span class="ui-label">Open P&amp;L</span>
+              <span id="metricUnrealizedPnl" class="kpi-value">&euro;0.00</span>
+              <span class="kpi-sub"><span id="metricPosCount">0 open positions</span><span id="metricUnrealizedPnlSub" class="sr-only">Open paper positions</span></span>
+            </div>
+          </section>
+
+          <!-- Pending triggers (opens the Triggers tab) -->
+          <button type="button" onclick="switchTab('triggers')" id="pendingTriggersSummary" class="trigger-link">
+            <span class="flex items-center gap-3 min-w-0">
+              <span class="icon-well"><i class="fa-solid fa-crosshairs"></i></span>
+              <span class="min-w-0">
+                <span id="pendingTriggersSummaryText" class="block font-semibold text-[15px] text-white">0 pending triggers</span>
+                <span id="pendingTriggersSummarySub" class="block text-xs text-slate-400">Limit orders waiting for their price</span>
+              </span>
+            </span>
+            <i class="fa-solid fa-chevron-right text-xs text-slate-400 shrink-0"></i>
+          </button>
+
+          <!-- Positions -->
+          <section class="space-y-2.5" aria-labelledby="positionsTitle">
+            <div class="flex items-center justify-between px-0.5">
+              <h2 id="positionsTitle" class="ui-section-title">Positions <span id="positionsCount" class="ui-count">0</span></h2>
+              <button type="button" onclick="loadPortfolio()" class="ui-btn ui-btn-quiet ui-btn-sm" aria-label="Reload positions"><i class="fa-solid fa-arrows-rotate"></i></button>
+            </div>
+            <div id="positionsContainer" class="ui-list">
+              <div class="text-center py-10 text-slate-400 text-sm">
+                <i class="fa-solid fa-circle-notch fa-spin text-xl mb-2 text-accent block"></i>
+                Loading positions...
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <!-- Allocation doughnut (desktop) -->
+        <aside class="hidden lg:flex ui-card ui-card-pad flex-col gap-4 self-start">
+          <h2 class="ui-section-title">Allocation</h2>
+          <div class="w-full max-w-[240px] aspect-square mx-auto relative">
             <canvas id="allocationChart"></canvas>
           </div>
-          <div class="w-full text-xs text-slate-400 pt-3 border-t border-borderCol/60 flex justify-between">
-            <span>Base Currency: <strong class="text-white">EUR</strong></span>
-            <span>Max Pos: <strong class="text-white">8</strong></span>
+          <div class="text-xs text-slate-400 pt-3 border-t border-borderCol flex justify-between">
+            <span>Base currency <strong class="text-white">EUR</strong></span>
           </div>
-        </div>
+        </aside>
       </div>
     </section>
 

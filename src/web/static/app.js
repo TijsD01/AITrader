@@ -40,6 +40,39 @@ function eur(value, digits = 2) {
   return `€${v.toLocaleString('en-US', {minimumFractionDigits: digits, maximumFractionDigits: digits})}`;
 }
 
+// Euro amount with an explicit + or - sign
+function signedEur(value, digits = 2) {
+  const n = Number(value) || 0;
+  return `${n > 0 ? '+' : n < 0 ? '-' : ''}${eur(Math.abs(n), digits)}`;
+}
+
+// Segmented bar: one slice per holding, cash last
+function renderAllocationBar(cashEur, positions) {
+  const bar = document.getElementById('allocationBar');
+  const legend = document.getElementById('allocationLegend');
+  if (!bar) return;
+  const parts = positions.map((p, i) => ({
+    label: String(p.ticker || ''),
+    value: Math.max(0, Number(p.current_value_eur) || 0),
+    color: ALLOC_COLORS[i % ALLOC_COLORS.length]
+  }));
+  parts.push({ label: 'Cash', value: Math.max(0, cashEur), color: ALLOC_CASH_COLOR });
+  const total = parts.reduce((s, p) => s + p.value, 0);
+  if (total <= 0) {
+    bar.innerHTML = '<span style="flex:1;background:var(--line-strong)"></span>';
+    if (legend) legend.innerHTML = '';
+    return;
+  }
+  const shown = parts.filter(p => p.value > 0);
+  bar.innerHTML = shown.map(p => `<span style="flex:${(p.value / total * 1000).toFixed(0)};background:${p.color}" title="${esc(p.label)}"></span>`).join('');
+  bar.setAttribute('aria-label', 'Capital allocation: ' + shown.map(p => `${p.label} ${(p.value / total * 100).toFixed(0)}%`).join(', '));
+  if (legend) {
+    legend.innerHTML = positions.length === 0 ? '' : shown.map(p =>
+      `<span><i style="background:${p.color}"></i>${esc(p.label)} <span class="ui-num text-slate-300">${(p.value / total * 100).toFixed(0)}%</span></span>`
+    ).join('');
+  }
+}
+
 // Small badge showing where a committee score came from ("llm" | "rules")
 function scoreSourceBadge(source) {
   if (!source) return '';
@@ -82,6 +115,15 @@ document.addEventListener('click', (e) => {
   const ticker = el.dataset.ticker || '';
   switch (action) {
     case 'close-position': closePosition(ticker); break;
+    case 'toggle-position': {
+      const row = el.closest('.pos-row');
+      if (row) {
+        const open = row.classList.toggle('open');
+        el.setAttribute('aria-expanded', open ? 'true' : 'false');
+        if (open) openPositions.add(ticker); else openPositions.delete(ticker);
+      }
+      break;
+    }
     case 'buy': executePaperBuy(ticker); break;
     case 'arm-trigger': armAITrigger(ticker); break;
     case 'analyze': analyzeDirect(ticker); break;
@@ -118,7 +160,7 @@ function showToast(message, kind = false) {
 
 // Tab Metadata for Mobile Dropdown & Navigation
 const TAB_CONFIG = {
-  portfolio: { label: 'Portfolio', icon: 'fa-solid fa-wallet' },
+  portfolio: { label: 'Home', icon: 'fa-solid fa-house' },
   advice: { label: 'Daily Advice', icon: 'fa-solid fa-lightbulb' },
   screener: { label: 'Market Screener', icon: 'fa-solid fa-magnifying-glass-chart' },
   debate: { label: 'Committee Debate', icon: 'fa-solid fa-comments' },
@@ -213,21 +255,14 @@ function switchTab(tabId) {
   const inMore = MORE_TABS.includes(tabId);
   const SHORT = { screener: 'Screener', debate: 'Debate', memory: 'Memory', settings: 'Settings' };
   if (mobileLabel) mobileLabel.textContent = inMore ? (SHORT[tabId] || cfg.label) : 'More';
-  if (mobileIcon) mobileIcon.className = inMore ? cfg.icon : 'fa-solid fa-ellipsis';
+  if (mobileIcon) mobileIcon.className = inMore ? cfg.icon : 'fa-solid fa-table-cells-large';
 
-  // Update mobile dropdown items active state & checkmark
+  // Update the "More" sheet tiles: mark the current section
   document.querySelectorAll('.mobile-dropdown-item').forEach(item => {
     const isCurrent = item.dataset.tab === tabId;
+    item.classList.toggle('is-current', isCurrent);
     const check = item.querySelector('.mobile-active-check');
-    if (isCurrent) {
-      item.classList.add('bg-emerald-500/15', 'text-emerald-400', 'border', 'border-emerald-500/30');
-      item.classList.remove('text-slate-300', 'hover:bg-slate-800/70');
-      if (check) check.classList.remove('hidden');
-    } else {
-      item.classList.remove('bg-emerald-500/15', 'text-emerald-400', 'border', 'border-emerald-500/30');
-      item.classList.add('text-slate-300', 'hover:bg-slate-800/70');
-      if (check) check.classList.add('hidden');
-    }
+    if (check) check.classList.toggle('hidden', !isCurrent);
   });
 
   // Auto-close dropdown menu
@@ -256,6 +291,12 @@ function loadAllData() {
   loadWeeklyReviewComparison();
 }
 
+// Allocation colours: one per holding, cash is a neutral grey
+const ALLOC_COLORS = ['#8EA2FF', '#6ED3E8', '#F5B454', '#C4A6FF', '#4ADE9B', '#FF9F7A', '#7FB2FF', '#E9D86E'];
+const ALLOC_CASH_COLOR = '#3A4459';
+// Position rows the user expanded survive the 30 s refresh
+const openPositions = new Set();
+
 // 1. Chart Initialization
 function initChart() {
   const canvas = document.getElementById('allocationChart');
@@ -267,9 +308,9 @@ function initChart() {
       labels: ['Cash', 'Invested'],
       datasets: [{
         data: [10000, 0],
-        backgroundColor: ['#059669', '#3b82f6'],
+        backgroundColor: [ALLOC_CASH_COLOR, ALLOC_COLORS[0]],
         borderWidth: 2,
-        borderColor: '#131b2e'
+        borderColor: '#121722'
       }]
     },
     options: {
@@ -278,7 +319,7 @@ function initChart() {
       plugins: {
         legend: {
           position: 'bottom',
-          labels: { color: '#94a3b8', font: { size: 12 }, boxWidth: 14 }
+          labels: { color: '#A3ADBD', font: { size: 12, family: "'IBM Plex Sans', system-ui, sans-serif" }, boxWidth: 12 }
         }
       },
       cutout: '72%'
@@ -308,9 +349,7 @@ async function loadPortfolio() {
     const modeBadge = document.getElementById('tradingModeBadge');
     if (modeBadge) {
       modeBadge.textContent = isLive ? 'LIVE' : 'PAPER';
-      modeBadge.className = isLive
-        ? 'text-xs px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-400 font-semibold uppercase tracking-wider shrink-0 border border-rose-500/30'
-        : 'text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-semibold uppercase tracking-wider shrink-0 border border-emerald-500/30';
+      modeBadge.className = isLive ? 'mode-tag is-live' : 'mode-tag';
     }
     const pnlSub = document.getElementById('metricUnrealizedPnlSub');
     if (pnlSub) {
@@ -326,6 +365,8 @@ async function loadPortfolio() {
     document.getElementById('metricTotalVal').textContent = eur(totalVal);
     document.getElementById('metricCash').textContent = eur(deployableCash);
     document.getElementById('metricEquity').textContent = eur(equityVal);
+    const totalCashEl = document.getElementById('metricTotalCash');
+    if (totalCashEl) totalCashEl.textContent = eur(Number(summary.cash_eur) || 0);
 
     // Pending triggers summary (tap to open the Triggers tab)
     const trigCount = Number(summary.pending_triggers_count) || 0;
@@ -335,17 +376,17 @@ async function loadPortfolio() {
     if (trigText) trigText.textContent = `${trigCount} pending trigger${trigCount === 1 ? '' : 's'}`;
     if (trigSub) trigSub.textContent = trigCount > 0 && trigReserved > 0
       ? `${eur(trigReserved)} reserved for limit orders`
-      : 'Automated limit orders waiting for their price';
+      : 'Limit orders waiting for their price';
     setTriggerNavBadge(trigCount);
 
     const limitBadge = document.getElementById('capitalLimitBadge');
     if (limitBadge) {
       if (maxUsagePct < 100 || (maxCapEur && maxCapEur > 0)) {
-        limitBadge.textContent = `${maxUsagePct}% limit${maxCapEur ? ` (Cap €${maxCapEur})` : ''}`;
-        limitBadge.className = 'text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 font-mono border border-amber-500/20';
+        limitBadge.textContent = `${maxUsagePct}%${maxCapEur ? ` · cap ${eur(maxCapEur, 0)}` : ''}`;
+        limitBadge.className = 'ui-num text-amber-300';
       } else {
         limitBadge.textContent = '100%';
-        limitBadge.className = 'text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 font-mono border border-emerald-500/20';
+        limitBadge.className = 'ui-num text-slate-200';
       }
     }
 
@@ -356,16 +397,16 @@ async function loadPortfolio() {
       const subParts = [];
 
       if (reservedTriggers > 0) {
-        subParts.push(`<span class="text-sky-400 font-medium" title="Capital earmarked for pending order triggers"><i class="fa-solid fa-clock"></i> ${eur(reservedTriggers)} reserved (${triggersCount} trigger${triggersCount > 1 ? 's' : ''})</span>`);
+        subParts.push(`<span title="Capital earmarked for pending order triggers">${eur(reservedTriggers)} held for ${triggersCount} trigger${triggersCount > 1 ? 's' : ''}</span>`);
       }
       if (protectedReserve > 0) {
-        subParts.push(`<span class="text-amber-400 font-medium"><i class="fa-solid fa-shield-halved"></i> ${eur(protectedReserve)} reserved</span>`);
+        subParts.push(`<span class="text-amber-300">${eur(protectedReserve)} protected</span>`);
       }
 
       if (subParts.length > 0) {
-        cashSub.innerHTML = `${subParts.join(' · ')} · Total ${eur(currentAccountCash)}`;
+        cashSub.innerHTML = subParts.join(' · ');
       } else {
-        cashSub.textContent = `Full buffer · Total account cash ${eur(currentAccountCash)}`;
+        cashSub.textContent = `of ${eur(currentAccountCash)} account cash`;
       }
     }
 
@@ -374,77 +415,86 @@ async function loadPortfolio() {
     const pnlElem = document.getElementById('metricUnrealizedPnl');
     const returnElem = document.getElementById('metricReturnBadge');
 
-    const sign = pnlVal >= 0 ? '+' : '';
-    pnlElem.textContent = `${sign}€${pnlVal.toFixed(2)}`;
-    pnlElem.className = `text-xl sm:text-2xl font-bold mt-1 truncate ${pnlVal >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
+    pnlElem.textContent = signedEur(pnlVal);
+    pnlElem.className = `kpi-value ${pnlVal > 0 ? 'ui-gain' : pnlVal < 0 ? 'ui-loss' : ''}`;
 
-    const retSign = totalReturnPct >= 0 ? '+' : '';
-    returnElem.innerHTML = `<i class="fa-solid fa-arrow-trend-${totalReturnPct >= 0 ? 'up' : 'down'}"></i> ${retSign}${totalReturnPct.toFixed(2)}% total return`;
-    returnElem.className = `text-[11px] sm:text-xs font-semibold mt-1.5 sm:mt-2 flex items-center gap-1 ${totalReturnPct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
-    
-    document.getElementById('metricPosCount').textContent = `${positions.length} open holdings`;
+    const up = totalReturnPct >= 0;
+    const initialCap = Number(summary.initial_capital_eur) || 0;
+    const absReturn = initialCap ? totalVal - initialCap : null;
+    returnElem.innerHTML = `<i class="fa-solid fa-arrow-${up ? 'up' : 'down'}-long text-xs" aria-hidden="true"></i>`
+      + (absReturn !== null ? `<span class="ui-num">${signedEur(absReturn)}</span>` : '')
+      + `<span class="ui-num">${up ? '+' : ''}${totalReturnPct.toFixed(2)}%</span>`
+      + `<span class="text-slate-500 font-medium">all time</span>`;
+    returnElem.className = `flex items-center gap-2 text-sm font-semibold ${up ? 'ui-gain' : 'ui-loss'}`;
+
+    document.getElementById('metricPosCount').textContent = `${positions.length} open position${positions.length === 1 ? '' : 's'}`;
+    const posCount = document.getElementById('positionsCount');
+    if (posCount) posCount.textContent = String(positions.length);
+
+    // Allocation bar (all screens) + doughnut (desktop)
+    renderAllocationBar(Number(summary.cash_eur) || 0, positions);
 
     // Update Chart
     if (allocationChart) {
       if (positions.length > 0) {
         const labels = ['Cash', ...positions.map(p => p.ticker)];
         const dataVals = [Number(summary.cash_eur) || 0, ...positions.map(p => Number(p.current_value_eur) || 0)];
-        const colors = ['#059669', '#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#f97316', '#6366f1'];
         allocationChart.data.labels = labels;
         allocationChart.data.datasets[0].data = dataVals;
-        allocationChart.data.datasets[0].backgroundColor = colors.slice(0, labels.length);
+        allocationChart.data.datasets[0].backgroundColor = [ALLOC_CASH_COLOR, ...positions.map((_, i) => ALLOC_COLORS[i % ALLOC_COLORS.length])];
       } else {
         allocationChart.data.labels = ['Cash', 'Invested'];
         allocationChart.data.datasets[0].data = [Number(summary.cash_eur) || 0, 0];
-        allocationChart.data.datasets[0].backgroundColor = ['#059669', '#3b82f6'];
+        allocationChart.data.datasets[0].backgroundColor = [ALLOC_CASH_COLOR, ALLOC_COLORS[0]];
       }
       allocationChart.update();
     }
 
-    // Render Position Cards
+    // Render position rows (tap a row to see entry, stops and the sell button)
     const container = document.getElementById('positionsContainer');
     if (positions.length === 0) {
       container.innerHTML = `
-        <div class="text-center py-10 text-slate-400 text-xs sm:text-sm">
-          <i class="fa-solid fa-hourglass-start text-2xl mb-2 text-slate-500 block"></i>
-          No active holdings yet. The automated agent committee will open positions during market hours or on-demand!
+        <div class="text-center px-6 py-10 text-slate-400 text-sm">
+          <i class="fa-solid fa-seedling text-xl mb-2 text-slate-500 block"></i>
+          No open positions yet. The committee opens positions during market hours or when you buy from Advice.
         </div>`;
       return;
     }
 
-    container.innerHTML = positions.map(pos => {
+    container.innerHTML = positions.map((pos, i) => {
       const pnl = Number(pos.unrealized_pnl_eur) || 0;
-      const pnlColor = pnl >= 0 ? 'text-emerald-400' : 'text-rose-400';
-      const pnlSign = pnl >= 0 ? '+' : '';
+      const pnlPct = Number(pos.unrealized_pnl_pct);
+      const tone = pnl > 0 ? 'ui-gain' : pnl < 0 ? 'ui-loss' : 'ui-muted';
+      const arrow = pnl > 0 ? '▲' : pnl < 0 ? '▼' : '';
+      const pctText = Number.isFinite(pnlPct) ? `${arrow} ${Math.abs(pnlPct).toFixed(2)}%` : esc(pos.unrealized_pnl_pct);
+      const mono = String(pos.ticker || '').split('.')[0].slice(0, 4);
+      const color = ALLOC_COLORS[i % ALLOC_COLORS.length];
+      const isOpen = openPositions.has(pos.ticker);
+      const shares = `${esc(pos.shares)} share${Number(pos.shares) === 1 ? '' : 's'}`;
       return `
-        <div class="p-3.5 sm:p-4 rounded-xl bg-slate-900/70 border border-borderCol hover:border-slate-700 transition-colors space-y-3">
-          <div class="flex items-start justify-between gap-3">
-            <div class="min-w-0">
-              <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-                <span class="font-bold text-white text-base">${esc(pos.ticker)}</span>
-                <span class="text-[11px] px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">${esc(pos.shares)} shs</span>
-              </div>
-              ${pos.name ? `<div class="text-xs text-slate-400 truncate">${esc(pos.name)}</div>` : ''}
+        <div class="pos-row${isOpen ? ' open' : ''}">
+          <button type="button" class="pos-head" data-action="toggle-position" data-ticker="${esc(pos.ticker)}" aria-expanded="${isOpen ? 'true' : 'false'}">
+            <span class="pos-mono" style="color:${color}">${esc(mono)}</span>
+            <span class="flex-1 min-w-0">
+              <span class="block font-semibold text-[15px] text-white truncate">${esc(pos.ticker)}</span>
+              <span class="block text-xs text-slate-500 truncate">${shares}${pos.name ? ` · ${esc(pos.name)}` : ''}</span>
+            </span>
+            <span class="text-right shrink-0">
+              <span class="block ui-num font-semibold text-[15px] text-white">${eur(pos.current_value_eur)}</span>
+              <span class="block ui-num text-xs font-semibold ${tone}">${pctText}</span>
+            </span>
+            <i class="fa-solid fa-chevron-down pos-chevron" aria-hidden="true"></i>
+          </button>
+          <div class="pos-detail">
+            <div class="grid grid-cols-2 gap-x-4 gap-y-2 pt-2">
+              <div class="kv"><span>Entry</span><span>${esc(pos.entry_price_native)} ${esc(pos.currency)}</span></div>
+              <div class="kv"><span>Now</span><span>${esc(pos.current_price_native)} ${esc(pos.currency)}</span></div>
+              <div class="kv"><span>Stop</span><span class="ui-loss">${pos.stop_loss_native ? esc(pos.stop_loss_native) : '–'}</span></div>
+              <div class="kv"><span>Target</span><span class="ui-gain">${pos.take_profit_native ? esc(pos.take_profit_native) : '–'}</span></div>
+              <div class="kv col-span-2"><span>P&amp;L</span><span class="${tone}">${signedEur(pnl)}</span></div>
             </div>
-            <div class="text-right shrink-0">
-              <div class="text-base font-bold ${pnlColor}">${pnlSign}€${num(pnl)}</div>
-              <div class="text-xs font-semibold ${pnlColor}">${pnlSign}${esc(pos.unrealized_pnl_pct)}%</div>
-            </div>
-          </div>
-
-          <div class="text-xs text-slate-400 grid grid-cols-2 sm:flex sm:flex-wrap gap-x-4 gap-y-1">
-            <span>Entry: <strong class="text-slate-200">${esc(pos.entry_price_native)} ${esc(pos.currency)}</strong></span>
-            <span>Now: <strong class="text-white">${esc(pos.current_price_native)} ${esc(pos.currency)}</strong></span>
-            <span class="col-span-2 sm:col-span-1">Value: <strong class="text-emerald-400">€${esc(pos.current_value_eur)}</strong></span>
-          </div>
-
-          <div class="flex flex-wrap items-center justify-between gap-2">
-            <div class="text-xs flex flex-wrap gap-2">
-              ${pos.stop_loss_native ? `<span class="px-2 py-0.5 rounded bg-rose-500/10 text-rose-400 border border-rose-500/20 text-[11px] font-medium"><i class="fa-solid fa-shield"></i> Stop: ${esc(pos.stop_loss_native)}</span>` : ''}
-              ${pos.take_profit_native ? `<span class="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[11px] font-medium"><i class="fa-solid fa-bullseye"></i> Target: ${esc(pos.take_profit_native)}</span>` : ''}
-            </div>
-            <button type="button" data-action="close-position" data-ticker="${esc(pos.ticker)}" class="px-4 min-h-[44px] rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border border-rose-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 active:scale-95 transition-all" aria-label="Close position ${esc(pos.ticker)}">
-              <i class="fa-solid fa-xmark"></i> Close
+            <button type="button" data-action="close-position" data-ticker="${esc(pos.ticker)}" class="ui-btn ui-btn-danger w-full mt-3" aria-label="Sell position ${esc(pos.ticker)}">
+              <i class="fa-solid fa-arrow-right-from-bracket"></i> Sell position
             </button>
           </div>
         </div>
@@ -856,10 +906,10 @@ async function loadBrokerStatus(force = false) {
   const pingIcon = document.getElementById('settingsPingIcon');
 
   if (force) {
-    if (dot) dot.className = 'w-2 h-2 rounded-full bg-amber-400 animate-ping';
+    if (dot) dot.className = 'ui-dot bg-amber-400 animate-pulse';
     if (text) text.textContent = 'Broker: Probing...';
-    if (mobDot) mobDot.className = 'w-2 h-2 rounded-full bg-amber-400 animate-ping';
-    if (mobText) mobText.textContent = 'Broker: Probing...';
+    if (mobDot) mobDot.className = 'ui-dot bg-amber-400 animate-pulse';
+    if (mobText) mobText.textContent = 'Checking broker...';
     if (pingIcon) pingIcon.classList.add('fa-spin');
     if (pingBtn) pingBtn.disabled = true;
   }
@@ -893,24 +943,24 @@ async function loadBrokerStatus(force = false) {
     // 1. Update Header Badge & Mobile Pill
     if (mobDot && mobText) {
       if (isConnected) {
-        mobDot.className = 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse';
-        mobText.textContent = isLive ? `${brokerName}: Online` : `${brokerName}: Active`;
+        mobDot.className = 'ui-dot bg-emerald-400';
+        mobText.textContent = brokerName === 'PAPER' ? 'Simulated broker' : `${brokerName} online`;
       } else {
-        mobDot.className = 'w-2 h-2 rounded-full bg-rose-500';
-        mobText.textContent = `${brokerName}: Offline`;
+        mobDot.className = 'ui-dot bg-rose-400';
+        mobText.textContent = `${brokerName} offline`;
       }
     }
 
     if (badge && dot && text) {
       if (isConnected) {
-        dot.className = 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse';
+        dot.className = 'ui-dot bg-emerald-400';
         text.textContent = isLive ? `${brokerName}: Online` : `${brokerName}: Active`;
-        badge.className = 'hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-medium transition-colors cursor-pointer hover:border-emerald-400';
+        badge.className = 'hidden';
         badge.title = `${brokerName} Connected (${data.latency_ms !== null && data.latency_ms !== undefined ? data.latency_ms + 'ms' : 'Ready'})\nClick to test connection`;
       } else {
-        dot.className = 'w-2 h-2 rounded-full bg-rose-500';
+        dot.className = 'ui-dot bg-rose-400';
         text.textContent = `${brokerName}: Offline`;
-        badge.className = 'hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs font-medium transition-colors cursor-pointer hover:border-rose-400';
+        badge.className = 'hidden';
         badge.title = `${brokerName} Disconnected: ${data.message || 'Unreachable'}\nClick to retest`;
       }
     }
@@ -962,11 +1012,11 @@ async function loadBrokerStatus(force = false) {
     }
     if (diagDot && diagText) {
       if (isConnected) {
-        diagDot.className = 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse';
+        diagDot.className = 'ui-dot bg-emerald-400';
         diagText.textContent = 'Connected (Online)';
         diagText.className = 'text-emerald-400 font-bold';
       } else {
-        diagDot.className = 'w-2 h-2 rounded-full bg-rose-500';
+        diagDot.className = 'ui-dot bg-rose-400';
         diagText.textContent = 'Disconnected (Offline)';
         diagText.className = 'text-rose-400 font-bold';
       }
@@ -993,12 +1043,12 @@ async function loadBrokerStatus(force = false) {
     console.error('Failed to load broker status:', err);
     const mobErrDot = document.getElementById('mobileBrokerStatusDot');
     const mobErrText = document.getElementById('mobileBrokerStatusText');
-    if (mobErrDot) mobErrDot.className = 'w-2 h-2 rounded-full bg-rose-500';
-    if (mobErrText) mobErrText.textContent = 'Broker: Error';
+    if (mobErrDot) mobErrDot.className = 'ui-dot bg-rose-400';
+    if (mobErrText) mobErrText.textContent = 'Broker error';
     if (badge && dot && text) {
-      dot.className = 'w-2 h-2 rounded-full bg-rose-500';
+      dot.className = 'ui-dot bg-rose-400';
       text.textContent = 'Broker: Error';
-      badge.className = 'hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs font-medium';
+      badge.className = 'hidden';
     }
     if (force) showToast('Failed to contact server for broker status', true);
   } finally {
@@ -1017,18 +1067,22 @@ async function loadMarketStatus() {
     if (!badge || !textEl) return;
 
     const mobMarketText = document.getElementById('mobileMarketStatusText');
+    const mobMarketDot = document.getElementById('mobileMarketDot');
+    const euOpen = !!msData.eu_market?.is_open;
+    const usOpen = !!msData.us_market?.is_open;
+    if (mobMarketDot) mobMarketDot.className = (euOpen || usOpen) ? 'ui-dot bg-emerald-400' : 'ui-dot';
     if (msData.is_weekend) {
       textEl.textContent = 'Weekend (Markets Closed)';
-      badge.className = 'hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700 text-amber-400 text-xs font-medium';
-      if (mobMarketText) mobMarketText.textContent = 'Weekend (Closed)';
+      badge.className = 'hidden xl:flex ui-chip text-amber-300';
+      if (mobMarketText) mobMarketText.textContent = 'Weekend · markets closed';
     } else if (msData.eu_market.is_open || msData.us_market.is_open) {
       textEl.textContent = `🇪🇺 EU: ${msData.eu_market.status} | 🇺🇸 US: ${msData.us_market.status}`;
-      badge.className = 'hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-medium';
-      if (mobMarketText) mobMarketText.textContent = 'Markets: Open';
+      badge.className = 'hidden xl:flex ui-chip text-emerald-300';
+      if (mobMarketText) mobMarketText.textContent = `EU ${euOpen ? 'open' : 'closed'} · US ${usOpen ? 'open' : 'closed'}`;
     } else {
       textEl.textContent = '🇪🇺 EU: CLOSED | 🇺🇸 US: CLOSED';
-      badge.className = 'hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700 text-slate-400 text-xs font-medium';
-      if (mobMarketText) mobMarketText.textContent = 'Markets: Closed';
+      badge.className = 'hidden xl:flex ui-chip';
+      if (mobMarketText) mobMarketText.textContent = 'EU closed · US closed';
     }
   } catch (err) {
     console.debug('Failed to load market status:', err);
@@ -1261,21 +1315,11 @@ function renderAutoBuyStatus(enabled) {
   const mobTxt = document.getElementById('mobileAutoBuyText');
   if (mobTxt) mobTxt.textContent = on ? 'On' : 'Off';
   const badge = document.getElementById('autoBuyBadge');
-  if (badge) {
-    badge.className = on
-      ? 'hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-medium'
-      : 'hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700 text-slate-400 text-xs font-medium';
-  }
+  if (badge) badge.className = on ? 'hidden xl:flex ui-chip text-emerald-300' : 'hidden xl:flex ui-chip';
   const dot = document.getElementById('autoBuyDot');
-  if (dot) dot.className = on ? 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse' : 'w-2 h-2 rounded-full bg-slate-500';
-  const pill = document.getElementById('mobileAutoBuyPill');
-  if (pill) {
-    pill.className = on
-      ? 'md:hidden flex items-center gap-2 min-h-[44px] px-3 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 cursor-pointer'
-      : 'md:hidden flex items-center gap-2 min-h-[44px] px-3 rounded-full bg-slate-800 border border-slate-700 text-slate-400 cursor-pointer';
-  }
-  const mobDot = document.getElementById('mobileAutoBuyDot');
-  if (mobDot) mobDot.className = on ? 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse' : 'w-2 h-2 rounded-full bg-slate-500';
+  if (dot) dot.className = on ? 'ui-dot bg-emerald-400' : 'ui-dot';
+  const sw = document.getElementById('mobileAutoBuyDot');
+  if (sw) sw.classList.toggle('on', on);
 }
 
 // Lightweight status refresh (auto-buy + trading mode) that does not touch the settings form
@@ -1297,11 +1341,11 @@ function renderKillSwitch() {
     const label = btn.querySelector('.kill-switch-label');
     if (killSwitchActive) {
       btn.classList.add('kill-switch-engaged');
-      if (label) label.textContent = 'HALTED - Resume';
+      if (label) label.textContent = 'Halted · resume';
       btn.title = 'Kill switch is ACTIVE: new automated buying is blocked. Tap to resume.';
     } else {
       btn.classList.remove('kill-switch-engaged');
-      if (label) label.textContent = 'Kill Switch';
+      if (label) label.textContent = btn.id === 'killSwitchBtn' ? 'Stop buying' : 'Kill Switch';
       btn.title = 'Emergency kill switch: halt or resume all new automated buying';
     }
   });
@@ -1399,31 +1443,39 @@ async function reconnectBroker() {
 // 9. Quick Scan Trigger
 async function triggerQuickScan() {
   const btn = document.getElementById('scanBtn');
-  btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> <span>Scanning...</span>`;
+  const idleHtml = `<i class="fa-solid fa-satellite-dish"></i> <span>Scan</span>`;
+  btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> <span>Scanning</span>`;
   btn.disabled = true;
+  let delayReset = false;
 
   try {
     const res = await fetch('/api/scheduler/trigger', { method: 'POST' });
     if (res.ok) {
-      showToast('Market scan initiated! Inspecting candidates...');
+      showToast('Market scan started. Inspecting candidates...');
+      delayReset = true;
       setTimeout(() => {
         loadAllData();
-        btn.innerHTML = `<i class="fa-solid fa-satellite-dish"></i> <span class="hidden sm:inline">Run Scan</span>`;
+        btn.innerHTML = idleHtml;
         btn.disabled = false;
       }, 3500);
+    } else {
+      showToast('Scan could not start (HTTP ' + res.status + ').', true);
     }
   } catch (e) {
     showToast('Scan trigger failed.', true);
-    btn.innerHTML = `<i class="fa-solid fa-satellite-dish"></i> <span class="hidden sm:inline">Run Scan</span>`;
-    btn.disabled = false;
+  } finally {
+    if (!delayReset) {
+      btn.innerHTML = idleHtml;
+      btn.disabled = false;
+    }
   }
 }
 
 // 9b. Manual Market Data Refresh
 async function refreshMarketData() {
   const btn = document.getElementById('refreshDataBtn');
-  const idleHtml = `<i class="fa-solid fa-arrows-rotate text-xs sm:text-sm"></i> <span class="hidden sm:inline">Refresh Data</span>`;
-  btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> <span class="hidden sm:inline">Refreshing...</span>`;
+  const idleHtml = `<i class="fa-solid fa-arrows-rotate"></i>`;
+  btn.innerHTML = `<i class="fa-solid fa-arrows-rotate fa-spin"></i>`;
   btn.disabled = true;
 
   try {
