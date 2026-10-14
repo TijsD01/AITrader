@@ -12,7 +12,8 @@ from src.screener.scanner import market_scanner
 from src.data.market import market_data_provider
 from src.agents.committee import investment_committee
 from src.trading.broker import active_broker as paper_broker, get_active_broker, active_broker
-from src.trading.risk import calculate_position_allocation
+from src.trading.risk import calculate_position_allocation, derive_trigger_levels
+from src.trading.shadow import shadow_portfolios
 from src.telegram.bot import telegram_bot
 from sqlalchemy import select, desc
 from src.db.session import AsyncSessionLocal
@@ -287,21 +288,7 @@ class TradingScheduler:
                                 full_budget_utilization=settings.FULL_BUDGET_UTILIZATION
                             )
 
-                            trigger_price = report.get("entry_trigger_price", data["price"])
-                            trigger_type = report.get("trigger_type", "LIMIT_PULLBACK")
-
-                            # Enforce direction for anti-overlap
-                            if trigger_type == "LIMIT_PULLBACK" and trigger_price >= data["price"]:
-                                trigger_price = round(data["price"] * 0.985, 2)
-                            elif trigger_type == "BREAKOUT_BUY" and trigger_price <= data["price"]:
-                                trigger_price = round(data["price"] * 1.01, 2)
-
-                            sl = report["risk"].get("stop_loss_price")
-                            tp = report["risk"].get("take_profit_price")
-                            if sl and sl >= trigger_price:
-                                sl = round(trigger_price * 0.96, 2)
-                            if tp and tp <= trigger_price:
-                                tp = round(trigger_price * 1.06, 2)
+                            trigger_type, trigger_price, sl, tp = derive_trigger_levels(report, data["price"])
 
                             trig_res = await paper_broker.create_price_trigger(
                                 ticker=ticker,
@@ -327,6 +314,9 @@ class TradingScheduler:
                     else:
                         report["status_type"] = "ON_RADAR"
 
+                    await shadow_portfolios.follow_report(
+                        report, data, followed_main=report.get("status_type") == "TRIGGER_ARMED"
+                    )
                     reports.append(report)
                 except asyncio.TimeoutError:
                     logger.warning(f"Timeout evaluating candidate {ticker} in {market} session, skipping.")
@@ -381,7 +371,10 @@ class TradingScheduler:
     async def monitor_open_positions(self) -> List[Dict[str, Any]]:
         """Monitors open positions for stop-loss and take-profit triggers."""
         async with self._monitor_lock:
-            return await self._check_stops_and_targets()
+            closed = await self._check_stops_and_targets()
+            await shadow_portfolios.check_exits()
+            await shadow_portfolios.record_snapshots(main_summary_fn=get_active_broker().get_portfolio_summary)
+            return closed
 
     async def _check_stops_and_targets(self) -> List[Dict[str, Any]]:
         try:
@@ -401,7 +394,9 @@ class TradingScheduler:
                 await paper_broker.sync_cash_balance()
             except Exception as e:
                 logger.error(f"Cash balance sync failed, continuing with last known balance: {e}")
-            return await self._check_price_triggers()
+            executed = await self._check_price_triggers()
+            await shadow_portfolios.check_triggers()
+            return executed
 
     async def _sync_account_balance(self) -> Dict[str, Any]:
         """Runs the full broker sync (cash and positions) for a manual refresh."""
@@ -450,6 +445,8 @@ class TradingScheduler:
             resized = [tid for tid, alloc in allocs_after.items() if allocs_before.get(tid) != alloc]
             executed = await self._check_price_triggers()
             closed = await self._check_stops_and_targets()
+            await shadow_portfolios.check_triggers()
+            await shadow_portfolios.check_exits()
 
             logger.info(
                 f"Manual market data refresh: {len(tickers)} tickers, {len(resized)} triggers resized, "
@@ -514,6 +511,7 @@ class TradingScheduler:
                         break
 
                     report = await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
+                    armed = False
                     if self._should_arm_trigger(report, trigger_min_score):
                         alloc = calculate_position_allocation(
                             available_cash=avail,
@@ -522,20 +520,7 @@ class TradingScheduler:
                             full_budget_utilization=settings.FULL_BUDGET_UTILIZATION
                         )
 
-                        t_price = report.get("entry_trigger_price", data["price"])
-                        t_type = report.get("trigger_type", "LIMIT_PULLBACK")
-
-                        if t_type == "LIMIT_PULLBACK" and t_price >= data["price"]:
-                            t_price = round(data["price"] * 0.985, 2)
-                        elif t_type == "BREAKOUT_BUY" and t_price <= data["price"]:
-                            t_price = round(data["price"] * 1.01, 2)
-
-                        sl = report["risk"].get("stop_loss_price")
-                        tp = report["risk"].get("take_profit_price")
-                        if sl and sl >= t_price:
-                            sl = round(t_price * 0.96, 2)
-                        if tp and tp <= t_price:
-                            tp = round(t_price * 1.06, 2)
+                        t_type, t_price, sl, tp = derive_trigger_levels(report, data["price"])
 
                         trig_res = await paper_broker.create_price_trigger(
                             ticker=tk,
@@ -554,6 +539,8 @@ class TradingScheduler:
                             pending_tickers.add(tk)
                             logger.info(f"Opportunity Scanner auto-armed trigger #{trig_res['trigger_id']} for {tk} (Score {report['consensus_score']}/100 >= {trigger_min_score})")
                             await telegram_bot.notify_trigger_armed(trig_res)
+                            armed = True
+                    await shadow_portfolios.follow_report(report, data, followed_main=armed)
         except Exception as e:
             logger.error(f"Error in scan_market_opportunities: {e}")
 

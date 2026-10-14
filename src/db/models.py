@@ -164,3 +164,76 @@ class TradeLesson(Base):
     lesson = Column(Text, nullable=False)
     parameter_adjustments = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow, index=True)
+
+# Shadow paper portfolios: simulated strategy variants that follow the live bot's committee
+# verdicts with different parameters. Fully separate from the tables above; never sent to a broker.
+class ShadowAccount(Base):
+    __tablename__ = "shadow_accounts"
+
+    strategy = Column(String(40), primary_key=True)
+    cash_eur = Column(Float, nullable=False)
+    initial_capital_eur = Column(Float, nullable=False)
+    # Main portfolio value when this shadow started, so both returns are measured over the same period
+    main_value_at_start_eur = Column(Float, nullable=True)
+    # Main-bot parameters the shadow builds on (trigger threshold, breakeven %, max positions), frozen at start
+    # so the learner's later recalibrations of the main bot do not change the experiment halfway
+    frozen_params = Column(JSON, nullable=True)
+    started_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+class ShadowTrigger(Base):
+    __tablename__ = "shadow_triggers"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    strategy = Column(String(40), nullable=False, index=True)
+    ticker = Column(String(20), nullable=False, index=True)
+    name = Column(String(100), nullable=True)
+    currency = Column(String(10), default="USD")
+    trigger_type = Column(String(20), nullable=False)  # LIMIT_PULLBACK, BREAKOUT_BUY, MARKET
+    target_price = Column(Float, nullable=False)
+    current_price_at_creation = Column(Float, nullable=False)
+    stop_loss = Column(Float, nullable=True)
+    take_profit = Column(Float, nullable=True)
+    consensus_score = Column(Integer, nullable=True)
+    followed_main = Column(Boolean, default=False)  # True when the main bot armed a trigger on the same verdict
+    status = Column(String(20), default="PENDING", index=True)  # PENDING, TRIGGERED, CANCELLED, EXPIRED
+    note = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    triggered_at = Column(DateTime, nullable=True)
+
+class ShadowPosition(Base):
+    __tablename__ = "shadow_positions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    strategy = Column(String(40), nullable=False, index=True)
+    trigger_id = Column(Integer, nullable=True)
+    ticker = Column(String(20), nullable=False, index=True)
+    name = Column(String(100), nullable=True)
+    currency = Column(String(10), default="USD")
+    shares = Column(Float, nullable=False)
+    entry_price_native = Column(Float, nullable=False)
+    current_price_native = Column(Float, nullable=False)
+    highest_price_native = Column(Float, nullable=False)
+    stop_loss_native = Column(Float, nullable=True)
+    take_profit_native = Column(Float, nullable=True)
+    entry_price_eur = Column(Float, nullable=False)
+    current_price_eur = Column(Float, nullable=False)
+    cost_basis_eur = Column(Float, nullable=False)
+    fees_eur = Column(Float, default=0.0)
+    consensus_score = Column(Integer, nullable=True)
+    followed_main = Column(Boolean, default=False)
+    status = Column(String(20), default="OPEN", index=True)  # OPEN, CLOSED
+    exit_price_native = Column(Float, nullable=True)
+    realized_pnl_eur = Column(Float, nullable=True)
+    realized_pnl_pct = Column(Float, nullable=True)
+    exit_reason = Column(String(255), nullable=True)
+    opened_at = Column(DateTime, default=datetime.datetime.utcnow)
+    closed_at = Column(DateTime, nullable=True)
+
+class ShadowSnapshot(Base):
+    __tablename__ = "shadow_snapshots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    strategy = Column(String(40), nullable=False, index=True)  # strategy key, or "MAIN" for the main portfolio
+    timestamp = Column(DateTime, default=datetime.datetime.utcnow, index=True)
+    total_value_eur = Column(Float, nullable=False)
+    return_pct = Column(Float, default=0.0)

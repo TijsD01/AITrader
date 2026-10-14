@@ -221,6 +221,27 @@ def validate_buy_order(
 
 VALID_TRIGGER_TYPES = ("LIMIT_PULLBACK", "BREAKOUT_BUY")
 
+def derive_trigger_levels(report: Dict[str, Any], current_price: float) -> Tuple[str, float, Optional[float], Optional[float]]:
+    """
+    Turns a committee report into (trigger_type, trigger_price, stop_loss, take_profit), forcing the
+    entry on the correct side of the current price and the stop/target on the correct side of the entry.
+    """
+    trigger_price = report.get("entry_trigger_price", current_price)
+    trigger_type = report.get("trigger_type", "LIMIT_PULLBACK")
+
+    if trigger_type == "LIMIT_PULLBACK" and trigger_price >= current_price:
+        trigger_price = round(current_price * 0.985, 2)
+    elif trigger_type == "BREAKOUT_BUY" and trigger_price <= current_price:
+        trigger_price = round(current_price * 1.01, 2)
+
+    sl = report["risk"].get("stop_loss_price")
+    tp = report["risk"].get("take_profit_price")
+    if sl and sl >= trigger_price:
+        sl = round(trigger_price * 0.96, 2)
+    if tp and tp <= trigger_price:
+        tp = round(trigger_price * 1.06, 2)
+    return trigger_type, trigger_price, sl, tp
+
 def validate_trigger_levels(
     trigger_type: str,
     target_price: float,
