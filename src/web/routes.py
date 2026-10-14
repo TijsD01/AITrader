@@ -3,7 +3,7 @@ import logging
 from typing import Dict, Any, List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, func
 
 from config.settings import settings, update_env_file
 from src.db.session import AsyncSessionLocal
@@ -137,7 +137,14 @@ async def get_trades(limit: int = 30):
 @router.get("/api/recommendations")
 async def get_recommendations(limit: int = 15):
     async with AsyncSessionLocal() as session:
-        res = await session.execute(select(AnalysisReport).order_by(desc(AnalysisReport.created_at)).limit(limit))
+        # One card per ticker: only the newest report for each stock
+        latest_ids = select(func.max(AnalysisReport.id)).group_by(AnalysisReport.ticker)
+        res = await session.execute(
+            select(AnalysisReport)
+            .where(AnalysisReport.id.in_(latest_ids))
+            .order_by(desc(AnalysisReport.created_at), desc(AnalysisReport.id))
+            .limit(limit)
+        )
         reports = res.scalars().all()
         return [
             {
