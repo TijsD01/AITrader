@@ -40,6 +40,7 @@ class PaperBroker(BaseBroker):
             "status": "ONLINE",
             "message": "Paper Trading Simulation is active and ready.",
             "latency_ms": 0.1,
+            "kill_switch_active": settings.KILL_SWITCH_ACTIVE,
             "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
         }
 
