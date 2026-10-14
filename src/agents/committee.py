@@ -1,4 +1,6 @@
 import logging
+import math
+import re
 from typing import Dict, Any, Optional
 from src.agents.base import llm_client
 from src.agents.technical import TechnicalAnalystAgent
@@ -10,6 +12,28 @@ logger = logging.getLogger(__name__)
 
 class InvestmentCommittee:
     name: str = "Hedge Fund Investment Committee"
+
+    @staticmethod
+    def _parse_llm_verdict(res: Any) -> Optional[tuple]:
+        """Returns (action, score 0-100) from a raw LLM verdict, or None if malformed (caller falls back to rules)."""
+        if not isinstance(res, dict) or "action" not in res or "consensus_score" not in res:
+            return None
+        action = str(res["action"] or "").strip().upper().replace(" ", "_")
+        if action not in ("STRONG_BUY", "BUY", "HOLD", "SELL"):
+            return None
+        raw = res["consensus_score"]
+        if isinstance(raw, bool):
+            return None
+        score = None
+        if isinstance(raw, (int, float)):
+            score = float(raw)
+        elif isinstance(raw, str):
+            m = re.match(r"\s*([-+]?\d+(?:\.\d+)?)", raw)
+            if m:
+                score = float(m.group(1))
+        if score is None or not math.isfinite(score):
+            return None
+        return action, int(max(0, min(100, round(score))))
 
     @staticmethod
     async def evaluate_ticker(stock_data: Dict[str, Any], portfolio_equity_eur: float = 10000.0) -> Dict[str, Any]:
@@ -103,16 +127,16 @@ Synthesize the debate and return JSON with:
 """
         if llm_client.has_active_key():
             res = await llm_client.generate_json(system_prompt, user_prompt)
-            if res and "action" in res and "consensus_score" in res:
-                res_action = res["action"]
-                try:
-                    res_score = int(res["consensus_score"])
-                except (TypeError, ValueError):
-                    res_score = 0
+            parsed = InvestmentCommittee._parse_llm_verdict(res)
+            if parsed is not None:
+                res_action, res_score = parsed
                 # Risk Officer veto: downgrade and cap the score, since triggers are armed on score alone
                 if not risk_rep.get("approved", True):
                     if res_action in ("BUY", "STRONG_BUY"):
                         res_action = "HOLD"
+                    res_score = min(res_score, 55)
+                # A non-buy verdict must not carry a buy-level score either
+                if res_action in ("HOLD", "SELL"):
                     res_score = min(res_score, 55)
                 
                 # Asynchronously log decision to TencentDB Agent Memory L0 and trigger asset extraction

@@ -61,9 +61,14 @@ class MarketDataProvider:
             delta = closes.diff()
             gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            rs = gain / loss.replace(0, np.nan)
-            rsi_series = 100 - (100 / (1 + rs))
-            rsi14 = float(rsi_series.iloc[-1]) if not np.isnan(rsi_series.iloc[-1]) else 50.0
+            last_gain = gain.iloc[-1]
+            last_loss = loss.iloc[-1]
+            if np.isnan(last_gain) or np.isnan(last_loss) or (last_gain == 0 and last_loss == 0):
+                rsi14 = 50.0
+            elif last_loss == 0:
+                rsi14 = 100.0  # no down days in the window
+            else:
+                rsi14 = float(100 - (100 / (1 + (last_gain / last_loss))))
 
             # MACD (12, 26, 9)
             exp12 = closes.ewm(span=12, adjust=False).mean()
@@ -95,8 +100,8 @@ class MarketDataProvider:
 
             # Performance returns
             ret_1d = float(((closes.iloc[-1] / closes.iloc[-2]) - 1) * 100) if len(closes) > 1 else 0.0
-            ret_5d = float(((closes.iloc[-1] / closes.iloc[-5]) - 1) * 100) if len(closes) > 5 else 0.0
-            ret_1m = float(((closes.iloc[-1] / closes.iloc[-21]) - 1) * 100) if len(closes) > 21 else 0.0
+            ret_5d = float(((closes.iloc[-1] / closes.iloc[-6]) - 1) * 100) if len(closes) > 6 else 0.0
+            ret_1m = float(((closes.iloc[-1] / closes.iloc[-22]) - 1) * 100) if len(closes) > 22 else 0.0
 
             result = {
                 "ticker": ticker_symbol,

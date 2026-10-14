@@ -9,6 +9,49 @@ from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
+def merge_llm_report(defaults: Dict[str, Any], res: Any, schema: Dict[str, Any], primary: str) -> Dict[str, Any]:
+    """
+    Overlays valid keys of an LLM response on top of the deterministic fallback `defaults`.
+    schema maps key -> ("enum", {values}) | ("int", lo, hi) | ("float", lo, hi) | "str" | "list".
+    If the `primary` key is missing/invalid the defaults are returned untouched, so every key
+    always exists with a sane type.
+    """
+    merged = dict(defaults)
+    if not isinstance(res, dict):
+        return merged
+
+    def _coerce(rule, val):
+        kind = rule[0] if isinstance(rule, tuple) else rule
+        if kind == "enum":
+            norm = str(val).strip().upper().replace(" ", "_") if val is not None else ""
+            return norm if norm in rule[1] else None
+        if kind in ("int", "float"):
+            if isinstance(val, bool) or val is None:
+                return None
+            try:
+                num = float(val)
+            except (TypeError, ValueError):
+                return None
+            if num != num or num in (float("inf"), float("-inf")):
+                return None
+            num = max(rule[1], min(rule[2], num))
+            return int(round(num)) if kind == "int" else num
+        if kind == "str":
+            return val if isinstance(val, str) and val.strip() else None
+        if kind == "list":
+            return [str(x) for x in val] if isinstance(val, (list, tuple)) else None
+        return None
+
+    if _coerce(schema[primary], res.get(primary)) is None:
+        return merged
+    for key, rule in schema.items():
+        if key in res:
+            val = _coerce(rule, res[key])
+            if val is not None:
+                merged[key] = val
+    return merged
+
+
 class LLMClient:
     def __init__(self):
         self.provider = settings.LLM_PROVIDER.lower()
@@ -47,12 +90,14 @@ class LLMClient:
             return None
         clean = text.strip()
         try:
-            return json.loads(clean)
+            parsed = json.loads(clean)
+            return parsed if isinstance(parsed, dict) else None
         except Exception:
             match = re.search(r"(\{.*\})", clean, re.DOTALL)
             if match:
                 try:
-                    return json.loads(match.group(1))
+                    parsed = json.loads(match.group(1))
+                    return parsed if isinstance(parsed, dict) else None
                 except Exception:
                     pass
         return None
@@ -73,6 +118,7 @@ class LLMClient:
             f"{user_prompt}"
         )
 
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 agy_bin,
@@ -94,10 +140,31 @@ class LLMClient:
 
         except asyncio.TimeoutError:
             logger.error("Antigravity CLI timed out after 90s.")
+            await self._kill_proc(proc)
             return None
+        except asyncio.CancelledError:
+            await self._kill_proc(proc)
+            raise
         except Exception as e:
             logger.error(f"Error calling Antigravity CLI: {e}")
+            await self._kill_proc(proc)
             return None
+
+    @staticmethod
+    async def _kill_proc(proc) -> None:
+        """Kills and reaps a still-running subprocess so it does not leak."""
+        if proc is None or proc.returncode is not None:
+            return
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        except Exception as e:
+            logger.debug(f"Error killing Antigravity CLI process: {e}")
+        try:
+            await asyncio.shield(proc.wait())
+        except BaseException:
+            pass
 
     async def generate_json(self, system_prompt: str, user_prompt: str) -> Optional[Dict[str, Any]]:
         """
