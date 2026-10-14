@@ -1959,7 +1959,8 @@ async function loadWeeklyReviewComparison() {
     ]);
 
     const comp = await compRes.json();
-    weeklyReviewsCache = await weeklyRes.json();
+    const weeklyData = await weeklyRes.json();
+    weeklyReviewsCache = Array.isArray(weeklyData) ? weeklyData : [];
 
     // Update Badges
     const winRateEl = document.getElementById('weeklyWinRate');

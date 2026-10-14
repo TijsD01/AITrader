@@ -108,9 +108,11 @@ button:active { transform: scale(0.98); }
 
 /* Buttons. Each button rule also names `button.x` so it outranks Tailwind's
    preflight reset ([type='button'] { background-color: transparent }), which
-   the Tailwind CDN injects after this stylesheet. */
+   the Tailwind CDN injects after this stylesheet. `display` stays on the
+   plain class so Tailwind's later .hidden / md:flex utilities still win. */
+.ui-btn { display: inline-flex; }
 .ui-btn, button.ui-btn {
-  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  align-items: center; justify-content: center; gap: 8px;
   min-height: 44px; padding: 0 16px;
   border-radius: 12px; border: 1px solid var(--line-strong);
   background: var(--surface); color: var(--text);
@@ -130,8 +132,9 @@ button:active { transform: scale(0.98); }
 .ui-icon-btn, button.ui-icon-btn { width: 44px; min-width: 44px; padding: 0; }
 
 /* Chips & badges */
+.ui-chip { display: inline-flex; }
 .ui-chip, button.ui-chip {
-  display: inline-flex; align-items: center; gap: 6px;
+  align-items: center; gap: 6px;
   min-height: 32px; padding: 0 12px; border-radius: 16px;
   background: var(--surface); border: 1px solid var(--line);
   font-size: 13px; color: var(--text-2); white-space: nowrap;
@@ -249,9 +252,10 @@ button.ui-chip { cursor: pointer; }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 #mobileDropdownMenu:not(.hidden) { animation: dropdownSlide .2s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+.more-tile { display: flex; }
 .more-tile, button.more-tile {
   position: relative;
-  display: flex; flex-direction: column; justify-content: space-between; gap: 10px;
+  flex-direction: column; justify-content: space-between; gap: 10px;
   min-height: 92px; padding: 14px; text-align: left;
   border-radius: 16px; background: var(--surface-2); border: 1px solid var(--line);
   color: var(--text); cursor: pointer;
@@ -271,8 +275,9 @@ button.ui-chip { cursor: pointer; }
 .alloc-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--text-2); }
 .alloc-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; vertical-align: 0; }
 
+.control-tile { display: flex; }
 .control-tile, button.control-tile {
-  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  align-items: center; justify-content: space-between; gap: 10px;
   min-height: 64px; padding: 12px 14px; width: 100%; text-align: left;
   border-radius: 16px; background: var(--surface); border: 1px solid var(--line);
   color: var(--text); cursor: pointer;
@@ -304,8 +309,9 @@ button.ui-chip { cursor: pointer; }
 .kpi .kpi-value { font: 600 19px/1.2 var(--font-mono); letter-spacing: -0.02em; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .kpi .kpi-sub { font-size: 12px; color: var(--text-3); line-height: 1.35; }
 
+.trigger-link { display: flex; }
 .trigger-link, button.trigger-link {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  align-items: center; justify-content: space-between; gap: 12px;
   width: 100%; min-height: 60px; padding: 12px 14px; text-align: left;
   border-radius: 16px; background: #151A2E; border: 1px solid #2E3760; color: var(--text); cursor: pointer;
 }
