@@ -54,19 +54,19 @@ class TradingScheduler:
             misfire_grace_time=3600
         )
 
-        # 3. US Market Open Job (15:30 CET, Mon-Fri)
+        # 3. US Market Open Job (09:30 New York time, Mon-Fri)
         self.scheduler.add_job(
             self._scheduled_market_session,
-            CronTrigger(day_of_week="mon-fri", hour=settings.US_OPEN_HOUR, minute=settings.US_OPEN_MINUTE, timezone=settings.TIMEZONE),
+            CronTrigger(day_of_week="mon-fri", hour=9, minute=30, timezone="America/New_York"),
             args=["US", "OPEN"],
             id="us_market_open",
             misfire_grace_time=3600
         )
 
-        # 4. US Market Close Job (22:00 CET, Mon-Fri)
+        # 4. US Market Close Job (16:00 New York time, Mon-Fri)
         self.scheduler.add_job(
             self._scheduled_market_session,
-            CronTrigger(day_of_week="mon-fri", hour=settings.US_CLOSE_HOUR, minute=settings.US_CLOSE_MINUTE, timezone=settings.TIMEZONE),
+            CronTrigger(day_of_week="mon-fri", hour=16, minute=0, timezone="America/New_York"),
             args=["US", "CLOSE"],
             id="us_market_close",
             misfire_grace_time=3600

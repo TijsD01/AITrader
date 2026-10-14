@@ -17,11 +17,26 @@ def is_eu_ticker(ticker: str) -> bool:
     eu_tickers = {s["ticker"].upper() for s in EU_STOCKS}
     return t in eu_tickers
 
+# Each exchange is evaluated in its own timezone so DST differences between the
+# US and EU (e.g. late March and the last week of October) are handled correctly.
+EU_EXCHANGE_TZ = "Europe/Amsterdam"
+US_EXCHANGE_TZ = "America/New_York"
+US_OPEN_LOCAL = datetime.time(9, 30)
+US_CLOSE_LOCAL = datetime.time(16, 0)
+
+
+def _eu_session() -> Tuple[datetime.time, datetime.time]:
+    return (
+        datetime.time(settings.EU_OPEN_HOUR, settings.EU_OPEN_MINUTE),
+        datetime.time(settings.EU_CLOSE_HOUR, settings.EU_CLOSE_MINUTE),
+    )
+
+
 def check_market_hours(ticker: str, now: datetime.datetime = None) -> Tuple[bool, str]:
     """
     Checks whether the appropriate stock exchange is currently open for the given ticker.
-    European markets: Mon-Fri 09:00 - 17:30 CET
-    US markets: Mon-Fri 15:30 - 22:00 CET (09:30 - 16:00 EST)
+    European markets: Mon-Fri 09:00 - 17:30 Europe/Amsterdam
+    US markets: Mon-Fri 09:30 - 16:00 America/New_York (15:30 - 22:00 CET outside DST mismatch weeks)
     Weekends: Closed
     """
     if not getattr(settings, "ENFORCE_MARKET_HOURS", True):
@@ -35,72 +50,71 @@ def check_market_hours(ticker: str, now: datetime.datetime = None) -> Tuple[bool
     else:
         now = now.astimezone(tz)
 
-    weekday = now.weekday()  # Monday is 0, Sunday is 6
-    day_name = now.strftime("%A")
+    is_eu = is_eu_ticker(ticker)
+    exch_tz = ZoneInfo(EU_EXCHANGE_TZ if is_eu else US_EXCHANGE_TZ)
+    local_now = now.astimezone(exch_tz)
+
+    weekday = local_now.weekday()  # Monday is 0, Sunday is 6
+    day_name = local_now.strftime("%A")
     current_time_str = now.strftime("%H:%M CET")
 
-    # 1. Weekend Check
+    # 1. Weekend Check (in the exchange's own timezone)
     if weekday >= 5:  # Saturday or Sunday
         return False, f"Markets are closed on weekends ({day_name}, {current_time_str}). Next trading session opens Monday."
 
     # 2. Market-specific hours check
-    is_eu = is_eu_ticker(ticker)
-
+    current_time = local_now.time()
     if is_eu:
-        # European session: 09:00 to 17:30 CET
-        open_time = datetime.time(settings.EU_OPEN_HOUR, settings.EU_OPEN_MINUTE)
-        close_time = datetime.time(settings.EU_CLOSE_HOUR, settings.EU_CLOSE_MINUTE)
-        current_time = now.time()
-
+        open_time, close_time = _eu_session()
         if open_time <= current_time <= close_time:
             return True, f"European market is OPEN ({current_time_str})."
-        else:
-            return False, (
-                f"European market (AEX/DAX/CAC) is currently CLOSED at {current_time_str}. "
-                f"Trading hours are Mon-Fri {settings.EU_OPEN_HOUR:02d}:{settings.EU_OPEN_MINUTE:02d} - "
-                f"{settings.EU_CLOSE_HOUR:02d}:{settings.EU_CLOSE_MINUTE:02d} CET."
-            )
-    else:
-        # US session: 15:30 to 22:00 CET (09:30 - 16:00 EST)
-        open_time = datetime.time(settings.US_OPEN_HOUR, settings.US_OPEN_MINUTE)
-        close_time = datetime.time(settings.US_CLOSE_HOUR, settings.US_CLOSE_MINUTE)
-        current_time = now.time()
+        return False, (
+            f"European market (AEX/DAX/CAC) is currently CLOSED at {current_time_str}. "
+            f"Trading hours are Mon-Fri {open_time.strftime('%H:%M')} - {close_time.strftime('%H:%M')} "
+            f"{local_now.tzname()} (Amsterdam time)."
+        )
 
-        if open_time <= current_time <= close_time:
-            return True, f"US market (NYSE/NASDAQ) is OPEN ({current_time_str})."
-        else:
-            return False, (
-                f"US market (NYSE/NASDAQ) is currently CLOSED at {current_time_str}. "
-                f"Trading hours are Mon-Fri {settings.US_OPEN_HOUR:02d}:{settings.US_OPEN_MINUTE:02d} - "
-                f"{settings.US_CLOSE_HOUR:02d}:{settings.US_CLOSE_MINUTE:02d} CET (09:30 - 16:00 EST)."
-            )
+    if US_OPEN_LOCAL <= current_time <= US_CLOSE_LOCAL:
+        return True, f"US market (NYSE/NASDAQ) is OPEN ({current_time_str})."
+    return False, (
+        f"US market (NYSE/NASDAQ) is currently CLOSED at {current_time_str} "
+        f"({local_now.strftime('%H:%M %Z')}). "
+        f"Trading hours are Mon-Fri {US_OPEN_LOCAL.strftime('%H:%M')} - {US_CLOSE_LOCAL.strftime('%H:%M')} "
+        f"New York time."
+    )
 
-def get_market_statuses() -> Dict[str, Any]:
+def get_market_statuses(now: datetime.datetime = None) -> Dict[str, Any]:
     """Returns the live status of European and US markets."""
     tz = ZoneInfo(settings.TIMEZONE)
-    now = datetime.datetime.now(tz)
-    weekday = now.weekday()
-    curr_time = now.time()
+    if now is None:
+        now = datetime.datetime.now(tz)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=tz)
+    else:
+        now = now.astimezone(tz)
 
-    eu_open_t = datetime.time(settings.EU_OPEN_HOUR, settings.EU_OPEN_MINUTE)
-    eu_close_t = datetime.time(settings.EU_CLOSE_HOUR, settings.EU_CLOSE_MINUTE)
-    us_open_t = datetime.time(settings.US_OPEN_HOUR, settings.US_OPEN_MINUTE)
-    us_close_t = datetime.time(settings.US_CLOSE_HOUR, settings.US_CLOSE_MINUTE)
+    eu_now = now.astimezone(ZoneInfo(EU_EXCHANGE_TZ))
+    us_now = now.astimezone(ZoneInfo(US_EXCHANGE_TZ))
 
-    eu_is_open = (weekday < 5) and (eu_open_t <= curr_time <= eu_close_t)
-    us_is_open = (weekday < 5) and (us_open_t <= curr_time <= us_close_t)
+    eu_open_t, eu_close_t = _eu_session()
+    eu_is_open = (eu_now.weekday() < 5) and (eu_open_t <= eu_now.time() <= eu_close_t)
+    us_is_open = (us_now.weekday() < 5) and (US_OPEN_LOCAL <= us_now.time() <= US_CLOSE_LOCAL)
+
+    # Express the US session in the configured (CET) timezone for today's DST state.
+    us_open_cet = datetime.datetime.combine(us_now.date(), US_OPEN_LOCAL, tzinfo=us_now.tzinfo).astimezone(tz)
+    us_close_cet = datetime.datetime.combine(us_now.date(), US_CLOSE_LOCAL, tzinfo=us_now.tzinfo).astimezone(tz)
 
     return {
         "current_time_cet": now.strftime("%Y-%m-%d %H:%M:%S CET"),
-        "is_weekend": weekday >= 5,
+        "is_weekend": now.weekday() >= 5,
         "eu_market": {
             "status": "OPEN" if eu_is_open else "CLOSED",
             "is_open": eu_is_open,
-            "hours": f"{settings.EU_OPEN_HOUR:02d}:{settings.EU_OPEN_MINUTE:02d} - {settings.EU_CLOSE_HOUR:02d}:{settings.EU_CLOSE_MINUTE:02d} CET"
+            "hours": f"{eu_open_t.strftime('%H:%M')} - {eu_close_t.strftime('%H:%M')} CET"
         },
         "us_market": {
             "status": "OPEN" if us_is_open else "CLOSED",
             "is_open": us_is_open,
-            "hours": f"{settings.US_OPEN_HOUR:02d}:{settings.US_OPEN_MINUTE:02d} - {settings.US_CLOSE_HOUR:02d}:{settings.US_CLOSE_MINUTE:02d} CET"
+            "hours": f"{us_open_cet.strftime('%H:%M')} - {us_close_cet.strftime('%H:%M')} CET"
         }
     }
