@@ -177,6 +177,9 @@ class LiveBroker(BaseBroker):
                         takeProfitPrice=take_profit if take_profit else round(price * 1.10, 2),
                         stopLossPrice=stop_loss if stop_loss else round(price * 0.95, 2)
                     )
+                    # Explicit TIF avoids IBKR's preset-override notice (10349); TP/SL must survive the close
+                    for order in bracket:
+                        order.tif = "DAY" if order.action == "BUY" else "GTC"
                     placed = [ib.placeOrder(contract, order) for order in bracket]
                     if placed:
                         # placeOrder returns before IBKR answers; a rejected order must not become a recorded position
@@ -222,8 +225,10 @@ class LiveBroker(BaseBroker):
         deadline = loop.time() + timeout
         while True:
             status = getattr(getattr(trade, "orderStatus", None), "status", "") or ""
-            if status in ("Cancelled", "ApiCancelled", "Inactive"):
-                messages = [getattr(entry, "message", "") for entry in (getattr(trade, "log", None) or [])]
+            log = getattr(trade, "log", None) or []
+            # ib_async lacks 10349 (informational "TIF set to DAY by preset") in its warningCodes and marks the order Cancelled; the real status follows
+            if status in ("Cancelled", "ApiCancelled", "Inactive") and not (log and getattr(log[-1], "errorCode", 0) == 10349):
+                messages = [getattr(entry, "message", "") for entry in log]
                 return "; ".join(m for m in messages if m) or status
             if status in ("PreSubmitted", "Submitted", "Filled") or loop.time() >= deadline:
                 return None
@@ -264,7 +269,7 @@ class LiveBroker(BaseBroker):
                     if held <= 0:
                         logger.info(f"IBKR position for {ticker} already flat (bracket leg filled); no exit order sent.")
                         return "ibkr_exit_already_flat"
-                    order = MarketOrder("SELL", min(shares, held))
+                    order = MarketOrder("SELL", min(shares, held), tif="DAY")
                     placed = ib.placeOrder(contract, order)
                     return f"ibkr_exit_{placed.order.orderId}"
             except Exception as e:

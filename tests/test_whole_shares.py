@@ -82,3 +82,29 @@ async def test_ibkr_rejection_is_detected_before_recording_a_position():
     assert "Fractional" in await LiveBroker._ibkr_order_rejection(rejected)
     assert await LiveBroker._ibkr_order_rejection(accepted) is None
     assert await LiveBroker._ibkr_order_rejection(pending, timeout=0.3) is None
+
+
+@pytest.mark.asyncio
+async def test_ibkr_info_10349_is_not_a_rejection():
+    # ib_async marks the order Cancelled on 10349 (TIF preset notice) although IBKR keeps working it
+    trade = SimpleNamespace(
+        orderStatus=SimpleNamespace(status="Cancelled"),
+        log=[SimpleNamespace(message="Order TIF was set to DAY based on order preset.", errorCode=10349)],
+    )
+    assert await LiveBroker._ibkr_order_rejection(trade, timeout=0.3) is None
+
+
+@pytest.mark.asyncio
+async def test_ibkr_bracket_tif_explicit():
+    placed = []
+    bracket = [SimpleNamespace(action=a, orderId=i, tif="") for i, a in enumerate(["BUY", "SELL", "SELL"])]
+    ib = SimpleNamespace(
+        isConnected=lambda: True,
+        qualifyContractsAsync=AsyncMock(),
+        bracketOrder=lambda **kw: bracket,
+        placeOrder=lambda c, o: placed.append(o) or SimpleNamespace(order=o, orderStatus=SimpleNamespace(status="Submitted"), log=[]),
+    )
+    broker = LiveBroker()
+    with patch.object(settings, "LIVE_BROKER", "ibkr"), patch.object(broker, "_get_ib", AsyncMock(return_value=ib)):
+        assert await broker._dispatch_real_order("NVDA", 1, 220.5, "USD", 215.0, 230.0) == "ibkr_0"
+    assert [o.tif for o in placed] == ["DAY", "GTC", "GTC"]
