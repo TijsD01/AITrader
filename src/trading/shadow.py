@@ -29,6 +29,7 @@ from src.data.market import market_data_provider
 from src.data.market_hours import check_market_hours
 from src.db.models import ShadowAccount, ShadowPosition, ShadowSnapshot, ShadowTrigger, SystemConfig, Trade
 from src.db.session import AsyncSessionLocal
+from src.trading.cash_flows import list_cash_flow_points
 from src.trading.risk import (
     apply_risk_budget,
     calculate_position_allocation,
@@ -688,6 +689,7 @@ class ShadowPortfolios:
             return result
 
         main_value = main_summary.get("total_value_eur")
+        main_flows = await list_cash_flow_points(is_live=main_is_live)
         async with AsyncSessionLocal() as session:
             accounts = await self._ensure_accounts(session, strategies)
             current_main = await self._main_params(session)
@@ -715,7 +717,10 @@ class ShadowPortfolios:
                     Trade.order_type == "SELL", Trade.is_live == main_is_live, Trade.executed_at >= since))
                 main_pnls = [x for x in main_sells.scalars().all() if x is not None]
                 main_start = acc.main_value_at_start_eur
-                main_return = round((main_value / main_start - 1.0) * 100, 2) if main_value and main_start else None
+                # Deposits into the main account after the shadow started are not main-bot gain
+                main_flows_since = sum(a for t, a in main_flows if since is None or t > since)
+                main_return = (round(((main_value - main_flows_since) / main_start - 1.0) * 100, 2)
+                               if main_value and main_start else None)
 
                 hist_res = await session.execute(select(ShadowSnapshot).where(
                     ShadowSnapshot.strategy.in_([s.key, MAIN_KEY]), ShadowSnapshot.timestamp >= since
@@ -724,8 +729,9 @@ class ShadowPortfolios:
                 for snap in hist_res.scalars().all():
                     if snap.strategy == MAIN_KEY:
                         if main_start:
+                            flows = sum(a for t, a in main_flows if (since is None or t > since) and t <= snap.timestamp)
                             history["main"].append([snap.timestamp.strftime("%Y-%m-%d %H:%M"),
-                                                    round((snap.total_value_eur / main_start - 1.0) * 100, 2)])
+                                                    round(((snap.total_value_eur - flows) / main_start - 1.0) * 100, 2)])
                     else:
                         history["shadow"].append([snap.timestamp.strftime("%Y-%m-%d %H:%M"), snap.return_pct])
 

@@ -358,3 +358,28 @@ async def test_older_shadow_freezes_new_main_parameters_on_first_use(shadows, mo
         acc = await session.get(ShadowAccount, "baseline")
         assert acc.frozen_params["risk_per_trade_pct"] == 0.7
         assert acc.frozen_params["trigger_min_score"] == 80
+
+
+@pytest.mark.asyncio
+async def test_deposit_into_the_live_account_does_not_lift_the_main_return(shadows):
+    from sqlalchemy import delete
+    from src.db.models import CashFlow, ShadowAccount
+    enable, reset_all = shadows
+    enable(["baseline"])
+    await reset_all()
+    # The first look sets the main baseline at €10,000
+    await shadow_portfolios.get_comparison({"total_value_eur": 10000.0, "trading_mode": "LIVE"}, True)
+    async with AsyncSessionLocal() as session:
+        acc = await session.get(ShadowAccount, "baseline")
+        assert acc.main_value_at_start_eur == 10000.0
+        session.add(CashFlow(amount_eur=2000.0, source="manual", is_live=True,
+                             timestamp=acc.started_at + datetime.timedelta(minutes=5)))
+        await session.commit()
+    try:
+        # €2,000 deposited and €100 earned: the main bot is up 1%, not 21%
+        comparison = await shadow_portfolios.get_comparison({"total_value_eur": 12100.0, "trading_mode": "LIVE"}, True)
+        assert comparison["strategies"][0]["main_same_period"]["return_pct"] == 1.0
+    finally:
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(CashFlow))
+            await session.commit()

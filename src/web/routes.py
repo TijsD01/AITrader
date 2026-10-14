@@ -792,6 +792,37 @@ async def sync_account():
 
 
 
+# Deposits and withdrawals on the live account (kept out of the portfolio gain)
+class CashFlowRequest(BaseModel):
+    amount_eur: float  # Positive = deposit, negative = withdrawal
+    note: Optional[str] = None
+
+@router.get("/api/cash-flows")
+async def get_cash_flows():
+    from src.trading.cash_flows import scan_live_cash_flows, list_cash_flows, net_cash_flows_eur
+    await scan_live_cash_flows()
+    return {
+        "net_deposits_eur": await net_cash_flows_eur(is_live=True),
+        "min_detect_eur": settings.CASH_FLOW_MIN_EUR,
+        "flows": await list_cash_flows(is_live=True),
+    }
+
+@router.post("/api/cash-flows")
+async def add_cash_flow(req: CashFlowRequest):
+    """Records a deposit or withdrawal the automatic detection missed."""
+    from src.trading.cash_flows import add_cash_flow as _add
+    if not req.amount_eur or abs(req.amount_eur) > 10_000_000:
+        raise HTTPException(status_code=400, detail="Enter a non-zero amount.")
+    return {"success": True, **(await _add(req.amount_eur, req.note))}
+
+@router.delete("/api/cash-flows/{flow_id}")
+async def remove_cash_flow(flow_id: int):
+    """Removes a deposit or withdrawal, e.g. one that was detected by mistake."""
+    from src.trading.cash_flows import delete_cash_flow
+    if not await delete_cash_flow(flow_id):
+        raise HTTPException(status_code=404, detail="No such deposit or withdrawal.")
+    return {"success": True}
+
 # 9. Shadow paper portfolios (simulated strategy variants next to the main portfolio)
 @router.get("/api/shadow")
 async def get_shadow_comparison():

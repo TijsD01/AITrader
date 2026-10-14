@@ -557,7 +557,7 @@
           <h2 class="ui-page-title">History</h2>
           <p class="ui-page-sub">Executed trades and lessons learned</p>
         </div>
-        <button onclick="loadTrades(); loadLearningInsights();" type="button" class="ui-btn ui-btn-quiet ui-icon-btn shrink-0" aria-label="Refresh history" title="Refresh">
+        <button onclick="loadTrades(); loadLearningInsights(); loadCashFlows();" type="button" class="ui-btn ui-btn-quiet ui-icon-btn shrink-0" aria-label="Refresh history" title="Refresh">
           <i class="fa-solid fa-arrows-rotate"></i>
         </button>
       </div>
@@ -628,6 +628,19 @@
               </tbody>
             </table>
           </div>
+        </div>
+      </div>
+
+      <!-- Deposits and withdrawals (live account), kept out of the portfolio gain -->
+      <div class="space-y-3">
+        <h3 class="ui-section-title">Deposits &amp; withdrawals <span id="cashFlowNet" class="ui-count ui-num"></span></h3>
+        <p class="text-[13px] ui-muted px-1">Money moved in or out of the live account. It is not counted as gain. Cash jumps from the broker are picked up automatically; add one here if it was missed, or remove one that is wrong.</p>
+        <form onsubmit="addCashFlow(event)" class="flex gap-2">
+          <input type="number" id="cashFlowAmount" step="0.01" inputmode="decimal" placeholder="Amount in €, negative to withdraw" class="ui-input ui-num flex-1 min-w-0" aria-label="Amount in euro">
+          <button type="submit" class="ui-btn ui-btn-sm shrink-0" style="min-height:44px"><i class="fa-solid fa-plus"></i> Add</button>
+        </form>
+        <div id="cashFlowList" class="space-y-2">
+          <div class="ui-card ui-card-pad text-[13px] ui-muted">No deposits or withdrawals recorded.</div>
         </div>
       </div>
     </section>

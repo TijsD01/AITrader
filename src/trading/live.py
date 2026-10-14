@@ -13,6 +13,7 @@ from src.data.market import market_data_provider
 from src.trading.risk import risk_guardrail, calculate_position_allocation, get_effective_deployable_cash, allocate_pending_triggers, evaluate_trigger_condition, is_trigger_expired, validate_trigger_levels, apply_risk_budget, compute_trailing_stop, check_market_regime, whole_share_count
 from src.data.market_hours import check_market_hours
 from src.trading.base import BaseBroker
+from src.trading.cash_flows import scan_live_cash_flows, net_cash_flows_eur
 
 logger = logging.getLogger(__name__)
 
@@ -330,6 +331,11 @@ class LiveBroker(BaseBroker):
         """Fetches live portfolio state (from broker and local mirror)."""
         await self.refresh_positions_pnl()
         await self.adjust_triggers_dynamically()
+        try:
+            await scan_live_cash_flows()
+        except Exception as e:
+            logger.warning(f"Deposit scan failed: {e}")
+        net_deposits = await net_cash_flows_eur(is_live=True)
         async with AsyncSessionLocal() as session:
             res = await session.execute(
                 select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True).order_by(desc(PortfolioSnapshot.timestamp))
@@ -357,7 +363,10 @@ class LiveBroker(BaseBroker):
             )
             first_snap = first_snap_res.scalars().first()
             initial_cap = first_snap.total_value_eur if first_snap else total_val
-            total_return_pct = round(((total_val / initial_cap) - 1.0) * 100, 2) if initial_cap > 0 else 0.0
+            # Deposits and withdrawals are not gain: measure against everything that was put in
+            invested = round(initial_cap + net_deposits, 2)
+            total_gain = round(total_val - invested, 2)
+            total_return_pct = round(total_gain / invested * 100, 2) if invested > 0 else 0.0
 
             return {
                 "broker": settings.LIVE_BROKER.upper(),
@@ -379,6 +388,9 @@ class LiveBroker(BaseBroker):
                 "unrealized_pnl_eur": round(unrealized_pnl, 2),
                 "total_return_pct": total_return_pct,
                 "initial_capital_eur": round(initial_cap, 2),
+                "net_deposits_eur": net_deposits,
+                "invested_capital_eur": invested,
+                "total_gain_eur": total_gain,
                 "daily_realized_loss_eur": round(daily_loss, 2),
                 "max_daily_loss_limit_eur": settings.MAX_DAILY_LOSS_EUR,
                 "open_positions_count": len(positions),

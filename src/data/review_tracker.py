@@ -252,11 +252,17 @@ class ReviewTracker:
             if (d.portfolio_state or {}).get("trading_mode", "PAPER") == curr_mode
         ]
 
+        # Deposits and withdrawals in the period are money moved, not performance
         if matching_digests:
             oldest_matching = matching_digests[-1]
             old_val = (oldest_matching.portfolio_state or {}).get("total_value_eur") or curr_val
+            flows = 0.0
+            if curr_mode == "LIVE" and oldest_matching.timestamp:
+                from src.trading.cash_flows import net_cash_flows_eur
+                flows = await net_cash_flows_eur(is_live=True, since=oldest_matching.timestamp)
+            old_val += flows
         else:
-            old_val = curr_summary.get("initial_capital_eur") or curr_val
+            old_val = curr_summary.get("invested_capital_eur") or curr_summary.get("initial_capital_eur") or curr_val
 
         delta_val = round(curr_val - old_val, 2)
         delta_pct = round(((curr_val / old_val) - 1.0) * 100, 2) if old_val > 0 else 0.0

@@ -84,6 +84,19 @@ class PortfolioSnapshot(Base):
     open_positions_count = Column(Integer, default=0)
     is_live = Column(Boolean, default=False)
 
+# Money moved into or out of the account (deposits positive, withdrawals negative). Kept apart from
+# trades so the portfolio gain counts only what the bot earned, not what was put in.
+class CashFlow(Base):
+    __tablename__ = "cash_flows"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    timestamp = Column(DateTime, default=datetime.datetime.utcnow, index=True)
+    amount_eur = Column(Float, nullable=False)
+    source = Column(String(10), default="auto")  # auto (detected from a broker cash jump) or manual
+    snapshot_id = Column(Integer, nullable=True, unique=True)  # Broker snapshot that showed the jump (auto only)
+    note = Column(String(200), nullable=True)
+    is_live = Column(Boolean, default=True, index=True)
+
 class AnalysisReport(Base):
     __tablename__ = "analysis_reports"
 
