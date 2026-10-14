@@ -1670,6 +1670,8 @@ async function armTriggerFromInput() {
     return;
   }
 
+  if (!confirmArmTrigger(ticker)) return;
+
   const btn = document.getElementById('armTriggerBtn');
   btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Arming`;
   btn.disabled = true;
@@ -1696,7 +1698,13 @@ async function armTriggerFromInput() {
   }
 }
 
+// Arming reserves cash and lets the bot buy on its own later, so ask first
+function confirmArmTrigger(ticker) {
+  return confirm(`Arm an entry trigger for ${ticker}?\n\nThe committee picks a limit price and cash is reserved for it. The bot buys automatically when the price is reached.`);
+}
+
 async function armAITrigger(ticker) {
+  if (!confirmArmTrigger(ticker)) return;
   showToast(`Analysing ${ticker} and arming an entry trigger...`);
   try {
     const res = await fetch('/api/triggers/from-ai', {
