@@ -3,9 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#0b0f19">
+  <meta name="theme-color" content="#0A0D13">
   <meta name="color-scheme" content="dark">
-  <title>Antigravity AI Trading & Multi-Agent Committee</title>
+  <title>AlphaAgent</title>
   
   <!-- Tailwind CSS & FontAwesome -->
   <script src="https://cdn.tailwindcss.com/3.4.1"></script>
@@ -14,6 +14,10 @@
       darkMode: 'class',
       theme: {
         extend: {
+          fontFamily: {
+            sans: ['"IBM Plex Sans"', 'system-ui', '-apple-system', '"Segoe UI"', 'sans-serif'],
+            mono: ['"IBM Plex Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace']
+          },
           colors: {
             brand: {
               50: '#ecfdf5',
@@ -21,14 +25,23 @@
               600: '#059669',
               700: '#047857'
             },
-            darkBg: '#0b0f19',
-            cardBg: '#131b2e',
-            borderCol: '#1e293b'
+            accent: { DEFAULT: '#8EA2FF', strong: '#B4C1FF', soft: '#222B4D' },
+            // Design tokens (see style.css :root). Existing class names keep working.
+            darkBg: '#0A0D13',
+            cardBg: '#121722',
+            borderCol: '#242C3B',
+            slate: {
+              50: '#F6F8FB', 100: '#EEF1F6', 200: '#D9DEE7', 300: '#C1C8D4', 400: '#A3ADBD',
+              500: '#7D8799', 600: '#5A6476', 700: '#2B3446', 800: '#1A2130', 900: '#0F141D', 950: '#080B10'
+            }
           }
         }
       }
     }
   </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js" integrity="sha384-dug+JxfBvklEQdJ4AYuBBAIScUz0bVN73xpy273gcAwHjb3qI0fXmuYNaNfdyYJG" crossorigin="anonymous"></script>
   <link rel="stylesheet" href="/static/style.css">
