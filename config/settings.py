@@ -108,6 +108,12 @@ def update_env_file(updates: dict, env_path: Path = BASE_DIR / ".env") -> None:
     if not env_path.exists():
         return
     try:
+        # Strip CR/LF from keys and values so a value cannot inject extra .env lines.
+        def _clean(x) -> str:
+            return str(x).replace("\r", "").replace("\n", "")
+        updates = {
+            _clean(k): (_clean(v) if isinstance(v, str) else v) for k, v in updates.items()
+        }
         lines = env_path.read_text(encoding="utf-8").splitlines()
         remaining_keys = set(updates.keys())
         new_lines = []
@@ -119,14 +125,14 @@ def update_env_file(updates: dict, env_path: Path = BASE_DIR / ".env") -> None:
             key = stripped.split("=", 1)[0].strip()
             if key in updates:
                 val = updates[key]
-                val_str = str(val).lower() if isinstance(val, bool) else str(val) if val is not None else ""
+                val_str = str(val).lower() if isinstance(val, bool) else _clean(val) if val is not None else ""
                 new_lines.append(f"{key}={val_str}")
                 remaining_keys.discard(key)
             else:
                 new_lines.append(line)
         for key in remaining_keys:
             val = updates[key]
-            val_str = str(val).lower() if isinstance(val, bool) else str(val) if val is not None else ""
+            val_str = str(val).lower() if isinstance(val, bool) else _clean(val) if val is not None else ""
             new_lines.append(f"{key}={val_str}")
         env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
     except Exception as e:

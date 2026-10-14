@@ -84,3 +84,15 @@ async def test_settings_persistence_cycle():
         }
         revert_res = await ac.post("/api/settings", json=revert_payload)
         assert revert_res.status_code == 200
+
+
+def test_update_env_file_strips_newlines(tmp_path):
+    from config.settings import update_env_file
+    env = tmp_path / ".env"
+    env.write_text("FOO=1\n", encoding="utf-8")
+    update_env_file({"FOO": "bar\nLIVE_TRADING_ENABLED=true", "BAZ\r\nEVIL": "x\r\ny"}, env_path=env)
+    lines = env.read_text(encoding="utf-8").splitlines()
+    assert "LIVE_TRADING_ENABLED=true" not in lines
+    assert "FOO=barLIVE_TRADING_ENABLED=true" in lines
+    assert "BAZEVIL=xy" in lines
+    assert len(lines) == 2
