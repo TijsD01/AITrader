@@ -10,7 +10,7 @@ from src.db.models import Position, Trade, PortfolioSnapshot, SystemConfig, Orde
 from src.db.session import AsyncSessionLocal
 from src.data.currency import currency_service
 from src.data.market import market_data_provider
-from src.trading.risk import risk_guardrail, calculate_position_allocation, get_effective_deployable_cash, allocate_pending_triggers, evaluate_trigger_condition, is_trigger_expired, validate_trigger_levels, apply_risk_budget, compute_trailing_stop, check_market_regime
+from src.trading.risk import risk_guardrail, calculate_position_allocation, get_effective_deployable_cash, allocate_pending_triggers, evaluate_trigger_condition, is_trigger_expired, validate_trigger_levels, apply_risk_budget, compute_trailing_stop, check_market_regime, whole_share_count
 from src.data.market_hours import check_market_hours
 from src.trading.base import BaseBroker
 
@@ -178,6 +178,11 @@ class LiveBroker(BaseBroker):
                     )
                     placed = [ib.placeOrder(contract, order) for order in bracket]
                     if placed:
+                        # placeOrder returns before IBKR answers; a rejected order must not become a recorded position
+                        rejection = await self._ibkr_order_rejection(placed[0])
+                        if rejection:
+                            logger.error(f"IBKR rejected BUY {shares} {ticker}: {rejection}")
+                            return None
                         return f"ibkr_{placed[0].order.orderId}"
             except Exception as e:
                 logger.info(f"IBKR gateway communication note: {e}")
@@ -205,6 +210,23 @@ class LiveBroker(BaseBroker):
             except Exception as e:
                 logger.info(f"Alpaca communication note: {e}")
         return None
+
+    @staticmethod
+    async def _ibkr_order_rejection(trade: Any, timeout: float = 2.0) -> Optional[str]:
+        """
+        Waits briefly for IBKR to accept or reject a placed order. Returns the rejection reason,
+        or None once the order is live (or still pending when the timeout runs out).
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            status = getattr(getattr(trade, "orderStatus", None), "status", "") or ""
+            if status in ("Cancelled", "ApiCancelled", "Inactive"):
+                messages = [getattr(entry, "message", "") for entry in (getattr(trade, "log", None) or [])]
+                return "; ".join(m for m in messages if m) or status
+            if status in ("PreSubmitted", "Submitted", "Filled") or loop.time() >= deadline:
+                return None
+            await asyncio.sleep(0.2)
 
     async def _dispatch_real_close(self, ticker: str, shares: float, currency: str = "USD") -> Optional[str]:
         """Dispatches live position exit to configured broker API."""
@@ -510,7 +532,15 @@ class LiveBroker(BaseBroker):
             if price_eur <= 0:
                 return {"success": False, "message": f"Invalid price EUR for {ticker}."}
 
-            shares = round(allocation_eur / price_eur, 4)
+            if settings.WHOLE_SHARES_ONLY:
+                # The broker only fills whole shares: take the count closest to the allocation
+                shares = float(whole_share_count(allocation_eur, price_eur, max_eur=max(available_cash, allocation_eur)))
+                if shares < 1:
+                    msg = f"One share of {ticker} costs €{price_eur:.2f}, more than the €{allocation_eur:.2f} allocation."
+                    logger.info(f"Buy order blocked: {msg}")
+                    return {"success": False, "unaffordable": True, "message": msg}
+            else:
+                shares = round(allocation_eur / price_eur, 4)
             actual_cost_eur = round(shares * price_eur, 2)
 
             if shares <= 0 or actual_cost_eur <= 0:
@@ -531,7 +561,8 @@ class LiveBroker(BaseBroker):
             # Leave room for the commission when the allocation uses all remaining cash (same as paper)
             if actual_cost_eur + fee_eur > cash_eur and cash_eur > fee_eur:
                 import math
-                shares = math.floor(((cash_eur - fee_eur) / price_eur) * 10000.0) / 10000.0
+                step = 1.0 if settings.WHOLE_SHARES_ONLY else 10000.0
+                shares = math.floor(((cash_eur - fee_eur) / price_eur) * step) / step
                 actual_cost_eur = round(shares * price_eur, 2)
             if shares <= 0 or actual_cost_eur + fee_eur > cash_eur:
                 return {"success": False, "message": f"Insufficient cash (€{cash_eur:.2f}) for {ticker} cost €{actual_cost_eur:.2f} plus fee €{fee_eur:.2f}."}
@@ -1119,6 +1150,11 @@ class LiveBroker(BaseBroker):
                         await session.commit()
                         trade_res["trigger_id"] = t.id
                         executed.append(trade_res)
+                    elif trade_res.get("unaffordable"):
+                        # Not even one whole share fits: release the reserved cash for other triggers
+                        logger.info(f"Cancelling live trigger #{t.id} for {t.ticker}: {trade_res.get('message')}")
+                        t.status = "CANCELLED"
+                        await session.commit()
 
             return executed
 

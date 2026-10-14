@@ -274,6 +274,8 @@ class TelegramAssistant:
                 status_str = f"⏳ <b>TRIGGER PENDING:</b> Limit trigger waiting for entry pullback"
             elif status_type == "INSUFFICIENT_CASH":
                 status_str = f"⏸️ <b>ON RADAR:</b> High conviction ({score}/100), awaiting available cash"
+            elif status_type == "SHARE_TOO_EXPENSIVE":
+                status_str = f"💶 <b>ON RADAR:</b> High conviction ({score}/100), but one share costs more than the position budget"
             elif status_type == "REGIME_FILTER":
                 status_str = f"🌧️ <b>ON RADAR:</b> High conviction ({score}/100), but the market index is below its 200-day average"
             else:

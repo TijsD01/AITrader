@@ -10,7 +10,7 @@ from src.db.models import Position, Trade, PortfolioSnapshot, SystemConfig, Orde
 from src.db.session import AsyncSessionLocal
 from src.data.currency import currency_service
 from src.data.market import market_data_provider
-from src.trading.risk import risk_guardrail, get_effective_deployable_cash, calculate_position_allocation, allocate_pending_triggers, evaluate_trigger_condition, is_trigger_expired, validate_trigger_levels, apply_risk_budget, compute_trailing_stop, check_market_regime
+from src.trading.risk import risk_guardrail, get_effective_deployable_cash, calculate_position_allocation, allocate_pending_triggers, evaluate_trigger_condition, is_trigger_expired, validate_trigger_levels, apply_risk_budget, compute_trailing_stop, check_market_regime, whole_share_count
 from src.data.market_hours import check_market_hours
 from src.trading.base import BaseBroker
 
@@ -202,7 +202,15 @@ class PaperBroker(BaseBroker):
             if price_eur <= 0:
                 return {"success": False, "message": f"Invalid price EUR for {ticker}."}
 
-            shares = round(allocation_eur / price_eur, 4)
+            if settings.WHOLE_SHARES_ONLY:
+                # The broker only fills whole shares: take the count closest to the allocation
+                shares = float(whole_share_count(allocation_eur, price_eur, max_eur=max(available_cash, allocation_eur)))
+                if shares < 1:
+                    msg = f"One share of {ticker} costs €{price_eur:.2f}, more than the €{allocation_eur:.2f} allocation."
+                    logger.info(f"Buy order blocked: {msg}")
+                    return {"success": False, "unaffordable": True, "message": msg}
+            else:
+                shares = round(allocation_eur / price_eur, 4)
             actual_cost_eur = round(shares * price_eur, 2)
 
             # Calculate estimated broker fee
@@ -222,7 +230,8 @@ class PaperBroker(BaseBroker):
             if actual_cost_eur + fee_eur > cash_eur and cash_eur > fee_eur:
                 import math
                 net_spend = cash_eur - fee_eur
-                shares = math.floor((net_spend / price_eur) * 10000.0) / 10000.0
+                step = 1.0 if settings.WHOLE_SHARES_ONLY else 10000.0
+                shares = math.floor((net_spend / price_eur) * step) / step
                 actual_cost_eur = round(shares * price_eur, 2)
 
             if shares <= 0 or actual_cost_eur <= 0:
@@ -889,6 +898,11 @@ class PaperBroker(BaseBroker):
                         trade_res["currency"] = t.currency
                         trade_res["ai_rationale"] = t.ai_rationale
                         executed.append(trade_res)
+                    elif trade_res.get("unaffordable"):
+                        # Not even one whole share fits: release the reserved cash for other triggers
+                        logger.info(f"Cancelling trigger #{t.id} for {t.ticker}: {trade_res.get('message')}")
+                        t.status = "CANCELLED"
+                        await session.commit()
                     else:
                         logger.warning(f"Trigger #{t.id} buy order blocked for {t.ticker}: {trade_res.get('message')}")
 
