@@ -27,6 +27,19 @@ class TradingScheduler:
         # Serializes trigger/stop checks so a manual refresh cannot overlap a scheduled run
         self._monitor_lock = asyncio.Lock()
 
+    @staticmethod
+    def _should_arm_trigger(report: Dict[str, Any], trigger_min_score: int) -> bool:
+        """
+        Arms only a buy verdict that the Risk Officer approved and that scores at or above the threshold.
+        The verdict matters on its own: when the learner raises MIN_CONSENSUS_SCORE above TRIGGER_MIN_SCORE,
+        a score can clear the trigger threshold while the committee still says HOLD.
+        """
+        return (
+            report["consensus_score"] >= trigger_min_score
+            and report.get("action") in ("BUY", "STRONG_BUY")
+            and report["risk"].get("approved", True)
+        )
+
     async def _scheduled_market_session(self, market: str, session: str):
         """Safeguard for scheduled cron jobs: only run on weekdays."""
         now = datetime.datetime.now(ZoneInfo(settings.TIMEZONE))
@@ -258,8 +271,8 @@ class TradingScheduler:
                     elif ticker in pending_tickers:
                         logger.info(f"Skipping trigger for {ticker}: pending trigger already active (anti-overlap).")
                         report["status_type"] = "TRIGGER_PENDING"
-                    elif report["consensus_score"] >= trigger_min_score and report["risk"].get("approved", True):
-                        # Automatically arm trigger for setups scoring >= 80
+                    elif self._should_arm_trigger(report, trigger_min_score):
+                        # Automatically arm trigger for approved buy setups scoring >= 80
                         curr_summary = await paper_broker.get_portfolio_summary()
                         available_cash = curr_summary.get("available_cash_eur", 0.0)
 
@@ -501,7 +514,7 @@ class TradingScheduler:
                         break
 
                     report = await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
-                    if report["consensus_score"] >= trigger_min_score and report["risk"].get("approved", True):
+                    if self._should_arm_trigger(report, trigger_min_score):
                         alloc = calculate_position_allocation(
                             available_cash=avail,
                             current_positions_count=len(open_tickers),
