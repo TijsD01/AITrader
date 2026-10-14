@@ -736,33 +736,38 @@ async function loadTrades() {
     const res = await fetch('/api/trades');
     const trades = await res.json();
     const tbody = document.getElementById('tradeHistoryTableBody');
+    const countEl = document.getElementById('tradeHistoryCount');
+    if (countEl) countEl.textContent = trades.length ? String(trades.length) : '';
 
     if (trades.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="9" class="text-center py-8 text-slate-400">No trades executed yet.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="9" class="text-center py-8 ui-faint">No trades executed yet.</td></tr>`;
       return;
     }
 
     tbody.innerHTML = trades.map(t => {
       const isBuy = t.order_type === 'BUY';
       const typeBadge = isBuy
-        ? '<span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold text-xs">BUY</span>'
-        : '<span class="px-2 py-0.5 rounded bg-rose-500/20 text-rose-400 font-bold text-xs">SELL</span>';
+        ? '<span class="ui-badge ui-badge-accent">BUY</span>'
+        : '<span class="ui-badge">SELL</span>';
 
-      const pnlText = (t.realized_pnl_eur !== null && t.realized_pnl_eur !== undefined)
-        ? `<span class="${t.realized_pnl_eur >= 0 ? 'text-emerald-400' : 'text-rose-400'} font-semibold">${t.realized_pnl_eur >= 0 ? '+' : ''}€${num(t.realized_pnl_eur)} (${esc(t.realized_pnl_pct)}%)</span>`
-        : '<span class="text-slate-500">-</span>';
+      let pnlText = '<span class="ui-faint">-</span>';
+      if (t.realized_pnl_eur !== null && t.realized_pnl_eur !== undefined) {
+        const pnl = Number(t.realized_pnl_eur) || 0;
+        const up = pnl >= 0;
+        pnlText = `<span class="ui-num font-semibold ${up ? 'ui-gain' : 'ui-loss'}">${up ? '▲ +' : '▼ -'}${esc(eur(Math.abs(pnl)))} (${esc(t.realized_pnl_pct)}%)</span>`;
+      }
 
       return `
-        <tr class="hover:bg-slate-800/40 transition-colors">
-          <td data-label="Date" class="py-3 px-4 text-slate-400 whitespace-nowrap">${esc(t.executed_at)}</td>
+        <tr>
+          <td data-label="Date" class="py-3 px-4 ui-num ui-faint whitespace-nowrap">${esc(t.executed_at)}</td>
           <td data-label="Type" class="py-3 px-4">${typeBadge}</td>
-          <td data-label="Asset" class="py-3 px-4 font-bold text-white">${esc(t.ticker)}</td>
-          <td data-label="Shares" class="py-3 px-4 text-slate-300">${esc(t.shares)}</td>
-          <td data-label="Price" class="py-3 px-4 text-slate-300">${esc(t.price_native)} ${esc(t.currency)}</td>
-          <td data-label="Total (EUR)" class="py-3 px-4 text-slate-200 font-semibold">€${num(t.total_eur)}</td>
-          <td data-label="Fee (€)" class="py-3 px-4 text-slate-400 font-mono text-xs">€${(t.fee_eur !== undefined && t.fee_eur !== null) ? num(t.fee_eur) : '0.00'}</td>
+          <td data-label="Asset" class="py-3 px-4 font-bold" style="color:var(--text)">${esc(t.ticker)}</td>
+          <td data-label="Shares" class="py-3 px-4 ui-num">${esc(t.shares)}</td>
+          <td data-label="Price" class="py-3 px-4 ui-num"><span>${esc(t.price_native)} <span class="ui-faint text-xs">${esc(t.currency)}</span></span></td>
+          <td data-label="Total (EUR)" class="py-3 px-4 ui-num font-semibold" style="color:var(--text)">€${num(t.total_eur)}</td>
+          <td data-label="Fee (€)" class="py-3 px-4 ui-num ui-faint">€${(t.fee_eur !== undefined && t.fee_eur !== null) ? num(t.fee_eur) : '0.00'}</td>
           <td data-label="Realized PnL" class="py-3 px-4">${pnlText}</td>
-          <td data-label="Rationale" class="cell-wide py-3 px-4 text-slate-400 text-xs truncate max-w-xs" title="${esc(t.rationale)}">${esc(t.rationale)}</td>
+          <td data-label="Rationale" class="cell-wide py-3 px-4 truncate max-w-xs" title="${esc(t.rationale)}">${esc(t.rationale)}</td>
         </tr>
       `;
     }).join('');
@@ -1445,100 +1450,104 @@ async function refreshMarketData() {
 }
 
 // 10. AI Order Triggers Handling
+// Trigger tab helpers
+const TRIGGER_TYPE_LABELS = { LIMIT_PULLBACK: 'Pullback buy', BREAKOUT_BUY: 'Breakout buy' };
+function triggerTypeLabel(type) {
+  return TRIGGER_TYPE_LABELS[type] || String(type || '').replace(/_/g, ' ').toLowerCase();
+}
+function hasNum(v) { return v !== undefined && v !== null && v !== '' && Number.isFinite(Number(v)); }
+function triggerStatusBadge(status) {
+  const s = String(status || '').toUpperCase();
+  const cls = s === 'TRIGGERED' ? 'ui-badge-gain' : (s === 'EXPIRED' ? 'ui-badge-warn' : '');
+  const label = s ? s.charAt(0) + s.slice(1).toLowerCase() : '-';
+  return `<span class="ui-badge ${cls}">${esc(label)}</span>`;
+}
+
 async function loadTriggers() {
   try {
     const res = await fetch('/api/triggers');
     const triggers = await res.json();
-    
+
     const pending = triggers.filter(t => t.status === 'PENDING');
     const history = triggers.filter(t => t.status !== 'PENDING');
 
-    // Update count badge
+    // Section counts
     const badge = document.getElementById('pendingTriggersCount');
-    if (badge) {
-      badge.textContent = `${pending.length} Active`;
-    }
+    if (badge) badge.textContent = String(pending.length);
+    const histCount = document.getElementById('triggerHistoryCount');
+    if (histCount) histCount.textContent = history.length ? String(history.length) : '';
     setTriggerNavBadge(pending.length);
     const sumText = document.getElementById('pendingTriggersSummaryText');
     if (sumText) sumText.textContent = `${pending.length} pending trigger${pending.length === 1 ? '' : 's'}`;
+    const reservedEl = document.getElementById('pendingTriggersReserved');
+    if (reservedEl) {
+      const reserved = pending.reduce((acc, t) => acc + (Number(t.allocation_eur) || 0), 0);
+      reservedEl.textContent = pending.length ? `${eur(reserved)} reserved` : '';
+    }
 
-    // Render Pending Triggers
+    // Pending triggers
     const pendingContainer = document.getElementById('pendingTriggersContainer');
     if (pendingContainer) {
       if (pending.length === 0) {
         pendingContainer.innerHTML = `
-          <div class="col-span-full text-center py-10 text-slate-400 text-xs sm:text-sm bg-slate-900/30 border border-borderCol/60 rounded-xl p-6">
-            <i class="fa-solid fa-crosshairs text-3xl mb-2 text-indigo-400/60 block"></i>
-            No active limit triggers armed.<br>
-            Enter a ticker above or click <strong>"Trigger"</strong> on any Daily Advice card to arm an AI limit order.
+          <div class="col-span-full ui-card ui-card-pad text-center text-[13px] ui-muted space-y-1">
+            <p class="font-semibold" style="color:var(--text)">No pending triggers</p>
+            <p>Enter a ticker above, or tap Trigger on a Daily Advice card.</p>
           </div>`;
       } else {
         pendingContainer.innerHTML = pending.map(t => {
-          const isPullback = t.trigger_type === 'LIMIT_PULLBACK';
-          const typeBadge = isPullback
-            ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40'
-            : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40';
-          const currPrice = (t.current_price !== undefined && t.current_price !== null)
-            ? t.current_price
-            : (t.current_price_at_creation !== undefined && t.current_price_at_creation !== null ? t.current_price_at_creation : t.target_price);
-          const distVal = (t.distance_pct !== undefined && t.distance_pct !== null)
-            ? t.distance_pct
-            : (currPrice > 0 ? Math.round(((t.target_price / currPrice) - 1.0) * 10000) / 100 : 0);
-          const distSign = distVal > 0 ? '+' : '';
-          const distColor = Math.abs(distVal) <= 1.0 ? 'text-emerald-400' : 'text-slate-300';
+          const cur = t.currency || 'EUR';
+          const currPrice = hasNum(t.current_price)
+            ? Number(t.current_price)
+            : (hasNum(t.current_price_at_creation) ? Number(t.current_price_at_creation) : Number(t.target_price));
+          const distVal = hasNum(t.distance_pct)
+            ? Number(t.distance_pct)
+            : (currPrice > 0 ? Math.round(((Number(t.target_price) / currPrice) - 1.0) * 10000) / 100 : 0);
+          const distAbs = Math.abs(distVal);
+          // Near the limit reads as accent; more than 5% away as warn
+          const isFar = distAbs > 5;
+          const distCls = isFar ? 'ui-badge-warn' : 'ui-badge-accent';
+          // Bar is full at the limit and empty at 10% or more away
+          const closeness = Math.max(0, Math.min(100, Math.round(100 - distAbs * 10)));
+          const barColor = isFar ? 'var(--warn)' : 'var(--accent)';
 
           const allocEur = Number(t.allocation_eur) || 0;
+          const subParts = [triggerTypeLabel(t.trigger_type)];
+          if (hasNum(t.consensus_score)) subParts.push(`score ${Number(t.consensus_score)}`);
 
           return `
-            <div class="bg-cardBg border border-indigo-500/30 rounded-xl p-4 shadow-sm space-y-3.5 flex flex-col justify-between hover:border-indigo-500/60 transition-colors">
-              <div class="space-y-2">
-                <div class="flex items-center justify-between">
-                  <div class="flex items-center gap-2">
-                    <span class="text-base font-bold text-white">${esc(t.ticker)}</span>
-                    <span class="text-[10px] font-bold px-2 py-0.5 rounded-full border ${typeBadge}">
-                      ${isPullback ? '📉 Pullback' : '📈 Breakout'}
-                    </span>
-                  </div>
-                  <span class="text-[10px] text-slate-500 font-mono">#${esc(t.id)}</span>
+            <div class="ui-card ui-card-pad flex flex-col gap-3">
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="text-base font-bold truncate" style="color:var(--text)">${esc(t.ticker)}</div>
+                  <div class="text-[13px] ui-muted truncate">${esc(subParts.join(' · '))}${t.name ? ` · ${esc(t.name)}` : ''}</div>
                 </div>
-                ${allocEur > 0 ? '' : `
-                <div class="text-[11px] font-semibold text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg px-2.5 py-1.5 flex items-center gap-1.5" title="Higher-scored triggers hold the available cash or position slots. This trigger is funded automatically when cash or a slot frees up.">
-                  <i class="fa-solid fa-hourglass-half"></i> Unfunded, waiting for cash
-                </div>`}
-
-                <div class="grid grid-cols-2 gap-2 bg-slate-900/70 p-2.5 rounded-lg border border-borderCol text-xs">
-                  <div>
-                    <span class="text-slate-500 text-[10px] block">Trigger Price</span>
-                    <span class="text-indigo-400 font-bold">${esc(t.target_price)} ${esc(t.currency)}</span>
-                  </div>
-                  <div>
-                    <span class="text-slate-500 text-[10px] block">Current Live Price</span>
-                    <span class="text-white font-semibold">${esc(currPrice)} ${esc(t.currency || 'EUR')}</span>
-                  </div>
-                  <div>
-                    <span class="text-slate-500 text-[10px] block">Distance to Trigger</span>
-                    <span class="${distColor} font-bold">${distSign}${esc(distVal)}%</span>
-                  </div>
-                  <div>
-                    <span class="text-slate-500 text-[10px] block">Alloc (EUR)</span>
-                    <span class="text-white font-semibold">€${allocEur.toLocaleString('en-US', {minimumFractionDigits: 2})}</span>
-                  </div>
-                </div>
-
-                <div class="flex flex-wrap justify-between gap-x-3 text-[11px] text-slate-400 px-1">
-                  <span>SL: <strong class="text-rose-400">${esc(t.stop_loss || 'N/A')}</strong></span>
-                  <span>TP: <strong class="text-emerald-400">${esc(t.take_profit || 'N/A')}</strong></span>
-                  <span>Score: <strong class="text-indigo-300">${esc(t.consensus_score || 75)}</strong></span>
-                </div>
-
-                <p class="text-[11px] text-slate-300 bg-slate-900/40 p-2 rounded border border-borderCol/40 italic">
-                  "${esc(t.ai_rationale || 'AI calculated tactical entry.')}"
-                </p>
+                <span class="ui-badge ${distCls} shrink-0">${esc(distAbs.toFixed(1))}% away</span>
               </div>
 
-              <div class="pt-2 border-t border-borderCol/50 flex justify-end">
-                <button type="button" data-action="cancel-trigger" data-id="${esc(t.id)}" data-ticker="${esc(t.ticker)}" class="text-xs text-rose-400 hover:text-rose-300 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/20 px-4 min-h-[44px] rounded-lg transition-colors flex items-center gap-1.5">
-                  <i class="fa-solid fa-ban"></i> Cancel Trigger
+              <div class="ui-track" role="img" aria-label="${esc(distAbs.toFixed(1))}% from the limit price"><span style="width:${closeness}%;background:${barColor}"></span></div>
+
+              <div class="flex items-baseline justify-between gap-3 text-[13px]">
+                <span><span class="ui-faint">Now</span> <span class="ui-num" style="color:var(--text)">${esc(num(currPrice))}</span></span>
+                <span><span class="ui-faint">Limit</span> <span class="ui-num font-semibold" style="color:var(--accent-strong)">${esc(num(t.target_price))}</span> <span class="ui-faint text-xs">${esc(cur)}</span></span>
+              </div>
+
+              <div class="ui-inset px-3 py-2 space-y-1">
+                <div class="kv"><span>Stop loss</span><span>${hasNum(t.stop_loss) ? esc(num(t.stop_loss)) : '-'}</span></div>
+                <div class="kv"><span>Take profit</span><span>${hasNum(t.take_profit) ? esc(num(t.take_profit)) : '-'}</span></div>
+              </div>
+
+              ${t.ai_rationale ? `<p class="text-[13px] ui-muted line-clamp-2" title="${esc(t.ai_rationale)}">${esc(t.ai_rationale)}</p>` : ''}
+
+              <div class="flex items-center justify-between gap-3 pt-3 border-t border-borderCol">
+                <div class="min-w-0 text-[13px] leading-snug">
+                  ${allocEur > 0
+                    ? `<div class="ui-num font-semibold" style="color:var(--text)">${esc(eur(allocEur))}</div>`
+                    : `<span class="ui-badge ui-badge-warn" title="Higher-scored triggers hold the available cash or position slots. This trigger is funded automatically when cash or a slot frees up."><i class="fa-solid fa-hourglass-half"></i> Unfunded</span>`}
+                  <div class="ui-faint text-xs truncate">Armed <span class="ui-num">${esc(t.created_at)}</span></div>
+                </div>
+                <button type="button" data-action="cancel-trigger" data-id="${esc(t.id)}" data-ticker="${esc(t.ticker)}" class="ui-btn ui-btn-sm ui-btn-danger shrink-0" style="min-height:44px" aria-label="Cancel trigger for ${esc(t.ticker)}">
+                  Cancel
                 </button>
               </div>
             </div>
@@ -1547,28 +1556,22 @@ async function loadTriggers() {
       }
     }
 
-    // Render History
+    // History
     const historyBody = document.getElementById('triggerHistoryTableBody');
     if (historyBody) {
       if (history.length === 0) {
-        historyBody.innerHTML = `<tr><td colspan="6" class="text-center py-6 text-slate-500">No past triggers found.</td></tr>`;
+        historyBody.innerHTML = `<tr><td colspan="6" class="text-center py-8 ui-faint">No past triggers yet.</td></tr>`;
       } else {
-        historyBody.innerHTML = history.map(t => {
-          const statusBadge = t.status === 'TRIGGERED'
-            ? '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">TRIGGERED</span>'
-            : '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-700 text-slate-400">CANCELLED</span>';
-
-          return `
-            <tr class="hover:bg-slate-800/40 transition-colors">
-              <td data-label="Ticker" class="py-2.5 px-3 font-bold text-white">${esc(t.ticker)}</td>
-              <td data-label="Type" class="py-2.5 px-3 text-slate-400">${esc(t.trigger_type)}</td>
-              <td data-label="Target" class="py-2.5 px-3 font-semibold text-indigo-300">${esc(t.target_price)} ${esc(t.currency)}</td>
-              <td data-label="Status" class="py-2.5 px-3">${statusBadge}</td>
-              <td data-label="When" class="py-2.5 px-3 text-slate-400 font-mono text-[11px]">${esc(t.triggered_at || t.created_at)}</td>
-              <td data-label="Rationale" class="cell-wide py-2.5 px-3 text-slate-300 text-[11px] max-w-xs truncate" title="${esc(t.ai_rationale)}">${esc(t.ai_rationale)}</td>
+        historyBody.innerHTML = history.map(t => `
+            <tr>
+              <td data-label="Ticker" class="py-3 px-4 font-bold" style="color:var(--text)">${esc(t.ticker)}</td>
+              <td data-label="Type" class="py-3 px-4">${esc(triggerTypeLabel(t.trigger_type))}</td>
+              <td data-label="Target" class="py-3 px-4 ui-num" style="color:var(--text)"><span>${esc(num(t.target_price))} <span class="ui-faint text-xs">${esc(t.currency)}</span></span></td>
+              <td data-label="Status" class="py-3 px-4">${triggerStatusBadge(t.status)}</td>
+              <td data-label="When" class="py-3 px-4 ui-num ui-faint whitespace-nowrap">${esc(t.triggered_at || t.created_at)}</td>
+              <td data-label="Rationale" class="cell-wide py-3 px-4 max-w-xs truncate" title="${esc(t.ai_rationale)}">${esc(t.ai_rationale)}</td>
             </tr>
-          `;
-        }).join('');
+          `).join('');
       }
     }
 
@@ -1576,6 +1579,8 @@ async function loadTriggers() {
     console.error('Failed to load triggers:', e);
   }
 }
+
+const ARM_BTN_HTML = `<i class="fa-solid fa-crosshairs"></i> Arm`;
 
 async function armTriggerFromInput() {
   const input = document.getElementById('triggerTickerInput');
@@ -1586,7 +1591,7 @@ async function armTriggerFromInput() {
   }
 
   const btn = document.getElementById('armTriggerBtn');
-  btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Analyzing...`;
+  btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Arming`;
   btn.disabled = true;
 
   try {
@@ -1597,7 +1602,7 @@ async function armTriggerFromInput() {
     });
     const data = await res.json();
     if (res.ok && data.success) {
-      showToast(`🎯 AI Trigger armed for ${ticker}!`);
+      showToast(`Trigger armed for ${ticker}.`);
       input.value = '';
       loadTriggers();
     } else {
@@ -1606,13 +1611,13 @@ async function armTriggerFromInput() {
   } catch (e) {
     showToast('Error arming trigger.', true);
   } finally {
-    btn.innerHTML = `<i class="fa-solid fa-wand-magic-sparkles"></i> AI Calculate & Arm Trigger`;
+    btn.innerHTML = ARM_BTN_HTML;
     btn.disabled = false;
   }
 }
 
 async function armAITrigger(ticker) {
-  showToast(`⏳ AI analyzing ${ticker} and arming optimal entry trigger...`);
+  showToast(`Analysing ${ticker} and arming an entry trigger...`);
   try {
     const res = await fetch('/api/triggers/from-ai', {
       method: 'POST',
@@ -1621,7 +1626,7 @@ async function armAITrigger(ticker) {
     });
     const data = await res.json();
     if (res.ok && data.success) {
-      showToast(`🎯 AI Trigger armed for ${ticker} at ${data.target_price}!`);
+      showToast(`Trigger armed for ${ticker} at ${data.target_price}.`);
       loadTriggers();
     } else {
       showToast(data.detail || data.message || 'Failed to arm trigger.', true);
@@ -1666,9 +1671,9 @@ async function loadLearningInsights() {
 
     if (winRateEl) {
       winRateEl.innerText = `${data.win_rate_pct}%`;
-      winRateEl.className = data.win_rate_pct >= 50 ? 'text-lg font-bold text-emerald-400 mt-0.5' : 'text-lg font-bold text-rose-400 mt-0.5';
+      winRateEl.className = data.win_rate_pct >= 50 ? 'kpi-value ui-gain' : 'kpi-value ui-loss';
     }
-    if (countsEl) countsEl.innerText = `${data.total_closed_trades} Trades (${data.wins}W / ${data.losses}L)`;
+    if (countsEl) countsEl.innerText = `${data.total_closed_trades} trades · ${data.wins}W / ${data.losses}L`;
 
     const p = data.active_parameters || {};
     if (minScoreEl) minScoreEl.innerText = `${p.min_consensus_score || 70}/100`;
@@ -1677,33 +1682,39 @@ async function loadLearningInsights() {
 
     if (container && data.recent_lessons) {
       if (data.recent_lessons.length === 0) {
-        container.innerHTML = `<div class="text-slate-500 italic p-3 bg-slate-900/40 rounded-lg border border-slate-800/80">
-          No trade post-mortems recorded yet. Lessons will appear here automatically when positions exit.
+        container.innerHTML = `<div class="ui-card ui-card-pad text-[13px] ui-muted">
+          No post-mortems yet. Lessons appear here when positions are closed.
         </div>`;
       } else {
         container.innerHTML = data.recent_lessons.slice(0, 4).map(l => {
           const isWin = l.outcome === 'WIN';
           const isLoss = l.outcome === 'LOSS';
-          const badgeCol = isWin ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : (isLoss ? 'bg-rose-500/10 text-rose-400 border-rose-500/20' : 'bg-slate-500/10 text-slate-400 border-slate-500/20');
-          const icon = isWin ? 'fa-arrow-trend-up' : (isLoss ? 'fa-arrow-trend-down' : 'fa-minus');
-          const pnlSign = (l.realized_pnl_eur >= 0) ? '+' : '';
+          const badgeCls = isWin ? 'ui-badge-gain' : (isLoss ? 'ui-badge-loss' : '');
+          const arrow = isWin ? '▲' : (isLoss ? '▼' : '•');
+          const pnl = Number(l.realized_pnl_eur) || 0;
+          const pnlSign = pnl >= 0 ? '+' : '-';
+          const pnlCls = pnl > 0 ? 'ui-gain' : (pnl < 0 ? 'ui-loss' : '');
+          const pnlPct = Math.abs(Number(l.realized_pnl_pct) || 0);
 
           return `
-            <div class="p-3 bg-slate-900/60 rounded-lg border border-slate-800 space-y-1.5">
-              <div class="flex flex-wrap items-center justify-between gap-1">
-                <div class="flex flex-wrap items-center gap-2">
-                  <span class="px-2 py-0.5 rounded text-[11px] font-bold border ${badgeCol}">
-                    <i class="fa-solid ${icon} mr-1"></i>${esc(l.outcome)} ${esc(l.ticker)}
-                  </span>
-                  <span class="font-semibold text-slate-200">${pnlSign}€${num(l.realized_pnl_eur)} (${pnlSign}${num(l.realized_pnl_pct, 1)}%)</span>
+            <div class="ui-card ui-card-pad space-y-2.5">
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="flex items-center gap-2">
+                    <span class="text-base font-bold" style="color:var(--text)">${esc(l.ticker)}</span>
+                    <span class="ui-badge ${badgeCls}">${arrow} ${esc(l.outcome)}</span>
+                  </div>
+                  <div class="text-xs ui-faint ui-num mt-0.5">${esc(l.created_at)}</div>
                 </div>
-                <span class="text-[10px] text-slate-500 font-mono">${esc(l.created_at)}</span>
+                <div class="text-right shrink-0">
+                  <div class="ui-num font-semibold ${pnlCls}">${pnlSign}${esc(eur(Math.abs(pnl)))}</div>
+                  <div class="ui-num text-xs ${pnlCls}">${pnlSign}${esc(num(pnlPct, 1))}%</div>
+                </div>
               </div>
-              <div class="text-[11px] text-slate-300">
-                <span class="text-slate-400 font-medium">Diagnosis:</span> ${esc(isLoss ? l.what_went_wrong : l.what_went_well)}
-              </div>
-              <div class="text-[11px] text-purple-300 font-medium bg-purple-950/30 px-2 py-1 rounded border border-purple-900/40">
-                <i class="fa-solid fa-lightbulb mr-1 text-amber-400"></i><b>Lesson:</b> ${esc(l.lesson)}
+              <p class="text-[13px] ui-muted"><span class="ui-faint">Diagnosis:</span> ${esc(isLoss ? l.what_went_wrong : l.what_went_well)}</p>
+              <div class="ui-inset px-3 py-2 text-[13px]" style="color:var(--text)">
+                <span class="ui-label" style="color:var(--accent-strong)"><i class="fa-solid fa-lightbulb mr-1"></i>Lesson</span>
+                <p class="mt-1">${esc(l.lesson)}</p>
               </div>
             </div>
           `;
@@ -1716,12 +1727,12 @@ async function loadLearningInsights() {
 }
 
 async function triggerLearningCalibration() {
-  showToast('⏳ Re-evaluating trade performance and calibrating risk parameters...');
+  showToast('Re-evaluating trade performance and calibrating risk parameters...');
   try {
     const res = await fetch('/api/learning/calibrate', { method: 'POST' });
     const data = await res.json();
     if (res.ok && data.success) {
-      showToast(`⚙️ Calibration complete! Win Rate: ${data.win_rate_pct}%`);
+      showToast(`Calibration complete. Win rate: ${data.win_rate_pct}%`);
       loadLearningInsights();
       loadSettings();
     } else {
