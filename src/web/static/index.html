@@ -2,11 +2,13 @@
 <html lang="en" class="dark">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0f19">
+  <meta name="color-scheme" content="dark">
   <title>Antigravity AI Trading & Multi-Agent Committee</title>
   
   <!-- Tailwind CSS & FontAwesome -->
-  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.tailwindcss.com/3.4.1"></script>
   <script>
     tailwind.config = {
       darkMode: 'class',
@@ -28,44 +30,44 @@
     }
   </script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js" integrity="sha384-dug+JxfBvklEQdJ4AYuBBAIScUz0bVN73xpy273gcAwHjb3qI0fXmuYNaNfdyYJG" crossorigin="anonymous"></script>
   <link rel="stylesheet" href="/static/style.css">
 </head>
-<body class="bg-darkBg text-slate-100 min-h-screen pb-10 md:pb-8 flex flex-col font-sans antialiased overflow-x-hidden selection:bg-emerald-500 selection:text-white">
+<body class="bg-darkBg text-slate-100 min-h-screen md:pb-8 flex flex-col font-sans antialiased overflow-x-hidden selection:bg-emerald-500 selection:text-white">
 
-  <!-- Top Header Bar -->
-  <header class="sticky top-0 z-40 bg-cardBg/95 backdrop-blur-md border-b border-borderCol">
-    <div class="px-3.5 py-2.5 sm:px-6 sm:py-3 flex items-center justify-between gap-2 max-w-7xl mx-auto w-full">
+  <!-- Top Header Bar (compact on mobile: brand + mode + two actions) -->
+  <header class="sticky top-0 z-40 bg-cardBg/95 backdrop-blur-md border-b border-borderCol" style="padding-top: env(safe-area-inset-top);">
+    <div class="px-3 py-2 sm:px-6 sm:py-3 flex items-center justify-between gap-2 max-w-7xl mx-auto w-full">
       <!-- Brand & Mode -->
       <div class="flex items-center gap-2.5 sm:gap-3 min-w-0">
-        <div class="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-gradient-to-tr from-emerald-500 to-cyan-500 flex items-center justify-center shadow-lg shadow-emerald-500/20 shrink-0">
+        <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-emerald-500 to-cyan-500 flex items-center justify-center shadow-lg shadow-emerald-500/20 shrink-0">
           <i class="fa-solid fa-brain text-white text-base sm:text-lg"></i>
         </div>
         <div class="min-w-0">
-          <h1 class="text-sm sm:text-base md:text-lg font-bold tracking-tight text-white flex items-center gap-1.5 truncate">
+          <h1 class="text-base md:text-lg font-bold tracking-tight text-white flex items-center gap-1.5">
             <span>AlphaAgent</span>
-            <span id="tradingModeBadge" class="text-[10px] sm:text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-semibold uppercase tracking-wider shrink-0">PAPER</span>
+            <span id="tradingModeBadge" class="text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-semibold uppercase tracking-wider shrink-0">PAPER</span>
           </h1>
           <p class="text-xs text-slate-400 hidden lg:block truncate">Autonomous Hedge Fund Committee & Multi-Agent Trading</p>
         </div>
       </div>
 
       <!-- Right Controls -->
-      <div class="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
+      <div class="flex items-center gap-2 sm:gap-2.5 shrink-0">
         <!-- Manual Market Data Refresh Button -->
-        <button onclick="refreshMarketData()" id="refreshDataBtn" title="Pull fresh prices and account balance, resize triggers, and run trigger & stop checks now" class="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold px-2.5 py-1.5 sm:px-3 sm:py-1.5 rounded-lg shadow-md transition-all active:scale-95 cursor-pointer">
-          <i class="fa-solid fa-arrows-rotate text-xs sm:text-sm"></i>
+        <button onclick="refreshMarketData()" id="refreshDataBtn" type="button" aria-label="Refresh data" title="Pull fresh prices and account balance, resize triggers, and run trigger & stop checks now" class="flex items-center justify-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold min-w-[44px] min-h-[44px] px-3 rounded-lg shadow-md transition-all active:scale-95 cursor-pointer">
+          <i class="fa-solid fa-arrows-rotate text-sm"></i>
           <span class="hidden sm:inline">Refresh Data</span>
         </button>
 
         <!-- Quick Scan Button -->
-        <button onclick="triggerQuickScan()" id="scanBtn" class="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold px-2.5 py-1.5 sm:px-3 sm:py-1.5 rounded-lg shadow-md transition-all active:scale-95 cursor-pointer">
-          <i class="fa-solid fa-radar text-xs sm:text-sm"></i>
+        <button onclick="triggerQuickScan()" id="scanBtn" type="button" aria-label="Run scan" class="flex items-center justify-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold min-w-[44px] min-h-[44px] px-3 rounded-lg shadow-md transition-all active:scale-95 cursor-pointer">
+          <i class="fa-solid fa-satellite-dish text-sm"></i>
           <span class="hidden sm:inline">Run Scan</span>
         </button>
 
         <!-- Desktop Broker Connection Badge -->
-        <button onclick="pingBrokerStatus(true)" id="brokerStatusBadge" title="Broker Connection Status (Click to test)" class="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700 text-slate-400 text-xs font-medium hover:border-slate-500 transition-colors cursor-pointer">
+        <button onclick="pingBrokerStatus(true)" id="brokerStatusBadge" type="button" title="Broker Connection Status (Click to test)" class="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700 text-slate-400 text-xs font-medium hover:border-slate-500 transition-colors cursor-pointer">
           <span id="brokerStatusDot" class="w-2 h-2 rounded-full bg-slate-500"></span>
           <span id="brokerStatusText">Broker: Checking...</span>
         </button>
@@ -77,179 +79,109 @@
         </div>
 
         <!-- Desktop Auto-Buy Badge -->
-        <div id="autoBuyBadge" class="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-medium">
-          <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-          <span class="hidden md:inline">Auto-Buy:</span> <span id="autoBuyStatusText">Active</span>
+        <div id="autoBuyBadge" class="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-medium">
+          <span id="autoBuyDot" class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+          <span class="hidden lg:inline">Auto-Buy:</span> <span id="autoBuyStatusText">Active</span>
         </div>
+
+        <!-- Desktop Kill Switch -->
+        <button onclick="toggleKillSwitch()" id="killSwitchBtnDesktop" type="button" title="Emergency kill switch: halt or resume all new automated buying" class="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs font-semibold hover:bg-rose-500/20 transition-colors cursor-pointer">
+          <i class="fa-solid fa-power-off"></i>
+          <span class="kill-switch-label">Kill Switch</span>
+        </button>
 
         <!-- Desktop Currency Badge -->
-        <div class="hidden sm:block px-2.5 py-1 rounded-lg bg-slate-800 text-[11px] sm:text-xs font-semibold text-slate-300 border border-slate-700">
+        <div class="hidden md:block px-2.5 py-1 rounded-lg bg-slate-800 text-xs font-semibold text-slate-300 border border-slate-700">
           EUR (€)
-        </div>
-
-        <!-- Mobile Menu Dropdown Toggle Button -->
-        <button id="mobileMenuDropdownBtn" onclick="toggleMobileDropdown()" class="md:hidden flex items-center gap-1.5 sm:gap-2 px-2.5 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 text-xs font-medium hover:border-emerald-500/50 hover:text-white transition-all active:scale-95 cursor-pointer shadow-sm" aria-label="Toggle Navigation Menu">
-          <i id="mobileDropdownActiveIcon" class="fa-solid fa-wallet text-emerald-400 text-xs"></i>
-          <span id="mobileDropdownActiveText" class="font-bold text-slate-100 max-w-[85px] truncate">Portfolio</span>
-          <i id="mobileDropdownChevron" class="fa-solid fa-chevron-down text-slate-400 text-[10px] transition-transform duration-200"></i>
-        </button>
-      </div>
-    </div>
-
-    <!-- Mobile Glanceable Status Strip (Only on mobile <md) -->
-    <div class="md:hidden border-t border-borderCol/70 bg-slate-950/70 px-3.5 py-1.5 flex items-center justify-between text-[11px] text-slate-400 overflow-x-auto whitespace-nowrap gap-3 scrollbar-none">
-      <button onclick="pingBrokerStatus(true)" id="mobileBrokerStatusPill" class="flex items-center gap-1.5 hover:text-slate-200 cursor-pointer shrink-0">
-        <span id="mobileBrokerStatusDot" class="w-1.5 h-1.5 rounded-full bg-slate-500"></span>
-        <span id="mobileBrokerStatusText">Broker: Checking...</span>
-      </button>
-      <div id="mobileMarketStatusPill" class="flex items-center gap-1 shrink-0">
-        <i class="fa-regular fa-clock text-[10px] text-slate-500"></i>
-        <span id="mobileMarketStatusText">Markets: Checking...</span>
-      </div>
-      <div id="mobileAutoBuyPill" class="flex items-center gap-1 text-emerald-400 shrink-0">
-        <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-        <span>Auto-Buy: <strong id="mobileAutoBuyText">On</strong></span>
-      </div>
-    </div>
-
-    <!-- Mobile Dropdown Navigation Menu Drawer -->
-    <div id="mobileDropdownMenu" class="hidden md:hidden border-t border-borderCol bg-cardBg/98 backdrop-blur-xl shadow-2xl transition-all duration-200">
-      <div class="p-3 space-y-1 max-h-[calc(100vh-120px)] overflow-y-auto">
-        <div class="flex items-center justify-between px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">
-          <span>Select Menu Tab</span>
-          <span>EUR (€)</span>
-        </div>
-
-        <!-- 1. Portfolio -->
-        <button onclick="switchTab('portfolio')" class="mobile-dropdown-item w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-left text-xs font-medium transition-colors bg-emerald-500/15 text-emerald-400 border border-emerald-500/30" data-tab="portfolio">
-          <div class="flex items-center gap-3">
-            <div class="w-8 h-8 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center shrink-0 text-sm">
-              <i class="fa-solid fa-wallet"></i>
-            </div>
-            <div>
-              <div class="font-bold text-white text-sm">Portfolio</div>
-              <div class="text-[11px] text-slate-400">Holdings, cash & allocation</div>
-            </div>
-          </div>
-          <i class="fa-solid fa-check text-xs text-emerald-400 mobile-active-check"></i>
-        </button>
-
-        <!-- 2. Daily Advice -->
-        <button onclick="switchTab('advice')" class="mobile-dropdown-item w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-left text-xs font-medium transition-colors text-slate-300 hover:bg-slate-800/70" data-tab="advice">
-          <div class="flex items-center gap-3">
-            <div class="w-8 h-8 rounded-lg bg-amber-500/10 text-amber-400 flex items-center justify-center shrink-0 text-sm">
-              <i class="fa-solid fa-lightbulb"></i>
-            </div>
-            <div>
-              <div class="font-bold text-white text-sm">Daily Advice</div>
-              <div class="text-[11px] text-slate-400">AI consensus stock picks & review</div>
-            </div>
-          </div>
-          <i class="fa-solid fa-check text-xs text-emerald-400 mobile-active-check hidden"></i>
-        </button>
-
-        <!-- 3. Market Screener -->
-        <button onclick="switchTab('screener')" class="mobile-dropdown-item w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-left text-xs font-medium transition-colors text-slate-300 hover:bg-slate-800/70" data-tab="screener">
-          <div class="flex items-center gap-3">
-            <div class="w-8 h-8 rounded-lg bg-cyan-500/10 text-cyan-400 flex items-center justify-center shrink-0 text-sm">
-              <i class="fa-solid fa-magnifying-glass-chart"></i>
-            </div>
-            <div>
-              <div class="font-bold text-white text-sm">Market Screener</div>
-              <div class="text-[11px] text-slate-400">Liquid EU & US momentum candidates</div>
-            </div>
-          </div>
-          <i class="fa-solid fa-check text-xs text-emerald-400 mobile-active-check hidden"></i>
-        </button>
-
-        <!-- 4. Committee Debate -->
-        <button onclick="switchTab('debate')" class="mobile-dropdown-item w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-left text-xs font-medium transition-colors text-slate-300 hover:bg-slate-800/70" data-tab="debate">
-          <div class="flex items-center gap-3">
-            <div class="w-8 h-8 rounded-lg bg-purple-500/10 text-purple-400 flex items-center justify-center shrink-0 text-sm">
-              <i class="fa-solid fa-comments"></i>
-            </div>
-            <div>
-              <div class="font-bold text-white text-sm">Committee Debate</div>
-              <div class="text-[11px] text-slate-400">Convene multi-agent debate on any ticker</div>
-            </div>
-          </div>
-          <i class="fa-solid fa-check text-xs text-emerald-400 mobile-active-check hidden"></i>
-        </button>
-
-        <!-- 5. AI Triggers -->
-        <button onclick="switchTab('triggers')" class="mobile-dropdown-item w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-left text-xs font-medium transition-colors text-slate-300 hover:bg-slate-800/70" data-tab="triggers">
-          <div class="flex items-center gap-3">
-            <div class="w-8 h-8 rounded-lg bg-indigo-500/10 text-indigo-400 flex items-center justify-center shrink-0 text-sm">
-              <i class="fa-solid fa-crosshairs"></i>
-            </div>
-            <div>
-              <div class="font-bold text-white text-sm">AI Price Triggers</div>
-              <div class="text-[11px] text-slate-400">Automated limit orders & pullbacks</div>
-            </div>
-          </div>
-          <i class="fa-solid fa-check text-xs text-emerald-400 mobile-active-check hidden"></i>
-        </button>
-
-        <!-- 6. Trade History -->
-        <button onclick="switchTab('history')" class="mobile-dropdown-item w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-left text-xs font-medium transition-colors text-slate-300 hover:bg-slate-800/70" data-tab="history">
-          <div class="flex items-center gap-3">
-            <div class="w-8 h-8 rounded-lg bg-slate-500/10 text-slate-400 flex items-center justify-center shrink-0 text-sm">
-              <i class="fa-solid fa-clock-rotate-left"></i>
-            </div>
-            <div>
-              <div class="font-bold text-white text-sm">Trade History</div>
-              <div class="text-[11px] text-slate-400">Executed ledger & post-mortem lessons</div>
-            </div>
-          </div>
-          <i class="fa-solid fa-check text-xs text-emerald-400 mobile-active-check hidden"></i>
-        </button>
-
-        <!-- 7. Memory Hub -->
-        <button onclick="switchTab('memory')" class="mobile-dropdown-item w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-left text-xs font-medium transition-colors text-slate-300 hover:bg-slate-800/70" data-tab="memory">
-          <div class="flex items-center gap-3">
-            <div class="w-8 h-8 rounded-lg bg-purple-500/10 text-purple-400 flex items-center justify-center shrink-0 text-sm">
-              <i class="fa-solid fa-brain"></i>
-            </div>
-            <div>
-              <div class="font-bold text-white text-sm">Memory Hub</div>
-              <div class="text-[11px] text-slate-400">TencentDB agent memory & code-graph</div>
-            </div>
-          </div>
-          <i class="fa-solid fa-check text-xs text-emerald-400 mobile-active-check hidden"></i>
-        </button>
-
-        <!-- 8. Settings -->
-        <button onclick="switchTab('settings')" class="mobile-dropdown-item w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-left text-xs font-medium transition-colors text-slate-300 hover:bg-slate-800/70" data-tab="settings">
-          <div class="flex items-center gap-3">
-            <div class="w-8 h-8 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center shrink-0 text-sm">
-              <i class="fa-solid fa-sliders"></i>
-            </div>
-            <div>
-              <div class="font-bold text-white text-sm">Settings & Risk</div>
-              <div class="text-[11px] text-slate-400">Broker configuration & capital limits</div>
-            </div>
-          </div>
-          <i class="fa-solid fa-check text-xs text-emerald-400 mobile-active-check hidden"></i>
-        </button>
-
-        <!-- Quick Actions Footer inside Dropdown -->
-        <div class="pt-3 mt-2 border-t border-borderCol/60 grid grid-cols-2 gap-2 text-xs">
-          <button onclick="triggerQuickScan(); closeMobileDropdown();" class="py-2 px-3 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 rounded-lg font-semibold flex items-center justify-center gap-1.5 active:scale-95 transition-all">
-            <i class="fa-solid fa-radar"></i> Run Scan
-          </button>
-          <button onclick="pingBrokerStatus(true); closeMobileDropdown();" class="py-2 px-3 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg font-semibold flex items-center justify-center gap-1.5 active:scale-95 transition-all">
-            <i class="fa-solid fa-wifi"></i> Ping Broker
-          </button>
-          <button onclick="refreshMarketData(); closeMobileDropdown();" class="col-span-2 py-2 px-3 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg font-semibold flex items-center justify-center gap-1.5 active:scale-95 transition-all">
-            <i class="fa-solid fa-arrows-rotate"></i> Refresh Market Data
-          </button>
         </div>
       </div>
     </div>
   </header>
 
-  <!-- Backdrop for Mobile Dropdown Menu -->
+  <!-- Backdrop for Mobile "More" Sheet -->
   <div id="mobileDropdownBackdrop" onclick="closeMobileDropdown()" class="hidden md:hidden fixed inset-0 z-30 bg-black/60 backdrop-blur-sm transition-opacity"></div>
+
+  <!-- Mobile "More" Sheet (opens above the bottom nav) -->
+  <div id="mobileDropdownMenu" class="hidden md:hidden fixed inset-x-0 z-[35] border-t border-borderCol bg-cardBg shadow-2xl rounded-t-2xl" style="bottom: calc(60px + env(safe-area-inset-bottom)); max-height: calc(100dvh - 140px); overflow-y: auto; overscroll-behavior: contain;">
+    <div class="p-3 space-y-1">
+      <div class="flex items-center justify-between px-2 py-1 text-xs font-bold uppercase tracking-wider text-slate-400">
+        <span>More</span>
+        <span>EUR (€)</span>
+      </div>
+
+      <!-- Market Screener -->
+      <button type="button" onclick="switchTab('screener')" class="mobile-dropdown-item w-full flex items-center justify-between px-3 min-h-[56px] rounded-xl text-left text-sm font-medium transition-colors text-slate-300 hover:bg-slate-800/70" data-tab="screener">
+        <div class="flex items-center gap-3">
+          <div class="w-9 h-9 rounded-lg bg-cyan-500/10 text-cyan-400 flex items-center justify-center shrink-0 text-sm"><i class="fa-solid fa-magnifying-glass-chart"></i></div>
+          <div>
+            <div class="font-bold text-white text-sm">Market Screener</div>
+            <div class="text-xs text-slate-400">Liquid EU & US momentum candidates</div>
+          </div>
+        </div>
+        <i class="fa-solid fa-check text-xs text-emerald-400 mobile-active-check hidden"></i>
+      </button>
+
+      <!-- Committee Debate -->
+      <button type="button" onclick="switchTab('debate')" class="mobile-dropdown-item w-full flex items-center justify-between px-3 min-h-[56px] rounded-xl text-left text-sm font-medium transition-colors text-slate-300 hover:bg-slate-800/70" data-tab="debate">
+        <div class="flex items-center gap-3">
+          <div class="w-9 h-9 rounded-lg bg-purple-500/10 text-purple-400 flex items-center justify-center shrink-0 text-sm"><i class="fa-solid fa-comments"></i></div>
+          <div>
+            <div class="font-bold text-white text-sm">Committee Debate</div>
+            <div class="text-xs text-slate-400">Convene multi-agent debate on any ticker</div>
+          </div>
+        </div>
+        <i class="fa-solid fa-check text-xs text-emerald-400 mobile-active-check hidden"></i>
+      </button>
+
+      <!-- Memory Hub -->
+      <button type="button" onclick="switchTab('memory')" class="mobile-dropdown-item w-full flex items-center justify-between px-3 min-h-[56px] rounded-xl text-left text-sm font-medium transition-colors text-slate-300 hover:bg-slate-800/70" data-tab="memory">
+        <div class="flex items-center gap-3">
+          <div class="w-9 h-9 rounded-lg bg-purple-500/10 text-purple-400 flex items-center justify-center shrink-0 text-sm"><i class="fa-solid fa-brain"></i></div>
+          <div>
+            <div class="font-bold text-white text-sm">Memory Hub</div>
+            <div class="text-xs text-slate-400">TencentDB agent memory & code-graph</div>
+          </div>
+        </div>
+        <i class="fa-solid fa-check text-xs text-emerald-400 mobile-active-check hidden"></i>
+      </button>
+
+      <!-- Settings -->
+      <button type="button" onclick="switchTab('settings')" class="mobile-dropdown-item w-full flex items-center justify-between px-3 min-h-[56px] rounded-xl text-left text-sm font-medium transition-colors text-slate-300 hover:bg-slate-800/70" data-tab="settings">
+        <div class="flex items-center gap-3">
+          <div class="w-9 h-9 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center shrink-0 text-sm"><i class="fa-solid fa-sliders"></i></div>
+          <div>
+            <div class="font-bold text-white text-sm">Settings & Risk</div>
+            <div class="text-xs text-slate-400">Mode, broker & capital limits</div>
+          </div>
+        </div>
+        <i class="fa-solid fa-check text-xs text-emerald-400 mobile-active-check hidden"></i>
+      </button>
+
+      <!-- Quick Actions Footer -->
+      <div class="pt-3 mt-2 border-t border-borderCol/60 grid grid-cols-2 gap-2 text-sm">
+        <button type="button" onclick="triggerQuickScan(); closeMobileDropdown();" class="min-h-[48px] px-3 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 rounded-lg font-semibold flex items-center justify-center gap-1.5 active:scale-95 transition-all">
+          <i class="fa-solid fa-satellite-dish"></i> Run Scan
+        </button>
+        <button type="button" onclick="pingBrokerStatus(true); closeMobileDropdown();" class="min-h-[48px] px-3 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg font-semibold flex items-center justify-center gap-1.5 active:scale-95 transition-all">
+          <i class="fa-solid fa-wifi"></i> Ping Broker
+        </button>
+        <button type="button" onclick="refreshMarketData(); closeMobileDropdown();" class="col-span-2 min-h-[48px] px-3 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg font-semibold flex items-center justify-center gap-1.5 active:scale-95 transition-all">
+          <i class="fa-solid fa-arrows-rotate"></i> Refresh Market Data
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Mobile Bottom Navigation -->
+  <nav id="bottomNav" class="md:hidden fixed bottom-0 inset-x-0 z-40 bg-cardBg/95 backdrop-blur-md border-t border-borderCol" style="padding-bottom: env(safe-area-inset-bottom);" aria-label="Main sections">
+    <div class="grid grid-cols-5">
+      <button type="button" onclick="switchTab('portfolio')" class="bottom-nav-btn" data-tab="portfolio"><i class="fa-solid fa-wallet"></i><span>Portfolio</span></button>
+      <button type="button" onclick="switchTab('triggers')" class="bottom-nav-btn" data-tab="triggers"><i class="fa-solid fa-crosshairs"></i><span>Triggers</span><b id="bottomNavTriggerBadge" class="hidden"></b></button>
+      <button type="button" onclick="switchTab('advice')" class="bottom-nav-btn" data-tab="advice"><i class="fa-solid fa-lightbulb"></i><span>Advice</span></button>
+      <button type="button" onclick="switchTab('history')" class="bottom-nav-btn" data-tab="history"><i class="fa-solid fa-clock-rotate-left"></i><span>History</span></button>
+      <button type="button" onclick="toggleMobileDropdown()" id="mobileMenuDropdownBtn" class="bottom-nav-btn" data-more="1" aria-haspopup="true" aria-expanded="false"><i id="mobileDropdownActiveIcon" class="fa-solid fa-ellipsis"></i><span id="mobileDropdownActiveText">More</span></button>
+    </div>
+  </nav>
 
   <!-- Desktop Navigation Bar -->
   <nav class="hidden md:flex bg-cardBg border-b border-borderCol px-6 py-2 space-x-1 text-sm font-medium">
@@ -283,7 +215,27 @@
   <main class="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-6 space-y-4 sm:space-y-6 min-w-0">
 
     <!-- TAB 1: PORTFOLIO -->
-    <section id="tab-portfolio" class="tab-content space-y-6">
+    <section id="tab-portfolio" class="tab-content space-y-4 sm:space-y-6">
+      <!-- System Status Strip: broker, markets, auto-buy, kill switch (always visible at the top of Portfolio) -->
+      <div id="statusStrip" class="flex flex-wrap items-center gap-2 text-xs">
+        <button type="button" onclick="pingBrokerStatus(true)" id="mobileBrokerStatusPill" class="md:hidden flex items-center gap-2 min-h-[44px] px-3 rounded-full bg-slate-800 border border-slate-700 text-slate-300 cursor-pointer">
+          <span id="mobileBrokerStatusDot" class="w-2 h-2 rounded-full bg-slate-500"></span>
+          <span id="mobileBrokerStatusText">Broker: Checking...</span>
+        </button>
+        <div id="mobileMarketStatusPill" class="md:hidden flex items-center gap-2 min-h-[44px] px-3 rounded-full bg-slate-800 border border-slate-700 text-slate-300">
+          <i class="fa-regular fa-clock text-slate-400"></i>
+          <span id="mobileMarketStatusText">Markets: Checking...</span>
+        </div>
+        <button type="button" onclick="switchTab('settings')" id="mobileAutoBuyPill" class="md:hidden flex items-center gap-2 min-h-[44px] px-3 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 cursor-pointer" title="Open settings">
+          <span id="mobileAutoBuyDot" class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+          <span>Auto-Buy: <strong id="mobileAutoBuyText">On</strong></span>
+        </button>
+        <button type="button" onclick="toggleKillSwitch()" id="killSwitchBtn" class="flex items-center justify-center gap-2 min-h-[44px] px-4 rounded-full bg-rose-500/10 border border-rose-500/40 text-rose-300 font-semibold hover:bg-rose-500/20 cursor-pointer md:hidden ml-auto" title="Emergency kill switch: halt or resume all new automated buying">
+          <i class="fa-solid fa-power-off"></i>
+          <span class="kill-switch-label">Kill Switch</span>
+        </button>
+      </div>
+
       <!-- Broker Offline Alert Banner (Shown in LIVE mode if disconnected) -->
       <div id="brokerDisconnectBanner" class="hidden bg-rose-500/10 border border-rose-500/30 rounded-xl p-4 flex items-start gap-3 text-rose-200">
         <i class="fa-solid fa-triangle-exclamation text-rose-400 text-lg mt-0.5"></i>
@@ -331,8 +283,8 @@
         <!-- Total Value -->
         <div class="bg-cardBg border border-borderCol rounded-xl p-3 sm:p-4 shadow-sm relative overflow-hidden min-w-0">
           <div class="text-[11px] sm:text-xs text-slate-400 font-medium truncate">Total Portfolio Value</div>
-          <div id="metricTotalVal" class="text-base sm:text-2xl font-bold mt-1 text-white truncate">€10,000.00</div>
-          <div id="metricReturnBadge" class="text-[11px] sm:text-xs font-semibold text-emerald-400 mt-1.5 sm:mt-2 flex items-center gap-1 truncate">
+          <div id="metricTotalVal" class="text-xl sm:text-2xl font-bold mt-1 text-white truncate">€10,000.00</div>
+          <div id="metricReturnBadge" class="text-[11px] sm:text-xs font-semibold text-emerald-400 mt-1.5 sm:mt-2 flex items-center gap-1">
             <i class="fa-solid fa-arrow-trend-up"></i> +0.00%
           </div>
           <div class="absolute -right-2 -bottom-2 opacity-5 text-4xl text-emerald-400 pointer-events-none">
@@ -346,8 +298,8 @@
             <span class="truncate">Deployable Cash</span>
             <span id="capitalLimitBadge" class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 font-mono border border-emerald-500/20 shrink-0">100%</span>
           </div>
-          <div id="metricCash" class="text-base sm:text-2xl font-bold mt-1 text-white truncate">€10,000.00</div>
-          <div id="metricCashSub" class="text-[11px] sm:text-xs text-slate-400 mt-1.5 sm:mt-2 leading-tight truncate">Buffer capital</div>
+          <div id="metricCash" class="text-xl sm:text-2xl font-bold mt-1 text-white truncate">€10,000.00</div>
+          <div id="metricCashSub" class="text-[11px] sm:text-xs text-slate-400 mt-1.5 sm:mt-2 leading-tight">Buffer capital</div>
           <div class="absolute -right-2 -bottom-2 opacity-5 text-4xl text-cyan-400 pointer-events-none">
             <i class="fa-solid fa-money-bill-wave"></i>
           </div>
@@ -356,7 +308,7 @@
         <!-- Invested Equity -->
         <div class="bg-cardBg border border-borderCol rounded-xl p-3 sm:p-4 shadow-sm relative overflow-hidden min-w-0">
           <div class="text-[11px] sm:text-xs text-slate-400 font-medium truncate">Active Equity</div>
-          <div id="metricEquity" class="text-base sm:text-2xl font-bold mt-1 text-white truncate">€0.00</div>
+          <div id="metricEquity" class="text-xl sm:text-2xl font-bold mt-1 text-white truncate">€0.00</div>
           <div id="metricPosCount" class="text-[11px] sm:text-xs text-slate-400 mt-1.5 sm:mt-2 truncate">0 open holdings</div>
           <div class="absolute -right-2 -bottom-2 opacity-5 text-4xl text-indigo-400 pointer-events-none">
             <i class="fa-solid fa-layer-group"></i>
@@ -366,13 +318,25 @@
         <!-- Unrealized PnL -->
         <div class="bg-cardBg border border-borderCol rounded-xl p-3 sm:p-4 shadow-sm relative overflow-hidden min-w-0">
           <div class="text-[11px] sm:text-xs text-slate-400 font-medium truncate">Unrealized PnL</div>
-          <div id="metricUnrealizedPnl" class="text-base sm:text-2xl font-bold mt-1 text-slate-300 truncate">€0.00</div>
+          <div id="metricUnrealizedPnl" class="text-xl sm:text-2xl font-bold mt-1 text-slate-300 truncate">€0.00</div>
           <div id="metricUnrealizedPnlSub" class="text-[11px] sm:text-xs text-slate-400 mt-1.5 sm:mt-2 truncate">Open paper positions</div>
           <div class="absolute -right-2 -bottom-2 opacity-5 text-4xl text-amber-400 pointer-events-none">
             <i class="fa-solid fa-scale-balanced"></i>
           </div>
         </div>
       </div>
+
+      <!-- Pending Triggers Summary (tap to open the Triggers tab) -->
+      <button type="button" onclick="switchTab('triggers')" id="pendingTriggersSummary" class="w-full flex items-center justify-between gap-3 min-h-[52px] px-4 py-2 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-left cursor-pointer">
+        <span class="flex items-center gap-2.5 min-w-0">
+          <i class="fa-solid fa-crosshairs text-indigo-400"></i>
+          <span class="min-w-0">
+            <span id="pendingTriggersSummaryText" class="block text-sm font-semibold text-indigo-200">0 pending triggers</span>
+            <span id="pendingTriggersSummarySub" class="block text-xs text-slate-400">Automated limit orders waiting for their price</span>
+          </span>
+        </span>
+        <i class="fa-solid fa-chevron-right text-xs text-slate-400 shrink-0"></i>
+      </button>
 
       <!-- Portfolio Allocation & Active Positions -->
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-6">
@@ -382,7 +346,7 @@
             <h2 class="text-sm sm:text-base font-bold text-white flex items-center gap-2">
               <i class="fa-solid fa-cubes text-emerald-400"></i> Open Positions
             </h2>
-            <button onclick="loadPortfolio()" class="text-xs text-slate-400 hover:text-white flex items-center gap-1">
+            <button type="button" onclick="loadPortfolio()" class="text-xs text-slate-400 hover:text-white flex items-center gap-1 px-2">
               <i class="fa-solid fa-arrows-rotate"></i> Refresh
             </button>
           </div>
@@ -399,7 +363,7 @@
         <!-- Allocation Chart -->
         <div class="bg-cardBg border border-borderCol rounded-xl p-3.5 sm:p-5 shadow-sm flex flex-col items-center justify-between">
           <h2 class="text-sm sm:text-base font-bold text-white self-start flex items-center gap-2 mb-2">
-            <i class="fa-solid fa-chart-donut text-cyan-400"></i> Capital Allocation
+            <i class="fa-solid fa-chart-pie text-cyan-400"></i> Capital Allocation
           </h2>
           <div class="w-full max-w-[200px] sm:max-w-[240px] aspect-square flex items-center justify-center relative my-auto py-2">
             <canvas id="allocationChart"></canvas>
@@ -535,10 +499,10 @@
           <p class="text-xs text-slate-400">Pre-filtering US (S&P/Nasdaq) and EU (AEX, DAX, CAC) liquid leaders</p>
         </div>
         <!-- Market Filter Tabs -->
-        <div class="flex items-center bg-slate-800 p-1 rounded-lg border border-slate-700 text-xs font-semibold">
-          <button onclick="filterScreener('ALL')" class="screener-filter-btn px-3 py-1 rounded-md bg-emerald-600 text-white" data-market="ALL">All Markets</button>
-          <button onclick="filterScreener('EU')" class="screener-filter-btn px-3 py-1 rounded-md text-slate-400 hover:text-white" data-market="EU">🇪🇺 European</button>
-          <button onclick="filterScreener('US')" class="screener-filter-btn px-3 py-1 rounded-md text-slate-400 hover:text-white" data-market="US">🇺🇸 US Stocks</button>
+        <div class="grid grid-cols-3 sm:flex items-center bg-slate-800 p-1 rounded-lg border border-slate-700 text-xs font-semibold">
+          <button onclick="filterScreener('ALL')" class="screener-filter-btn px-3 py-2 rounded-md bg-emerald-600 text-white" data-market="ALL">All Markets</button>
+          <button onclick="filterScreener('EU')" class="screener-filter-btn px-3 py-2 rounded-md text-slate-400 hover:text-white" data-market="EU">🇪🇺 European</button>
+          <button onclick="filterScreener('US')" class="screener-filter-btn px-3 py-2 rounded-md text-slate-400 hover:text-white" data-market="US">🇺🇸 US Stocks</button>
         </div>
       </div>
 
@@ -558,7 +522,7 @@
         <p class="text-xs text-slate-400 mb-4">Enter any US or European ticker symbol (e.g., <code>NVDA</code>, <code>AAPL</code>, <code>ASML.AS</code>, <code>INGA.AS</code>, <code>SAP.DE</code>)</p>
         
         <div class="flex flex-col sm:flex-row gap-2 max-w-lg">
-          <input type="text" id="analyzeInput" placeholder="Enter ticker (e.g. ASML.AS, NVDA)..." class="bg-slate-900 border border-slate-700 rounded-lg px-3.5 py-2 text-sm text-white focus:outline-none focus:border-emerald-500 uppercase tracking-wider font-semibold flex-1">
+          <input type="text" id="analyzeInput" inputmode="text" autocapitalize="characters" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="go" placeholder="Ticker, e.g. NVDA or ASML.AS" class="bg-slate-900 border border-slate-700 rounded-lg px-3.5 py-2 text-sm text-white focus:outline-none focus:border-emerald-500 uppercase tracking-wider font-semibold flex-1">
           <button onclick="runOnDemandAnalysis()" id="analyzeBtn" class="bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs sm:text-sm px-5 py-2 rounded-lg flex items-center justify-center gap-2 transition-all active:scale-95">
             <i class="fa-solid fa-users-viewfinder"></i> Convene Debate
           </button>
@@ -650,8 +614,8 @@
 
         <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 pt-1">
           <div class="relative flex-1">
-            <i class="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-slate-500 text-xs"></i>
-            <input type="text" id="triggerTickerInput" placeholder="Enter stock ticker (e.g. NVDA, ASML.AS, AAPL)..." class="w-full bg-slate-900/80 border border-slate-700 rounded-lg pl-8 pr-3 py-1.5 text-xs text-white uppercase placeholder-slate-500 focus:outline-none focus:border-indigo-500 font-mono">
+            <i class="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-xs"></i>
+            <input type="text" id="triggerTickerInput" inputmode="text" autocapitalize="characters" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="go" placeholder="Ticker, e.g. NVDA or ASML.AS" class="w-full bg-slate-900/80 border border-slate-700 rounded-lg pl-8 pr-3 py-2 text-xs text-white uppercase placeholder-slate-500 focus:outline-none focus:border-indigo-500 font-mono">
           </div>
           <button onclick="armTriggerFromInput()" id="armTriggerBtn" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold px-4 py-2 rounded-lg shadow-sm transition-all flex items-center justify-center gap-1.5 active:scale-95 whitespace-nowrap cursor-pointer">
             <i class="fa-solid fa-wand-magic-sparkles"></i> AI Calculate & Arm Trigger
@@ -680,7 +644,7 @@
           <i class="fa-solid fa-clock-rotate-left text-slate-400"></i> Trigger Execution History
         </h3>
         <div class="overflow-x-auto">
-          <table class="w-full min-w-[520px] text-left text-xs text-slate-300">
+          <table class="responsive-table w-full min-w-[520px] text-left text-xs text-slate-300">
             <thead class="bg-slate-900/60 uppercase font-semibold text-slate-400 border-b border-borderCol">
               <tr>
                 <th class="py-2.5 px-3">Ticker</th>
@@ -763,7 +727,7 @@
 
       <div class="bg-cardBg border border-borderCol rounded-xl overflow-hidden shadow-sm">
         <div class="overflow-x-auto">
-          <table class="w-full min-w-[650px] text-left text-xs sm:text-sm">
+          <table class="responsive-table w-full min-w-[650px] text-left text-xs sm:text-sm">
             <thead class="bg-slate-800/70 border-b border-borderCol text-slate-400 uppercase tracking-wider font-semibold text-[11px]">
               <tr>
                 <th class="py-3 px-4">Date</th>
@@ -899,30 +863,30 @@
         </h2>
 
         <!-- Trading Mode (Paper vs Live) -->
-        <div class="flex items-center justify-between border-b border-borderCol/60 pb-4">
+        <div class="flex items-center justify-between gap-3 border-b border-borderCol/60 pb-4">
           <div>
-            <label class="text-sm font-semibold text-white">Execution Mode</label>
+            <label for="settingTradingMode" class="text-sm font-semibold text-white">Execution Mode</label>
             <p class="text-xs text-slate-400">Switch dynamically between Paper Simulation and Live Broker execution.</p>
           </div>
-          <select id="settingTradingMode" onchange="saveSettings()" class="bg-slate-800 border border-slate-700 text-white text-xs rounded-lg px-3 py-1.5 focus:outline-none focus:border-emerald-500 font-medium">
+          <select id="settingTradingMode" onchange="onTradingModeChange(this)" class="bg-slate-800 border border-slate-700 text-white text-xs rounded-lg px-3 py-2 shrink-0 focus:outline-none focus:border-emerald-500 font-medium">
             <option value="PAPER">Paper Trading</option>
             <option value="LIVE">Live Trading (IBKR)</option>
           </select>
         </div>
 
         <!-- Auto-Buy Toggle -->
-        <div class="flex items-center justify-between">
+        <div class="flex items-center justify-between gap-3">
           <div>
-            <label class="text-sm font-semibold text-white">Automated Buying</label>
+            <label for="settingAutoBuy" class="text-sm font-semibold text-white">Automated Buying</label>
             <p class="text-xs text-slate-400">Allow agent committee to automatically place buy orders on high conviction signals.</p>
           </div>
-          <input type="checkbox" id="settingAutoBuy" onchange="saveSettings()" class="w-5 h-5 accent-emerald-500 rounded cursor-pointer">
+          <span class="check-wrap"><input type="checkbox" id="settingAutoBuy" onchange="onAutoBuyChange(this)" class="w-6 h-6 accent-emerald-500 rounded cursor-pointer"></span>
         </div>
 
         <!-- Consensus Score Threshold -->
         <div class="space-y-2">
-          <div class="flex justify-between text-sm">
-            <label class="font-semibold text-white">Minimum Consensus Score for Auto-Buy</label>
+          <div class="flex justify-between gap-3 text-sm">
+            <label for="settingMinScore" class="font-semibold text-white">Minimum Consensus Score for Auto-Buy</label>
             <span id="consensusScoreLabel" class="text-emerald-400 font-bold">70 / 100</span>
           </div>
           <input type="range" id="settingMinScore" min="50" max="95" value="70" oninput="document.getElementById('consensusScoreLabel').innerText = this.value + ' / 100'" onchange="saveSettings()" class="w-full accent-emerald-500 cursor-pointer">
@@ -930,8 +894,8 @@
 
         <!-- Position Sizing % -->
         <div class="space-y-2">
-          <div class="flex justify-between text-sm">
-            <label class="font-semibold text-white">Default Position Sizing (% of Equity)</label>
+          <div class="flex justify-between gap-3 text-sm">
+            <label for="settingPosSize" class="font-semibold text-white">Default Position Sizing (% of Equity)</label>
             <span id="posSizeLabel" class="text-cyan-400 font-bold">8.0%</span>
           </div>
           <input type="range" id="settingPosSize" min="1" max="100" step="0.5" value="8.0" oninput="document.getElementById('posSizeLabel').innerText = this.value + '%'" onchange="saveSettings()" class="w-full accent-cyan-500 cursor-pointer">
@@ -945,8 +909,8 @@
 
         <!-- Maximum Open Positions -->
         <div class="space-y-2">
-          <div class="flex justify-between text-sm">
-            <label class="font-semibold text-white">Maximum Open Positions</label>
+          <div class="flex justify-between gap-3 text-sm">
+            <label for="settingMaxPositions" class="font-semibold text-white">Maximum Open Positions</label>
             <span id="maxPositionsLabel" class="text-indigo-400 font-bold">8 slots</span>
           </div>
           <input type="range" id="settingMaxPositions" min="1" max="25" step="1" value="8" oninput="document.getElementById('maxPositionsLabel').innerText = this.value + ' slots'" onchange="saveSettings()" class="w-full accent-indigo-500 cursor-pointer">
@@ -986,10 +950,10 @@
           <!-- Optional Absolute Cap (EUR) and Real-time Live Calculation Box -->
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
             <div class="space-y-1">
-              <label class="text-xs font-semibold text-slate-300">Max Deployable Cap (€ EUR, Optional)</label>
+              <label for="settingMaxDeployableEur" class="text-xs font-semibold text-slate-300">Max Deployable Cap (€ EUR, Optional)</label>
               <div class="relative">
                 <span class="absolute inset-y-0 left-0 pl-3 flex items-center text-slate-400 text-xs">€</span>
-                <input type="number" id="settingMaxDeployableEur" placeholder="No cap (use % limit)" min="0" step="50"
+                <input type="number" id="settingMaxDeployableEur" inputmode="decimal" autocomplete="off" placeholder="No cap (use % limit)" min="0" step="50"
                        oninput="recalcCapitalPreview()" onchange="saveSettings()"
                        class="w-full bg-slate-800 border border-slate-700 text-white text-xs rounded-lg pl-7 pr-3 py-2 focus:outline-none focus:border-emerald-500 font-mono">
               </div>
@@ -1019,17 +983,17 @@
         </div>
 
         <!-- Strict Market Hours Toggle -->
-        <div class="flex items-center justify-between border-t border-borderCol/60 pt-4">
+        <div class="flex items-center justify-between gap-3 border-t border-borderCol/60 pt-4">
           <div>
-            <label class="text-sm font-semibold text-white">Strict Market Hours</label>
+            <label for="settingMarketHours" class="text-sm font-semibold text-white">Strict Market Hours</label>
             <p class="text-xs text-slate-400">No trades can be executed in paper mode when European or US markets are closed (or on weekends).</p>
           </div>
-          <input type="checkbox" id="settingMarketHours" onchange="saveSettings()" class="w-5 h-5 accent-emerald-500 rounded cursor-pointer">
+          <span class="check-wrap"><input type="checkbox" id="settingMarketHours" onchange="saveSettings()" class="w-6 h-6 accent-emerald-500 rounded cursor-pointer"></span>
         </div>
 
         <!-- Explicit Save Settings Button -->
         <div class="border-t border-borderCol/60 pt-4 flex justify-end">
-          <button onclick="saveSettings()" id="saveSettingsBtn" class="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-sm transition-all active:scale-95 cursor-pointer">
+          <button onclick="saveSettings()" id="saveSettingsBtn" class="w-full sm:w-auto flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-sm transition-all active:scale-95 cursor-pointer">
             <i class="fa-solid fa-floppy-disk"></i>
             <span>Save All Settings</span>
           </button>
@@ -1037,12 +1001,12 @@
       </div>
 
       <!-- Broker Connection Diagnostics -->
-      <div class="bg-cardBg border border-borderCol rounded-xl p-5 shadow-sm space-y-4">
+      <div class="bg-cardBg border border-borderCol rounded-xl p-4 sm:p-5 shadow-sm space-y-4">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-borderCol pb-3">
           <h2 class="text-base font-bold text-white flex items-center gap-2">
             <i class="fa-solid fa-server text-indigo-400"></i> Broker Connection Diagnostics
           </h2>
-          <div class="flex items-center gap-2">
+          <div class="grid grid-cols-2 sm:flex items-center gap-2">
             <button onclick="pingBrokerStatus(true)" id="settingsPingBtn" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold shadow-sm transition-all active:scale-95 cursor-pointer">
               <i class="fa-solid fa-wifi" id="settingsPingIcon"></i>
               <span>Ping</span>
@@ -1089,24 +1053,24 @@
             </label>
             <span class="text-[11px] text-slate-400">Auto-persisted to .env & database</span>
           </div>
-          <div class="grid grid-cols-1 sm:grid-cols-4 gap-3 text-xs">
-            <div class="sm:col-span-2 space-y-1">
-              <label class="text-slate-400 text-[11px]">Gateway Host IP</label>
-              <input type="text" id="settingIbkrHost" placeholder="172.17.0.2" class="w-full bg-slate-800 border border-slate-700 text-white text-xs rounded-lg px-3 py-1.5 font-mono focus:outline-none focus:border-indigo-500">
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+            <div class="col-span-2 space-y-1">
+              <label for="settingIbkrHost" class="text-slate-400 text-[11px]">Gateway Host IP</label>
+              <input type="text" id="settingIbkrHost" inputmode="url" autocapitalize="none" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="172.17.0.2" class="w-full bg-slate-800 border border-slate-700 text-white text-xs rounded-lg px-3 py-2 font-mono focus:outline-none focus:border-indigo-500">
             </div>
             <div class="space-y-1">
-              <label class="text-slate-400 text-[11px]">Port (Bridge)</label>
-              <input type="number" id="settingIbkrPort" placeholder="4003" class="w-full bg-slate-800 border border-slate-700 text-white text-xs rounded-lg px-3 py-1.5 font-mono focus:outline-none focus:border-indigo-500">
+              <label for="settingIbkrPort" class="text-slate-400 text-[11px]">Port (Bridge)</label>
+              <input type="number" id="settingIbkrPort" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="4003" class="w-full bg-slate-800 border border-slate-700 text-white text-xs rounded-lg px-3 py-2 font-mono focus:outline-none focus:border-indigo-500">
             </div>
             <div class="space-y-1">
-              <label class="text-slate-400 text-[11px]">Client ID</label>
-              <input type="number" id="settingIbkrClientId" placeholder="1" class="w-full bg-slate-800 border border-slate-700 text-white text-xs rounded-lg px-3 py-1.5 font-mono focus:outline-none focus:border-indigo-500">
+              <label for="settingIbkrClientId" class="text-slate-400 text-[11px]">Client ID</label>
+              <input type="number" id="settingIbkrClientId" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="1" class="w-full bg-slate-800 border border-slate-700 text-white text-xs rounded-lg px-3 py-2 font-mono focus:outline-none focus:border-indigo-500">
             </div>
           </div>
           <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs pt-1">
             <div class="sm:col-span-2 space-y-1">
-              <label class="text-slate-400 text-[11px]">Account ID (Optional, e.g. DU1234567)</label>
-              <input type="text" id="settingIbkrAccountId" placeholder="Leave blank to auto-detect" class="w-full bg-slate-800 border border-slate-700 text-white text-xs rounded-lg px-3 py-1.5 font-mono focus:outline-none focus:border-indigo-500">
+              <label for="settingIbkrAccountId" class="text-slate-400 text-[11px]">Account ID (Optional, e.g. DU1234567)</label>
+              <input type="text" id="settingIbkrAccountId" inputmode="text" autocapitalize="characters" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="Leave blank to auto-detect" class="w-full bg-slate-800 border border-slate-700 text-white text-xs rounded-lg px-3 py-2 font-mono focus:outline-none focus:border-indigo-500">
             </div>
             <div class="flex items-end">
               <button onclick="saveBrokerConfig()" id="saveBrokerConfigBtn" class="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-white text-xs font-semibold shadow-sm transition-all active:scale-95 cursor-pointer">
@@ -1119,13 +1083,13 @@
       </div>
 
       <!-- Telegram & Integrations Status -->
-      <div class="bg-cardBg border border-borderCol rounded-xl p-5 shadow-sm space-y-4">
+      <div class="bg-cardBg border border-borderCol rounded-xl p-4 sm:p-5 shadow-sm space-y-4">
         <h2 class="text-base font-bold text-white flex items-center gap-2 border-b border-borderCol pb-3">
           <i class="fa-brands fa-telegram text-sky-400"></i> Telegram & AI Engine Status
         </h2>
 
         <div class="space-y-3 text-xs sm:text-sm">
-          <div class="flex items-center justify-between p-3 rounded-lg bg-slate-900/60 border border-borderCol">
+          <div class="flex flex-wrap items-center justify-between gap-2 p-3 rounded-lg bg-slate-900/60 border border-borderCol">
             <div class="flex items-center gap-2">
               <i class="fa-brands fa-telegram text-sky-400 text-lg"></i>
               <div>
@@ -1136,7 +1100,7 @@
             <span id="telegramStatusBadge" class="px-2 py-0.5 rounded text-xs font-bold bg-slate-800 text-slate-400">Not Configured</span>
           </div>
 
-          <div class="flex items-center justify-between p-3 rounded-lg bg-slate-900/60 border border-borderCol">
+          <div class="flex flex-wrap items-center justify-between gap-2 p-3 rounded-lg bg-slate-900/60 border border-borderCol">
             <div class="flex items-center gap-2">
               <i class="fa-solid fa-microchip text-purple-400 text-lg"></i>
               <div>
@@ -1158,7 +1122,7 @@
   </main>
 
   <!-- Toast Notification element -->
-  <div id="toast" class="fixed top-14 sm:top-16 right-3 sm:right-4 z-50 max-w-[calc(100vw-24px)] transform transition-all duration-300 translate-y-[-100px] opacity-0 pointer-events-none bg-slate-800 text-white border border-borderCol px-3.5 py-2 sm:px-4 sm:py-2.5 rounded-xl shadow-xl text-xs sm:text-sm flex items-center gap-2">
+  <div id="toast" role="status" aria-live="polite" class="fixed left-3 right-3 sm:left-auto sm:right-4 z-50 sm:max-w-md transform transition-all duration-300 translate-y-[-100px] opacity-0 pointer-events-none bg-slate-800 text-white border border-borderCol px-3.5 py-2 sm:px-4 sm:py-2.5 rounded-xl shadow-xl text-xs sm:text-sm flex items-center gap-2" style="top: calc(env(safe-area-inset-top) + 64px);">
     <i id="toastIcon" class="fa-solid fa-circle-check text-emerald-400"></i>
     <span id="toastMsg">Action executed.</span>
   </div>

@@ -2,20 +2,99 @@
 let allocationChart = null;
 let currentScreenerMarket = 'ALL';
 let currentAccountCash = 10000.0;
+let killSwitchActive = false;        // last known kill-switch state
+let lastSavedTradingMode = 'PAPER';  // used to revert the mode <select> when a switch is cancelled
+let currentTab = 'portfolio';
+let adviceReportsCache = [];         // keeps report objects out of the DOM (no JSON in attributes)
+
+// ------------------------------------------------------------------
+// Security helpers: every string that comes from the server (LLM text,
+// news-derived text, tickers, names, ...) must go through esc() before it
+// is interpolated into an innerHTML template.
+// ------------------------------------------------------------------
+function esc(value) {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/`/g, '&#96;');
+}
+
+// Escapes everything, then re-enables a tiny whitelist of attribute-less
+// formatting tags (the Telegram-style <b>/<i>/<code> markup used in review text).
+function safeRichText(value) {
+  return esc(value).replace(/&lt;(\/?)(b|strong|i|em|u|s|code|pre)&gt;/gi, '<$1$2>');
+}
+
+// Number formatting that tolerates null/undefined/strings from the API
+function num(value, digits = 2) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n.toFixed(digits) : (0).toFixed(digits);
+}
+function eur(value, digits = 2) {
+  const n = Number(value);
+  const v = Number.isFinite(n) ? n : 0;
+  return `€${v.toLocaleString('en-US', {minimumFractionDigits: digits, maximumFractionDigits: digits})}`;
+}
+
+// Small badge showing where a committee score came from ("llm" | "rules")
+function scoreSourceBadge(source) {
+  if (!source) return '';
+  const key = String(source).toLowerCase();
+  const label = key === 'llm' ? 'AI-oordeel' : (key === 'rules' ? 'Rekenregel' : null);
+  if (!label) return '';
+  const cls = key === 'llm'
+    ? 'bg-purple-500/15 text-purple-300 border-purple-500/30'
+    : 'bg-slate-700/60 text-slate-300 border-slate-600';
+  return `<span class="inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded border ${cls}" title="Score source: ${esc(key)}">${esc(label)}</span>`;
+}
 
 // Initialize on DOM Load
 document.addEventListener('DOMContentLoaded', () => {
   initChart();
   loadAllData();
-  // Auto-refresh every 30 seconds
+  switchTabUi('portfolio');
+
+  // Enter key submits the ticker inputs (on-screen keyboard "Go")
+  const analyzeInput = document.getElementById('analyzeInput');
+  if (analyzeInput) analyzeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); runOnDemandAnalysis(); } });
+  const triggerInput = document.getElementById('triggerTickerInput');
+  if (triggerInput) triggerInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); armTriggerFromInput(); } });
+
+  // Auto-refresh every 30 seconds (skipped while the browser tab is in the background)
   setInterval(() => {
+    if (document.hidden) return;
     loadPortfolio();
     loadMarketStatus();
     loadBrokerStatus();
+    refreshSystemStatus();
   }, 30000);
 });
 
-function showToast(message, isError = false) {
+// Event delegation for all dynamically rendered buttons (no inline handlers with data in them)
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('[data-action]');
+  if (!el) return;
+  const action = el.dataset.action;
+  const ticker = el.dataset.ticker || '';
+  switch (action) {
+    case 'close-position': closePosition(ticker); break;
+    case 'buy': executePaperBuy(ticker); break;
+    case 'arm-trigger': armAITrigger(ticker); break;
+    case 'analyze': analyzeDirect(ticker); break;
+    case 'inspect': inspectReport(Number(el.dataset.idx)); break;
+    case 'cancel-trigger': cancelTrigger(Number(el.dataset.id), ticker); break;
+    default: break;
+  }
+});
+
+let toastTimer = null;
+function showToast(message, kind = false) {
+  // kind: true | 'error' => error styling; false | 'info' | 'success' => normal
+  const isError = kind === true || kind === 'error';
   const toast = document.getElementById('toast');
   const msg = document.getElementById('toastMsg');
   const icon = document.getElementById('toastIcon');
@@ -30,10 +109,11 @@ function showToast(message, isError = false) {
   toast.classList.remove('translate-y-[-100px]', 'opacity-0');
   toast.classList.add('translate-y-0', 'opacity-100');
 
-  setTimeout(() => {
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
     toast.classList.remove('translate-y-0', 'opacity-100');
     toast.classList.add('translate-y-[-100px]', 'opacity-0');
-  }, 3500);
+  }, isError ? 6000 : 3500);
 }
 
 // Tab Metadata for Mobile Dropdown & Navigation
@@ -54,15 +134,15 @@ function toggleMobileDropdown() {
   const backdrop = document.getElementById('mobileDropdownBackdrop');
   const chevron = document.getElementById('mobileDropdownChevron');
   if (!menu) return;
+  const moreBtn = document.getElementById('mobileMenuDropdownBtn');
   const isHidden = menu.classList.contains('hidden');
   if (isHidden) {
     menu.classList.remove('hidden');
     if (backdrop) backdrop.classList.remove('hidden');
     if (chevron) chevron.classList.add('rotate-180');
+    if (moreBtn) moreBtn.setAttribute('aria-expanded', 'true');
   } else {
-    menu.classList.add('hidden');
-    if (backdrop) backdrop.classList.add('hidden');
-    if (chevron) chevron.classList.remove('rotate-180');
+    closeMobileDropdown();
   }
 }
 
@@ -71,9 +151,11 @@ function closeMobileDropdown() {
   const menu = document.getElementById('mobileDropdownMenu');
   const backdrop = document.getElementById('mobileDropdownBackdrop');
   const chevron = document.getElementById('mobileDropdownChevron');
+  const moreBtn = document.getElementById('mobileMenuDropdownBtn');
   if (menu) menu.classList.add('hidden');
   if (backdrop) backdrop.classList.add('hidden');
   if (chevron) chevron.classList.remove('rotate-180');
+  if (moreBtn) moreBtn.setAttribute('aria-expanded', 'false');
 }
 
 // Global click-outside listener to close mobile dropdown
@@ -93,7 +175,21 @@ document.addEventListener('keydown', (e) => {
 });
 
 // Tab Switching
+const MORE_TABS = ['screener', 'debate', 'memory', 'settings'];
+
+function switchTabUi(tabId) {
+  currentTab = tabId;
+  // Bottom nav active state ("More" lights up for the tabs that live inside it)
+  document.querySelectorAll('.bottom-nav-btn').forEach(btn => {
+    const isMore = btn.dataset.more === '1';
+    const active = isMore ? MORE_TABS.includes(tabId) : btn.dataset.tab === tabId;
+    btn.classList.toggle('active', active);
+    if (active) btn.setAttribute('aria-current', 'page'); else btn.removeAttribute('aria-current');
+  });
+}
+
 function switchTab(tabId) {
+  switchTabUi(tabId);
   // Hide all contents
   document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
   const target = document.getElementById(`tab-${tabId}`);
@@ -114,8 +210,10 @@ function switchTab(tabId) {
   const cfg = TAB_CONFIG[tabId] || { label: tabId, icon: 'fa-solid fa-bars' };
   const mobileLabel = document.getElementById('mobileDropdownActiveText');
   const mobileIcon = document.getElementById('mobileDropdownActiveIcon');
-  if (mobileLabel) mobileLabel.textContent = cfg.label;
-  if (mobileIcon) mobileIcon.className = `${cfg.icon} text-emerald-400 text-xs`;
+  const inMore = MORE_TABS.includes(tabId);
+  const SHORT = { screener: 'Screener', debate: 'Debate', memory: 'Memory', settings: 'Settings' };
+  if (mobileLabel) mobileLabel.textContent = inMore ? (SHORT[tabId] || cfg.label) : 'More';
+  if (mobileIcon) mobileIcon.className = inMore ? cfg.icon : 'fa-solid fa-ellipsis';
 
   // Update mobile dropdown items active state & checkmark
   document.querySelectorAll('.mobile-dropdown-item').forEach(item => {
@@ -135,6 +233,9 @@ function switchTab(tabId) {
   // Auto-close dropdown menu
   closeMobileDropdown();
 
+  // Start every section at the top (matters on phones where the page is long)
+  window.scrollTo(0, 0);
+
   // Load specific tab data on switch
   if (tabId === 'portfolio') { loadPortfolio(); loadBrokerStatus(); }
   if (tabId === 'advice') { loadRecommendations(); loadMarketReview(); loadWeeklyReviewComparison(); }
@@ -146,6 +247,7 @@ function switchTab(tabId) {
 }
 
 function loadAllData() {
+  refreshSystemStatus();
   loadMarketStatus();
   loadBrokerStatus();
   loadPortfolio();
@@ -156,7 +258,9 @@ function loadAllData() {
 
 // 1. Chart Initialization
 function initChart() {
-  const ctx = document.getElementById('allocationChart').getContext('2d');
+  const canvas = document.getElementById('allocationChart');
+  if (!canvas || typeof Chart === 'undefined') return; // CDN blocked: the rest of the page still works
+  const ctx = canvas.getContext('2d');
   allocationChart = new Chart(ctx, {
     type: 'doughnut',
     data: {
@@ -174,7 +278,7 @@ function initChart() {
       plugins: {
         legend: {
           position: 'bottom',
-          labels: { color: '#94a3b8', font: { size: 11 } }
+          labels: { color: '#94a3b8', font: { size: 12 }, boxWidth: 14 }
         }
       },
       cutout: '72%'
@@ -205,8 +309,8 @@ async function loadPortfolio() {
     if (modeBadge) {
       modeBadge.textContent = isLive ? 'LIVE' : 'PAPER';
       modeBadge.className = isLive
-        ? 'text-xs px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-400 font-semibold uppercase border border-rose-500/30'
-        : 'text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-semibold uppercase border border-emerald-500/30';
+        ? 'text-xs px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-400 font-semibold uppercase tracking-wider shrink-0 border border-rose-500/30'
+        : 'text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-semibold uppercase tracking-wider shrink-0 border border-emerald-500/30';
     }
     const pnlSub = document.getElementById('metricUnrealizedPnlSub');
     if (pnlSub) {
@@ -214,14 +318,25 @@ async function loadPortfolio() {
     }
 
     currentAccountCash = summary.total_account_cash_eur ?? summary.cash_eur ?? 0;
-    const deployableCash = summary.available_cash_eur ?? summary.usable_capital_eur ?? summary.cash_eur;
+    const deployableCash = Number(summary.available_cash_eur ?? summary.usable_capital_eur ?? summary.cash_eur) || 0;
     const protectedReserve = summary.protected_reserve_eur || 0;
     const maxUsagePct = summary.max_capital_usage_pct ?? 100;
     const maxCapEur = summary.max_deployable_capital_eur;
 
-    document.getElementById('metricTotalVal').textContent = `€${totalVal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
-    document.getElementById('metricCash').textContent = `€${deployableCash.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
-    document.getElementById('metricEquity').textContent = `€${equityVal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+    document.getElementById('metricTotalVal').textContent = eur(totalVal);
+    document.getElementById('metricCash').textContent = eur(deployableCash);
+    document.getElementById('metricEquity').textContent = eur(equityVal);
+
+    // Pending triggers summary (tap to open the Triggers tab)
+    const trigCount = Number(summary.pending_triggers_count) || 0;
+    const trigReserved = Number(summary.reserved_triggers_eur) || 0;
+    const trigText = document.getElementById('pendingTriggersSummaryText');
+    const trigSub = document.getElementById('pendingTriggersSummarySub');
+    if (trigText) trigText.textContent = `${trigCount} pending trigger${trigCount === 1 ? '' : 's'}`;
+    if (trigSub) trigSub.textContent = trigCount > 0 && trigReserved > 0
+      ? `${eur(trigReserved)} reserved for limit orders`
+      : 'Automated limit orders waiting for their price';
+    setTriggerNavBadge(trigCount);
 
     const limitBadge = document.getElementById('capitalLimitBadge');
     if (limitBadge) {
@@ -241,16 +356,16 @@ async function loadPortfolio() {
       const subParts = [];
 
       if (reservedTriggers > 0) {
-        subParts.push(`<span class="text-sky-400 font-medium" title="Capital earmarked for pending order triggers"><i class="fa-solid fa-clock"></i> €${reservedTriggers.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} reserved (${triggersCount} trigger${triggersCount > 1 ? 's' : ''})</span>`);
+        subParts.push(`<span class="text-sky-400 font-medium" title="Capital earmarked for pending order triggers"><i class="fa-solid fa-clock"></i> ${eur(reservedTriggers)} reserved (${triggersCount} trigger${triggersCount > 1 ? 's' : ''})</span>`);
       }
       if (protectedReserve > 0) {
-        subParts.push(`<span class="text-amber-400 font-medium"><i class="fa-solid fa-shield-halved"></i> €${protectedReserve.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} reserved</span>`);
+        subParts.push(`<span class="text-amber-400 font-medium"><i class="fa-solid fa-shield-halved"></i> ${eur(protectedReserve)} reserved</span>`);
       }
 
       if (subParts.length > 0) {
-        cashSub.innerHTML = `${subParts.join(' · ')} · Total €${currentAccountCash.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+        cashSub.innerHTML = `${subParts.join(' · ')} · Total ${eur(currentAccountCash)}`;
       } else {
-        cashSub.textContent = `Full buffer · Total account cash €${currentAccountCash.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+        cashSub.textContent = `Full buffer · Total account cash ${eur(currentAccountCash)}`;
       }
     }
 
@@ -261,11 +376,11 @@ async function loadPortfolio() {
 
     const sign = pnlVal >= 0 ? '+' : '';
     pnlElem.textContent = `${sign}€${pnlVal.toFixed(2)}`;
-    pnlElem.className = `text-xl sm:text-2xl font-bold mt-1 ${pnlVal >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
+    pnlElem.className = `text-xl sm:text-2xl font-bold mt-1 truncate ${pnlVal >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
 
     const retSign = totalReturnPct >= 0 ? '+' : '';
     returnElem.innerHTML = `<i class="fa-solid fa-arrow-trend-${totalReturnPct >= 0 ? 'up' : 'down'}"></i> ${retSign}${totalReturnPct.toFixed(2)}% total return`;
-    returnElem.className = `text-xs font-semibold mt-2 flex items-center gap-1 ${totalReturnPct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
+    returnElem.className = `text-[11px] sm:text-xs font-semibold mt-1.5 sm:mt-2 flex items-center gap-1 ${totalReturnPct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
     
     document.getElementById('metricPosCount').textContent = `${positions.length} open holdings`;
 
@@ -273,14 +388,14 @@ async function loadPortfolio() {
     if (allocationChart) {
       if (positions.length > 0) {
         const labels = ['Cash', ...positions.map(p => p.ticker)];
-        const dataVals = [summary.cash_eur, ...positions.map(p => p.current_value_eur)];
+        const dataVals = [Number(summary.cash_eur) || 0, ...positions.map(p => Number(p.current_value_eur) || 0)];
         const colors = ['#059669', '#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#f97316', '#6366f1'];
         allocationChart.data.labels = labels;
         allocationChart.data.datasets[0].data = dataVals;
         allocationChart.data.datasets[0].backgroundColor = colors.slice(0, labels.length);
       } else {
         allocationChart.data.labels = ['Cash', 'Invested'];
-        allocationChart.data.datasets[0].data = [summary.cash_eur, 0];
+        allocationChart.data.datasets[0].data = [Number(summary.cash_eur) || 0, 0];
         allocationChart.data.datasets[0].backgroundColor = ['#059669', '#3b82f6'];
       }
       allocationChart.update();
@@ -298,33 +413,37 @@ async function loadPortfolio() {
     }
 
     container.innerHTML = positions.map(pos => {
-      const pnlColor = pos.unrealized_pnl_eur >= 0 ? 'text-emerald-400' : 'text-rose-400';
-      const pnlSign = pos.unrealized_pnl_eur >= 0 ? '+' : '';
+      const pnl = Number(pos.unrealized_pnl_eur) || 0;
+      const pnlColor = pnl >= 0 ? 'text-emerald-400' : 'text-rose-400';
+      const pnlSign = pnl >= 0 ? '+' : '';
       return `
-        <div class="p-3.5 sm:p-4 rounded-xl bg-slate-900/70 border border-borderCol hover:border-slate-700 transition-colors flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div>
-            <div class="flex items-center gap-2">
-              <span class="font-bold text-white text-sm sm:text-base">${pos.ticker}</span>
-              <span class="text-xs text-slate-400 hidden sm:inline">${pos.name || ''}</span>
-              <span class="text-[11px] px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">${pos.shares} shs</span>
+        <div class="p-3.5 sm:p-4 rounded-xl bg-slate-900/70 border border-borderCol hover:border-slate-700 transition-colors space-y-3">
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <span class="font-bold text-white text-base">${esc(pos.ticker)}</span>
+                <span class="text-[11px] px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">${esc(pos.shares)} shs</span>
+              </div>
+              ${pos.name ? `<div class="text-xs text-slate-400 truncate">${esc(pos.name)}</div>` : ''}
             </div>
-            <div class="text-xs text-slate-400 mt-1 flex flex-wrap gap-x-3 gap-y-1">
-              <span>Entry: <strong class="text-slate-200">${pos.entry_price_native} ${pos.currency}</strong></span>
-              <span>Current: <strong class="text-white">${pos.current_price_native} ${pos.currency}</strong></span>
-              <span>Value: <strong class="text-emerald-400">€${pos.current_value_eur}</strong></span>
-            </div>
-            <div class="text-xs text-slate-400 mt-1.5 flex flex-wrap gap-2">
-              ${pos.stop_loss_native ? `<span class="px-2 py-0.5 rounded bg-rose-500/10 text-rose-400 border border-rose-500/20 text-[11px] font-medium"><i class="fa-solid fa-shield"></i> Stop: ${pos.stop_loss_native}</span>` : ''}
-              ${pos.take_profit_native ? `<span class="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[11px] font-medium"><i class="fa-solid fa-bullseye"></i> Target: ${pos.take_profit_native}</span>` : ''}
+            <div class="text-right shrink-0">
+              <div class="text-base font-bold ${pnlColor}">${pnlSign}€${num(pnl)}</div>
+              <div class="text-xs font-semibold ${pnlColor}">${pnlSign}${esc(pos.unrealized_pnl_pct)}%</div>
             </div>
           </div>
 
-          <div class="flex items-center justify-between sm:justify-end gap-4 border-t sm:border-t-0 border-borderCol/50 pt-2 sm:pt-0">
-            <div class="sm:text-right">
-              <div class="text-sm font-bold ${pnlColor}">${pnlSign}€${pos.unrealized_pnl_eur.toFixed(2)}</div>
-              <div class="text-xs font-semibold ${pnlColor}">${pnlSign}${pos.unrealized_pnl_pct}%</div>
+          <div class="text-xs text-slate-400 grid grid-cols-2 sm:flex sm:flex-wrap gap-x-4 gap-y-1">
+            <span>Entry: <strong class="text-slate-200">${esc(pos.entry_price_native)} ${esc(pos.currency)}</strong></span>
+            <span>Now: <strong class="text-white">${esc(pos.current_price_native)} ${esc(pos.currency)}</strong></span>
+            <span class="col-span-2 sm:col-span-1">Value: <strong class="text-emerald-400">€${esc(pos.current_value_eur)}</strong></span>
+          </div>
+
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div class="text-xs flex flex-wrap gap-2">
+              ${pos.stop_loss_native ? `<span class="px-2 py-0.5 rounded bg-rose-500/10 text-rose-400 border border-rose-500/20 text-[11px] font-medium"><i class="fa-solid fa-shield"></i> Stop: ${esc(pos.stop_loss_native)}</span>` : ''}
+              ${pos.take_profit_native ? `<span class="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[11px] font-medium"><i class="fa-solid fa-bullseye"></i> Target: ${esc(pos.take_profit_native)}</span>` : ''}
             </div>
-            <button onclick="closePosition('${pos.ticker}')" class="px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border border-rose-500/30 text-xs font-semibold flex items-center gap-1 active:scale-95 transition-all">
+            <button type="button" data-action="close-position" data-ticker="${esc(pos.ticker)}" class="px-4 min-h-[44px] rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border border-rose-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 active:scale-95 transition-all" aria-label="Close position ${esc(pos.ticker)}">
               <i class="fa-solid fa-xmark"></i> Close
             </button>
           </div>
@@ -342,9 +461,10 @@ async function loadRecommendations() {
   try {
     const res = await fetch('/api/recommendations');
     const reports = await res.json();
+    adviceReportsCache = Array.isArray(reports) ? reports : [];
     const container = document.getElementById('adviceContainer');
 
-    if (reports.length === 0) {
+    if (adviceReportsCache.length === 0) {
       container.innerHTML = `
         <div class="col-span-full text-center py-12 text-slate-400 text-sm bg-cardBg border border-borderCol rounded-xl p-6">
           <i class="fa-solid fa-compass text-3xl mb-3 text-slate-500 block"></i>
@@ -353,8 +473,9 @@ async function loadRecommendations() {
       return;
     }
 
-    container.innerHTML = reports.map(r => {
+    container.innerHTML = adviceReportsCache.map((r, idx) => {
       const isBuy = r.action === 'STRONG_BUY' || r.action === 'BUY';
+      const actionText = String(r.action || '').replace('_', ' ');
       const actionBadge = isBuy
         ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
         : (r.action === 'SELL' ? 'bg-rose-500/20 text-rose-400 border-rose-500/30' : 'bg-slate-700 text-slate-300 border-slate-600');
@@ -362,39 +483,40 @@ async function loadRecommendations() {
       return `
         <div class="stock-card bg-cardBg border border-borderCol rounded-xl p-4 sm:p-5 shadow-sm space-y-4 flex flex-col justify-between">
           <div class="space-y-2.5">
-            <div class="flex items-center justify-between">
-              <div class="flex items-center gap-2">
-                <span class="text-base font-bold text-white">${r.ticker}</span>
-                <span class="text-[11px] font-bold px-2.5 py-0.5 rounded-full border ${actionBadge}">${r.action.replace('_', ' ')}</span>
+            <div class="flex items-center justify-between gap-2">
+              <div class="flex flex-wrap items-center gap-2 min-w-0">
+                <span class="text-base font-bold text-white">${esc(r.ticker)}</span>
+                <span class="text-[11px] font-bold px-2.5 py-0.5 rounded-full border ${actionBadge}">${esc(actionText)}</span>
               </div>
-              <div class="text-right">
-                <div class="text-xs font-bold text-emerald-400">${r.consensus_score} <span class="text-slate-400 text-[10px]">/ 100</span></div>
+              <div class="text-right shrink-0">
+                <div class="text-sm font-bold text-emerald-400">${esc(r.consensus_score)} <span class="text-slate-400 text-[10px]">/ 100</span></div>
                 <div class="text-[10px] text-slate-500">Conviction</div>
+                ${scoreSourceBadge(r.score_source || (r.raw_signals && r.raw_signals.score_source))}
               </div>
             </div>
 
-            <p class="text-xs text-slate-300 leading-relaxed">${r.summary || ''}</p>
+            <p class="text-xs text-slate-300 leading-relaxed">${esc(r.summary)}</p>
 
             <div class="grid grid-cols-2 gap-2 text-[11px] bg-slate-900/60 p-2.5 rounded-lg border border-borderCol">
               <div>
                 <span class="text-slate-500 block">Target Profit</span>
-                <span class="text-emerald-400 font-semibold">${r.target_price ? r.target_price : 'N/A'}</span>
+                <span class="text-emerald-400 font-semibold">${r.target_price ? esc(r.target_price) : 'N/A'}</span>
               </div>
               <div>
                 <span class="text-slate-500 block">Stop Loss</span>
-                <span class="text-rose-400 font-semibold">${r.stop_loss ? r.stop_loss : 'N/A'}</span>
+                <span class="text-rose-400 font-semibold">${r.stop_loss ? esc(r.stop_loss) : 'N/A'}</span>
               </div>
             </div>
           </div>
 
-          <div class="flex items-center gap-1.5 pt-2 border-t border-borderCol/60">
-            <button onclick="inspectReport('${encodeURIComponent(JSON.stringify(r))}')" class="flex-1 py-1.5 px-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium flex items-center justify-center gap-1 transition-all" title="View multi-agent debate">
+          <div class="grid grid-cols-3 gap-2 pt-2 border-t border-borderCol/60">
+            <button type="button" data-action="inspect" data-idx="${idx}" class="min-h-[44px] px-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium flex items-center justify-center gap-1 transition-all" title="View multi-agent debate">
               <i class="fa-solid fa-comments text-cyan-400"></i> Debate
             </button>
-            <button onclick="armAITrigger('${r.ticker}')" class="flex-1 py-1.5 px-2 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 text-xs font-bold flex items-center justify-center gap-1 transition-all" title="Arm AI-calculated limit price trigger">
+            <button type="button" data-action="arm-trigger" data-ticker="${esc(r.ticker)}" class="min-h-[44px] px-2 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 text-xs font-bold flex items-center justify-center gap-1 transition-all" title="Arm AI-calculated limit price trigger">
               <i class="fa-solid fa-crosshairs text-indigo-400"></i> Trigger
             </button>
-            <button onclick="executePaperBuy('${r.ticker}')" class="flex-1 py-1.5 px-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center justify-center gap-1 shadow-sm active:scale-95 transition-all" title="Execute immediate market buy">
+            <button type="button" data-action="buy" data-ticker="${esc(r.ticker)}" class="min-h-[44px] px-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center justify-center gap-1 shadow-sm active:scale-95 transition-all" title="Execute immediate market buy">
               <i class="fa-solid fa-cart-shopping"></i> Buy
             </button>
           </div>
@@ -430,27 +552,27 @@ async function loadScreener() {
         <div>
           <div class="flex items-center justify-between">
             <div>
-              <span class="font-bold text-white text-sm sm:text-base">${c.ticker}</span>
-              <span class="text-xs text-slate-400 ml-1.5">${c.name}</span>
+              <span class="font-bold text-white text-sm sm:text-base">${esc(c.ticker)}</span>
+              <span class="text-xs text-slate-400 ml-1.5">${esc(c.name)}</span>
             </div>
-            <span class="text-xs font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
-              Score ${c.pre_score}
+            <span class="text-xs font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20 whitespace-nowrap" title="Pre-filter score from the technical scanner (not the committee score)">
+              Scanner-score ${esc(c.pre_score)}
             </span>
           </div>
 
-          <div class="flex items-center justify-between text-xs text-slate-400 mt-2">
-            <span>Price: <strong class="text-white">${c.price} ${c.currency}</strong></span>
-            <span>RSI(14): <strong class="${c.rsi > 70 ? 'text-amber-400' : 'text-slate-200'}">${c.rsi}</strong></span>
-            <span>5d: <strong class="${c.return_5d_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${c.return_5d_pct >= 0 ? '+' : ''}${c.return_5d_pct}%</strong></span>
+          <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs text-slate-400 mt-2">
+            <span>Price: <strong class="text-white">${esc(c.price)} ${esc(c.currency)}</strong></span>
+            <span>RSI(14): <strong class="${c.rsi > 70 ? 'text-amber-400' : 'text-slate-200'}">${esc(c.rsi)}</strong></span>
+            <span>5d: <strong class="${c.return_5d_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${c.return_5d_pct >= 0 ? '+' : ''}${esc(c.return_5d_pct)}%</strong></span>
           </div>
 
           <div class="text-[11px] text-slate-300 mt-2 bg-slate-900/70 p-2 rounded border border-borderCol/60">
-            <div class="font-semibold text-cyan-400 mb-0.5">${c.setup_type}</div>
-            <div class="text-slate-400">${c.notes}</div>
+            <div class="font-semibold text-cyan-400 mb-0.5">${esc(c.setup_type)}</div>
+            <div class="text-slate-400">${esc(c.notes)}</div>
           </div>
         </div>
 
-        <button onclick="analyzeDirect('${c.ticker}')" class="w-full py-1.5 px-3 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 text-xs font-bold flex items-center justify-center gap-1.5 transition-all">
+        <button type="button" data-action="analyze" data-ticker="${esc(c.ticker)}" class="w-full min-h-[44px] px-3 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 text-xs font-bold flex items-center justify-center gap-1.5 transition-all">
           <i class="fa-solid fa-users-viewfinder"></i> Analyze with Committee
         </button>
       </div>
@@ -466,9 +588,9 @@ function filterScreener(market) {
   currentScreenerMarket = market;
   document.querySelectorAll('.screener-filter-btn').forEach(b => {
     if (b.dataset.market === market) {
-      b.className = 'screener-filter-btn px-3 py-1 rounded-md bg-emerald-600 text-white';
+      b.className = 'screener-filter-btn px-3 py-2 rounded-md bg-emerald-600 text-white';
     } else {
-      b.className = 'screener-filter-btn px-3 py-1 rounded-md text-slate-400 hover:text-white';
+      b.className = 'screener-filter-btn px-3 py-2 rounded-md text-slate-400 hover:text-white';
     }
   });
   loadScreener();
@@ -526,33 +648,36 @@ function renderDebateReport(report) {
   const actionColor = isBuy ? 'text-emerald-400 bg-emerald-500/20 border-emerald-500/30' : (report.action === 'SELL' ? 'text-rose-400 bg-rose-500/20 border-rose-500/30' : 'text-amber-400 bg-amber-500/20 border-amber-500/30');
 
   // Verdict Card
+  const risk = report.risk || {};
+  const actionText = String(report.action || '').replace('_', ' ');
   document.getElementById('verdictCard').innerHTML = `
     <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-borderCol/60 pb-4">
-      <div>
-        <div class="flex items-center gap-3">
-          <h2 class="text-xl font-bold text-white">${report.ticker}</h2>
-          <span class="text-xs text-slate-400">${report.name || ''}</span>
-          <span class="text-xs px-2.5 py-0.5 rounded-full font-bold border ${actionColor}">${report.action.replace('_', ' ')}</span>
+      <div class="min-w-0">
+        <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <h2 class="text-xl font-bold text-white">${esc(report.ticker)}</h2>
+          <span class="text-xs text-slate-400">${esc(report.name)}</span>
+          <span class="text-xs px-2.5 py-0.5 rounded-full font-bold border ${actionColor}">${esc(actionText)}</span>
         </div>
-        <p class="text-xs text-slate-300 mt-1 max-w-2xl">${report.summary}</p>
+        <p class="text-xs text-slate-300 mt-1 max-w-2xl">${esc(report.summary)}</p>
       </div>
 
-      <div class="flex items-center gap-3 self-start sm:self-auto">
-        <div class="text-right">
-          <div class="text-2xl font-black text-emerald-400">${report.consensus_score}</div>
+      <div class="flex items-center justify-between sm:justify-end gap-3">
+        <div class="text-left sm:text-right">
+          <div class="text-2xl font-black text-emerald-400">${esc(report.consensus_score)}</div>
           <div class="text-[10px] text-slate-400 uppercase">Consensus Score</div>
+          ${scoreSourceBadge(report.score_source)}
         </div>
-        <button onclick="executePaperBuy('${report.ticker}')" class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-md active:scale-95 transition-all">
+        <button type="button" data-action="buy" data-ticker="${esc(report.ticker)}" class="px-4 min-h-[44px] rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-md active:scale-95 transition-all">
           <i class="fa-solid fa-cart-shopping mr-1"></i> Execute Trade
         </button>
       </div>
     </div>
 
     <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs mt-3">
-      <div><span class="text-slate-500">Current Price:</span> <strong class="text-white">${report.price} ${report.currency}</strong></div>
-      <div><span class="text-slate-500">Target Profit:</span> <strong class="text-emerald-400">${report.risk.take_profit_price}</strong></div>
-      <div><span class="text-slate-500">Stop Loss:</span> <strong class="text-rose-400">${report.risk.stop_loss_price}</strong></div>
-      <div><span class="text-slate-500">Risk-to-Reward:</span> <strong class="text-cyan-400">${report.risk.risk_reward_ratio}:1</strong></div>
+      <div><span class="text-slate-500 block sm:inline">Current Price:</span> <strong class="text-white">${esc(report.price)} ${esc(report.currency)}</strong></div>
+      <div><span class="text-slate-500 block sm:inline">Target Profit:</span> <strong class="text-emerald-400">${esc(risk.take_profit_price)}</strong></div>
+      <div><span class="text-slate-500 block sm:inline">Stop Loss:</span> <strong class="text-rose-400">${esc(risk.stop_loss_price)}</strong></div>
+      <div><span class="text-slate-500 block sm:inline">Risk-to-Reward:</span> <strong class="text-cyan-400">${esc(risk.risk_reward_ratio)}:1</strong></div>
     </div>
   `;
 
@@ -581,8 +706,9 @@ function renderDebateReport(report) {
   document.getElementById('debateTranscriptBox').textContent = report.debate_transcript;
 }
 
-function inspectReport(reportJsonStr) {
-  const r = JSON.parse(decodeURIComponent(reportJsonStr));
+function inspectReport(idx) {
+  const r = adviceReportsCache[idx];
+  if (!r) return;
   switchTab('debate');
   document.getElementById('analyzeInput').value = r.ticker;
   document.getElementById('debateOutputArea').classList.remove('hidden');
@@ -590,6 +716,7 @@ function inspectReport(reportJsonStr) {
     ticker: r.ticker,
     action: r.action,
     consensus_score: r.consensus_score,
+    score_source: r.score_source || (r.raw_signals && r.raw_signals.score_source),
     summary: r.summary,
     price: r.target_price ? (r.target_price * 0.92).toFixed(2) : 100,
     currency: 'USD',
@@ -599,6 +726,8 @@ function inspectReport(reportJsonStr) {
     risk: { approved: true, take_profit_price: r.target_price, stop_loss_price: r.stop_loss, risk_reward_ratio: 2.1, risk_summary: r.risk_summary || 'Risk guardrails applied' },
     debate_transcript: r.debate_transcript || 'Full transcript archived.'
   });
+  const out = document.getElementById('debateOutputArea');
+  if (out && out.scrollIntoView) out.scrollIntoView({ block: 'start' });
 }
 
 // 6. Trade History
@@ -609,7 +738,7 @@ async function loadTrades() {
     const tbody = document.getElementById('tradeHistoryTableBody');
 
     if (trades.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="8" class="text-center py-8 text-slate-400">No trades executed yet.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="9" class="text-center py-8 text-slate-400">No trades executed yet.</td></tr>`;
       return;
     }
 
@@ -619,21 +748,21 @@ async function loadTrades() {
         ? '<span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold text-xs">BUY</span>'
         : '<span class="px-2 py-0.5 rounded bg-rose-500/20 text-rose-400 font-bold text-xs">SELL</span>';
 
-      const pnlText = t.realized_pnl_eur !== null
-        ? `<span class="${t.realized_pnl_eur >= 0 ? 'text-emerald-400' : 'text-rose-400'} font-semibold">${t.realized_pnl_eur >= 0 ? '+' : ''}€${t.realized_pnl_eur.toFixed(2)} (${t.realized_pnl_pct}%)</span>`
+      const pnlText = (t.realized_pnl_eur !== null && t.realized_pnl_eur !== undefined)
+        ? `<span class="${t.realized_pnl_eur >= 0 ? 'text-emerald-400' : 'text-rose-400'} font-semibold">${t.realized_pnl_eur >= 0 ? '+' : ''}€${num(t.realized_pnl_eur)} (${esc(t.realized_pnl_pct)}%)</span>`
         : '<span class="text-slate-500">-</span>';
 
       return `
         <tr class="hover:bg-slate-800/40 transition-colors">
-          <td class="py-3 px-4 text-slate-400 whitespace-nowrap">${t.executed_at}</td>
-          <td class="py-3 px-4">${typeBadge}</td>
-          <td class="py-3 px-4 font-bold text-white">${t.ticker}</td>
-          <td class="py-3 px-4 text-slate-300">${t.shares}</td>
-          <td class="py-3 px-4 text-slate-300">${t.price_native} ${t.currency}</td>
-          <td class="py-3 px-4 text-slate-200 font-semibold">€${t.total_eur.toFixed(2)}</td>
-          <td class="py-3 px-4 text-slate-400 font-mono text-xs">€${(t.fee_eur !== undefined && t.fee_eur !== null) ? Number(t.fee_eur).toFixed(2) : '0.00'}</td>
-          <td class="py-3 px-4">${pnlText}</td>
-          <td class="py-3 px-4 text-slate-400 text-xs truncate max-w-xs">${t.rationale || ''}</td>
+          <td data-label="Date" class="py-3 px-4 text-slate-400 whitespace-nowrap">${esc(t.executed_at)}</td>
+          <td data-label="Type" class="py-3 px-4">${typeBadge}</td>
+          <td data-label="Asset" class="py-3 px-4 font-bold text-white">${esc(t.ticker)}</td>
+          <td data-label="Shares" class="py-3 px-4 text-slate-300">${esc(t.shares)}</td>
+          <td data-label="Price" class="py-3 px-4 text-slate-300">${esc(t.price_native)} ${esc(t.currency)}</td>
+          <td data-label="Total (EUR)" class="py-3 px-4 text-slate-200 font-semibold">€${num(t.total_eur)}</td>
+          <td data-label="Fee (€)" class="py-3 px-4 text-slate-400 font-mono text-xs">€${(t.fee_eur !== undefined && t.fee_eur !== null) ? num(t.fee_eur) : '0.00'}</td>
+          <td data-label="Realized PnL" class="py-3 px-4">${pnlText}</td>
+          <td data-label="Rationale" class="cell-wide py-3 px-4 text-slate-400 text-xs truncate max-w-xs" title="${esc(t.rationale)}">${esc(t.rationale)}</td>
         </tr>
       `;
     }).join('');
@@ -644,8 +773,13 @@ async function loadTrades() {
 }
 
 // 7. Trading Actions
+function isLiveMode() {
+  return (lastBrokerStatus && String(lastBrokerStatus.trading_mode || '').toUpperCase() === 'LIVE') || lastSavedTradingMode === 'LIVE';
+}
+
 async function executePaperBuy(ticker) {
-  if (!confirm(`Execute paper trade BUY order for ${ticker}?`)) return;
+  const modeLabel = isLiveMode() ? 'LIVE (real money)' : 'paper';
+  if (!confirm(`Execute ${modeLabel} BUY order for ${ticker} at market price?`)) return;
 
   try {
     const res = await fetch('/api/trade/buy', {
@@ -667,7 +801,8 @@ async function executePaperBuy(ticker) {
 }
 
 async function closePosition(ticker) {
-  if (!confirm(`Close open position for ${ticker} at market price?`)) return;
+  const modeLabel = isLiveMode() ? 'LIVE (real money)' : 'paper';
+  if (!confirm(`SELL: close the whole ${modeLabel} position in ${ticker} at market price?`)) return;
 
   try {
     const res = await fetch('/api/trade/sell', {
@@ -723,7 +858,7 @@ async function loadBrokerStatus(force = false) {
   if (force) {
     if (dot) dot.className = 'w-2 h-2 rounded-full bg-amber-400 animate-ping';
     if (text) text.textContent = 'Broker: Probing...';
-    if (mobDot) mobDot.className = 'w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping';
+    if (mobDot) mobDot.className = 'w-2 h-2 rounded-full bg-amber-400 animate-ping';
     if (mobText) mobText.textContent = 'Broker: Probing...';
     if (pingIcon) pingIcon.classList.add('fa-spin');
     if (pingBtn) pingBtn.disabled = true;
@@ -746,6 +881,10 @@ async function loadBrokerStatus(force = false) {
       };
     }
     lastBrokerStatus = data;
+    if (typeof data.kill_switch_active === 'boolean') {
+      killSwitchActive = data.kill_switch_active;
+      renderKillSwitch();
+    }
 
     const isConnected = !!data.connected;
     const brokerName = data.broker || 'BROKER';
@@ -754,10 +893,10 @@ async function loadBrokerStatus(force = false) {
     // 1. Update Header Badge & Mobile Pill
     if (mobDot && mobText) {
       if (isConnected) {
-        mobDot.className = 'w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse';
+        mobDot.className = 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse';
         mobText.textContent = isLive ? `${brokerName}: Online` : `${brokerName}: Active`;
       } else {
-        mobDot.className = 'w-1.5 h-1.5 rounded-full bg-rose-500';
+        mobDot.className = 'w-2 h-2 rounded-full bg-rose-500';
         mobText.textContent = `${brokerName}: Offline`;
       }
     }
@@ -766,12 +905,12 @@ async function loadBrokerStatus(force = false) {
       if (isConnected) {
         dot.className = 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse';
         text.textContent = isLive ? `${brokerName}: Online` : `${brokerName}: Active`;
-        badge.className = 'flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-medium transition-colors cursor-pointer hover:border-emerald-400';
+        badge.className = 'hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-medium transition-colors cursor-pointer hover:border-emerald-400';
         badge.title = `${brokerName} Connected (${data.latency_ms !== null && data.latency_ms !== undefined ? data.latency_ms + 'ms' : 'Ready'})\nClick to test connection`;
       } else {
         dot.className = 'w-2 h-2 rounded-full bg-rose-500';
         text.textContent = `${brokerName}: Offline`;
-        badge.className = 'flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs font-medium transition-colors cursor-pointer hover:border-rose-400';
+        badge.className = 'hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs font-medium transition-colors cursor-pointer hover:border-rose-400';
         badge.title = `${brokerName} Disconnected: ${data.message || 'Unreachable'}\nClick to retest`;
       }
     }
@@ -852,10 +991,14 @@ async function loadBrokerStatus(force = false) {
     }
   } catch (err) {
     console.error('Failed to load broker status:', err);
+    const mobErrDot = document.getElementById('mobileBrokerStatusDot');
+    const mobErrText = document.getElementById('mobileBrokerStatusText');
+    if (mobErrDot) mobErrDot.className = 'w-2 h-2 rounded-full bg-rose-500';
+    if (mobErrText) mobErrText.textContent = 'Broker: Error';
     if (badge && dot && text) {
       dot.className = 'w-2 h-2 rounded-full bg-rose-500';
       text.textContent = 'Broker: Error';
-      badge.className = 'flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs font-medium';
+      badge.className = 'hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs font-medium';
     }
     if (force) showToast('Failed to contact server for broker status', true);
   } finally {
@@ -876,15 +1019,15 @@ async function loadMarketStatus() {
     const mobMarketText = document.getElementById('mobileMarketStatusText');
     if (msData.is_weekend) {
       textEl.textContent = 'Weekend (Markets Closed)';
-      badge.className = 'hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700 text-amber-400 text-xs font-medium';
+      badge.className = 'hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700 text-amber-400 text-xs font-medium';
       if (mobMarketText) mobMarketText.textContent = 'Weekend (Closed)';
     } else if (msData.eu_market.is_open || msData.us_market.is_open) {
       textEl.textContent = `🇪🇺 EU: ${msData.eu_market.status} | 🇺🇸 US: ${msData.us_market.status}`;
-      badge.className = 'hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-medium';
+      badge.className = 'hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-medium';
       if (mobMarketText) mobMarketText.textContent = 'Markets: Open';
     } else {
       textEl.textContent = '🇪🇺 EU: CLOSED | 🇺🇸 US: CLOSED';
-      badge.className = 'hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700 text-slate-400 text-xs font-medium';
+      badge.className = 'hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700 text-slate-400 text-xs font-medium';
       if (mobMarketText) mobMarketText.textContent = 'Markets: Closed';
     }
   } catch (err) {
@@ -899,12 +1042,7 @@ async function loadSettings() {
     const data = await res.json();
 
     document.getElementById('settingAutoBuy').checked = data.auto_buy_enabled;
-    document.getElementById('autoBuyStatusText').textContent = data.auto_buy_enabled ? 'Active' : 'Paused';
-    const mobAutoBuy = document.getElementById('mobileAutoBuyText');
-    if (mobAutoBuy) mobAutoBuy.textContent = data.auto_buy_enabled ? 'On' : 'Off';
-    document.getElementById('autoBuyBadge').className = data.auto_buy_enabled
-      ? 'flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-medium'
-      : 'flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700 text-slate-400 text-xs font-medium';
+    renderAutoBuyStatus(data.auto_buy_enabled);
 
     document.getElementById('settingMinScore').value = data.min_consensus_score;
     document.getElementById('consensusScoreLabel').textContent = `${data.min_consensus_score} / 100`;
@@ -956,6 +1094,7 @@ async function loadSettings() {
 
     if (document.getElementById('settingTradingMode') && data.trading_mode) {
       document.getElementById('settingTradingMode').value = data.trading_mode.toUpperCase();
+      lastSavedTradingMode = data.trading_mode.toUpperCase();
     }
 
     if (document.getElementById('settingMarketHours')) {
@@ -1073,20 +1212,127 @@ async function saveSettings() {
     });
     if (res.ok) {
       showToast('Settings saved successfully.');
-      document.getElementById('autoBuyStatusText').textContent = autoBuy ? 'Active' : 'Paused';
-      const mobAutoBuy = document.getElementById('mobileAutoBuyText');
-      if (mobAutoBuy) mobAutoBuy.textContent = autoBuy ? 'On' : 'Off';
+      renderAutoBuyStatus(autoBuy);
+      if (tradingMode) lastSavedTradingMode = tradingMode;
       recalcCapitalPreview();
       await loadPortfolio();
       await loadBrokerStatus();
       if (typeof loadTriggers === 'function') await loadTriggers();
     } else {
-      const err = await res.json();
+      const err = await res.json().catch(() => ({}));
       showToast(err.detail || 'Failed to save settings.', true);
+      // Server refused: reload the real values so the form does not lie
+      loadSettings();
     }
   } catch (e) {
     showToast('Failed to save settings.', true);
   }
+}
+
+// Mode switch: LIVE trades real money, so ask first and revert the <select> on cancel
+function onTradingModeChange(selectEl) {
+  const wanted = String(selectEl.value || '').toUpperCase();
+  if (wanted === 'LIVE') {
+    const ok = confirm('Switch to LIVE trading?\n\nThe bot will place REAL orders with real money through your broker. Make sure the broker is connected and your risk limits are correct.');
+    if (!ok) {
+      selectEl.value = lastSavedTradingMode || 'PAPER';
+      return;
+    }
+  }
+  saveSettings();
+}
+
+// Enabling auto-buy while LIVE lets the bot spend real money without asking each time
+function onAutoBuyChange(checkboxEl) {
+  if (checkboxEl.checked && (isLiveMode() || lastSavedTradingMode === 'LIVE')) {
+    if (!confirm('Enable automated buying in LIVE mode? The committee will place real-money orders on its own.')) {
+      checkboxEl.checked = false;
+      return;
+    }
+  }
+  saveSettings();
+}
+
+// Auto-buy status in every place it is shown (desktop badge, mobile pill, settings)
+function renderAutoBuyStatus(enabled) {
+  const on = !!enabled;
+  const txt = document.getElementById('autoBuyStatusText');
+  if (txt) txt.textContent = on ? 'Active' : 'Paused';
+  const mobTxt = document.getElementById('mobileAutoBuyText');
+  if (mobTxt) mobTxt.textContent = on ? 'On' : 'Off';
+  const badge = document.getElementById('autoBuyBadge');
+  if (badge) {
+    badge.className = on
+      ? 'hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-medium'
+      : 'hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700 text-slate-400 text-xs font-medium';
+  }
+  const dot = document.getElementById('autoBuyDot');
+  if (dot) dot.className = on ? 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse' : 'w-2 h-2 rounded-full bg-slate-500';
+  const pill = document.getElementById('mobileAutoBuyPill');
+  if (pill) {
+    pill.className = on
+      ? 'md:hidden flex items-center gap-2 min-h-[44px] px-3 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 cursor-pointer'
+      : 'md:hidden flex items-center gap-2 min-h-[44px] px-3 rounded-full bg-slate-800 border border-slate-700 text-slate-400 cursor-pointer';
+  }
+  const mobDot = document.getElementById('mobileAutoBuyDot');
+  if (mobDot) mobDot.className = on ? 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse' : 'w-2 h-2 rounded-full bg-slate-500';
+}
+
+// Lightweight status refresh (auto-buy + trading mode) that does not touch the settings form
+async function refreshSystemStatus() {
+  try {
+    const res = await fetch('/api/settings');
+    if (!res.ok) return;
+    const data = await res.json();
+    renderAutoBuyStatus(data.auto_buy_enabled);
+    if (data.trading_mode) lastSavedTradingMode = String(data.trading_mode).toUpperCase();
+  } catch (e) {
+    console.debug('System status refresh failed:', e);
+  }
+}
+
+// Kill switch ---------------------------------------------------------
+function renderKillSwitch() {
+  document.querySelectorAll('#killSwitchBtn, #killSwitchBtnDesktop').forEach(btn => {
+    const label = btn.querySelector('.kill-switch-label');
+    if (killSwitchActive) {
+      btn.classList.add('kill-switch-engaged');
+      if (label) label.textContent = 'HALTED - Resume';
+      btn.title = 'Kill switch is ACTIVE: new automated buying is blocked. Tap to resume.';
+    } else {
+      btn.classList.remove('kill-switch-engaged');
+      if (label) label.textContent = 'Kill Switch';
+      btn.title = 'Emergency kill switch: halt or resume all new automated buying';
+    }
+  });
+}
+
+async function toggleKillSwitch() {
+  const activate = !killSwitchActive;
+  const msg = activate
+    ? 'ACTIVATE the kill switch?\n\nAll new automated buying will be blocked until you resume it. Open positions are not closed.'
+    : 'Resume trading? The kill switch will be released and the bot may place new buy orders again.';
+  if (!confirm(msg)) return;
+  try {
+    const res = await fetch(`/api/killswitch?active=${activate ? 'true' : 'false'}`, { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.success !== false) {
+      killSwitchActive = typeof data.kill_switch_active === 'boolean' ? data.kill_switch_active : activate;
+      renderKillSwitch();
+      showToast(killSwitchActive ? 'Kill switch ACTIVE: new buying halted.' : 'Kill switch released: trading resumed.', killSwitchActive ? true : false);
+    } else {
+      showToast(data.detail || 'Kill switch request failed.', true);
+    }
+  } catch (e) {
+    showToast('Network error toggling kill switch.', true);
+  }
+}
+
+function setTriggerNavBadge(count) {
+  const b = document.getElementById('bottomNavTriggerBadge');
+  if (!b) return;
+  if (count > 0) { b.textContent = String(count); b.classList.remove('hidden'); }
+  else { b.classList.add('hidden'); }
 }
 
 async function saveBrokerConfig() {
@@ -1162,13 +1408,13 @@ async function triggerQuickScan() {
       showToast('Market scan initiated! Inspecting candidates...');
       setTimeout(() => {
         loadAllData();
-        btn.innerHTML = `<i class="fa-solid fa-radar"></i> <span class="hidden sm:inline">Run Scan</span>`;
+        btn.innerHTML = `<i class="fa-solid fa-satellite-dish"></i> <span class="hidden sm:inline">Run Scan</span>`;
         btn.disabled = false;
       }, 3500);
     }
   } catch (e) {
     showToast('Scan trigger failed.', true);
-    btn.innerHTML = `<i class="fa-solid fa-radar"></i> <span class="hidden sm:inline">Run Scan</span>`;
+    btn.innerHTML = `<i class="fa-solid fa-satellite-dish"></i> <span class="hidden sm:inline">Run Scan</span>`;
     btn.disabled = false;
   }
 }
@@ -1212,6 +1458,9 @@ async function loadTriggers() {
     if (badge) {
       badge.textContent = `${pending.length} Active`;
     }
+    setTriggerNavBadge(pending.length);
+    const sumText = document.getElementById('pendingTriggersSummaryText');
+    if (sumText) sumText.textContent = `${pending.length} pending trigger${pending.length === 1 ? '' : 's'}`;
 
     // Render Pending Triggers
     const pendingContainer = document.getElementById('pendingTriggersContainer');
@@ -1238,19 +1487,21 @@ async function loadTriggers() {
           const distSign = distVal > 0 ? '+' : '';
           const distColor = Math.abs(distVal) <= 1.0 ? 'text-emerald-400' : 'text-slate-300';
 
+          const allocEur = Number(t.allocation_eur) || 0;
+
           return `
             <div class="bg-cardBg border border-indigo-500/30 rounded-xl p-4 shadow-sm space-y-3.5 flex flex-col justify-between hover:border-indigo-500/60 transition-colors">
               <div class="space-y-2">
                 <div class="flex items-center justify-between">
                   <div class="flex items-center gap-2">
-                    <span class="text-base font-bold text-white">${t.ticker}</span>
+                    <span class="text-base font-bold text-white">${esc(t.ticker)}</span>
                     <span class="text-[10px] font-bold px-2 py-0.5 rounded-full border ${typeBadge}">
                       ${isPullback ? '📉 Pullback' : '📈 Breakout'}
                     </span>
                   </div>
-                  <span class="text-[10px] text-slate-500 font-mono">#${t.id}</span>
+                  <span class="text-[10px] text-slate-500 font-mono">#${esc(t.id)}</span>
                 </div>
-                ${t.allocation_eur > 0 ? '' : `
+                ${allocEur > 0 ? '' : `
                 <div class="text-[11px] font-semibold text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg px-2.5 py-1.5 flex items-center gap-1.5" title="Higher-scored triggers hold the available cash or position slots. This trigger is funded automatically when cash or a slot frees up.">
                   <i class="fa-solid fa-hourglass-half"></i> Unfunded, waiting for cash
                 </div>`}
@@ -1258,35 +1509,35 @@ async function loadTriggers() {
                 <div class="grid grid-cols-2 gap-2 bg-slate-900/70 p-2.5 rounded-lg border border-borderCol text-xs">
                   <div>
                     <span class="text-slate-500 text-[10px] block">Trigger Price</span>
-                    <span class="text-indigo-400 font-bold">${t.target_price} ${t.currency}</span>
+                    <span class="text-indigo-400 font-bold">${esc(t.target_price)} ${esc(t.currency)}</span>
                   </div>
                   <div>
                     <span class="text-slate-500 text-[10px] block">Current Live Price</span>
-                    <span class="text-white font-semibold">${currPrice} ${t.currency || 'EUR'}</span>
+                    <span class="text-white font-semibold">${esc(currPrice)} ${esc(t.currency || 'EUR')}</span>
                   </div>
                   <div>
                     <span class="text-slate-500 text-[10px] block">Distance to Trigger</span>
-                    <span class="${distColor} font-bold">${distSign}${distVal}%</span>
+                    <span class="${distColor} font-bold">${distSign}${esc(distVal)}%</span>
                   </div>
                   <div>
                     <span class="text-slate-500 text-[10px] block">Alloc (EUR)</span>
-                    <span class="text-white font-semibold">€${t.allocation_eur.toLocaleString('en-US', {minimumFractionDigits: 2})}</span>
+                    <span class="text-white font-semibold">€${allocEur.toLocaleString('en-US', {minimumFractionDigits: 2})}</span>
                   </div>
                 </div>
 
-                <div class="flex justify-between text-[11px] text-slate-400 px-1">
-                  <span>SL: <strong class="text-rose-400">${t.stop_loss || 'N/A'}</strong></span>
-                  <span>TP: <strong class="text-emerald-400">${t.take_profit || 'N/A'}</strong></span>
-                  <span>Score: <strong class="text-indigo-300">${t.consensus_score || 75}</strong></span>
+                <div class="flex flex-wrap justify-between gap-x-3 text-[11px] text-slate-400 px-1">
+                  <span>SL: <strong class="text-rose-400">${esc(t.stop_loss || 'N/A')}</strong></span>
+                  <span>TP: <strong class="text-emerald-400">${esc(t.take_profit || 'N/A')}</strong></span>
+                  <span>Score: <strong class="text-indigo-300">${esc(t.consensus_score || 75)}</strong></span>
                 </div>
 
                 <p class="text-[11px] text-slate-300 bg-slate-900/40 p-2 rounded border border-borderCol/40 italic">
-                  "${t.ai_rationale || 'AI calculated tactical entry.'}"
+                  "${esc(t.ai_rationale || 'AI calculated tactical entry.')}"
                 </p>
               </div>
 
               <div class="pt-2 border-t border-borderCol/50 flex justify-end">
-                <button onclick="cancelTrigger(${t.id})" class="text-xs text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 px-2.5 py-1 rounded transition-colors flex items-center gap-1">
+                <button type="button" data-action="cancel-trigger" data-id="${esc(t.id)}" data-ticker="${esc(t.ticker)}" class="text-xs text-rose-400 hover:text-rose-300 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/20 px-4 min-h-[44px] rounded-lg transition-colors flex items-center gap-1.5">
                   <i class="fa-solid fa-ban"></i> Cancel Trigger
                 </button>
               </div>
@@ -1309,12 +1560,12 @@ async function loadTriggers() {
 
           return `
             <tr class="hover:bg-slate-800/40 transition-colors">
-              <td class="py-2.5 px-3 font-bold text-white">${t.ticker}</td>
-              <td class="py-2.5 px-3 text-slate-400">${t.trigger_type}</td>
-              <td class="py-2.5 px-3 font-semibold text-indigo-300">${t.target_price} ${t.currency}</td>
-              <td class="py-2.5 px-3">${statusBadge}</td>
-              <td class="py-2.5 px-3 text-slate-400 font-mono text-[11px]">${t.triggered_at || t.created_at}</td>
-              <td class="py-2.5 px-3 text-slate-300 text-[11px] max-w-xs truncate" title="${t.ai_rationale || ''}">${t.ai_rationale || ''}</td>
+              <td data-label="Ticker" class="py-2.5 px-3 font-bold text-white">${esc(t.ticker)}</td>
+              <td data-label="Type" class="py-2.5 px-3 text-slate-400">${esc(t.trigger_type)}</td>
+              <td data-label="Target" class="py-2.5 px-3 font-semibold text-indigo-300">${esc(t.target_price)} ${esc(t.currency)}</td>
+              <td data-label="Status" class="py-2.5 px-3">${statusBadge}</td>
+              <td data-label="When" class="py-2.5 px-3 text-slate-400 font-mono text-[11px]">${esc(t.triggered_at || t.created_at)}</td>
+              <td data-label="Rationale" class="cell-wide py-2.5 px-3 text-slate-300 text-[11px] max-w-xs truncate" title="${esc(t.ai_rationale)}">${esc(t.ai_rationale)}</td>
             </tr>
           `;
         }).join('');
@@ -1380,7 +1631,9 @@ async function armAITrigger(ticker) {
   }
 }
 
-async function cancelTrigger(triggerId) {
+async function cancelTrigger(triggerId, ticker = '') {
+  if (!Number.isFinite(triggerId)) return;
+  if (!confirm(`Cancel the pending trigger${ticker ? ` for ${ticker}` : ''} (#${triggerId})? The reserved cash is released.`)) return;
   try {
     const res = await fetch(`/api/triggers/${triggerId}`, { method: 'DELETE' });
     const data = await res.json();
@@ -1437,20 +1690,20 @@ async function loadLearningInsights() {
 
           return `
             <div class="p-3 bg-slate-900/60 rounded-lg border border-slate-800 space-y-1.5">
-              <div class="flex items-center justify-between">
-                <div class="flex items-center gap-2">
+              <div class="flex flex-wrap items-center justify-between gap-1">
+                <div class="flex flex-wrap items-center gap-2">
                   <span class="px-2 py-0.5 rounded text-[11px] font-bold border ${badgeCol}">
-                    <i class="fa-solid ${icon} mr-1"></i>${l.outcome} ${l.ticker}
+                    <i class="fa-solid ${icon} mr-1"></i>${esc(l.outcome)} ${esc(l.ticker)}
                   </span>
-                  <span class="font-semibold text-slate-200">${pnlSign}€${l.realized_pnl_eur.toFixed(2)} (${pnlSign}${l.realized_pnl_pct.toFixed(1)}%)</span>
+                  <span class="font-semibold text-slate-200">${pnlSign}€${num(l.realized_pnl_eur)} (${pnlSign}${num(l.realized_pnl_pct, 1)}%)</span>
                 </div>
-                <span class="text-[10px] text-slate-500 font-mono">${l.created_at}</span>
+                <span class="text-[10px] text-slate-500 font-mono">${esc(l.created_at)}</span>
               </div>
               <div class="text-[11px] text-slate-300">
-                <span class="text-slate-400 font-medium">Diagnosis:</span> ${isLoss ? l.what_went_wrong : l.what_went_well}
+                <span class="text-slate-400 font-medium">Diagnosis:</span> ${esc(isLoss ? l.what_went_wrong : l.what_went_well)}
               </div>
               <div class="text-[11px] text-purple-300 font-medium bg-purple-950/30 px-2 py-1 rounded border border-purple-900/40">
-                <i class="fa-solid fa-lightbulb mr-1 text-amber-400"></i><b>Lesson:</b> ${l.lesson}
+                <i class="fa-solid fa-lightbulb mr-1 text-amber-400"></i><b>Lesson:</b> ${esc(l.lesson)}
               </div>
             </div>
           `;
@@ -1498,13 +1751,13 @@ async function loadMarketReview(market = null) {
     const textContainer = document.getElementById('reviewTextContainer');
 
     if (data.next_session && nextBadgeEl) {
-      nextBadgeEl.innerHTML = `<i class="fa-regular fa-clock mr-1"></i> Next: <b>${data.next_session.formatted}</b>`;
+      nextBadgeEl.innerHTML = `<i class="fa-regular fa-clock mr-1"></i> Next: <b>${esc(data.next_session.formatted)}</b>`;
     }
 
     if (!data.found) {
       const marketLabel = currentMarketFilter ? `${currentMarketFilter} ` : '';
       if (headlineEl) headlineEl.innerText = `No ${marketLabel}Market Reviews Recorded Today`;
-      if (contentEl) contentEl.innerHTML = `Click <b>"Run ${currentMarketFilter || 'US'} Review"</b> above to evaluate top momentum candidates and generate daily advice.`;
+      if (contentEl) contentEl.innerHTML = `Click <b>"Run ${esc(currentMarketFilter || 'US')} Review"</b> above to evaluate top momentum candidates and generate daily advice.`;
       if (timestampEl) timestampEl.innerText = 'Pending';
       if (textContainer) textContainer.classList.add('hidden');
       return;
@@ -1517,7 +1770,7 @@ async function loadMarketReview(market = null) {
     if (data.top_picks && data.top_picks.length > 0) {
       picksHtml = '<div class="mt-2 flex flex-wrap gap-2">' + data.top_picks.slice(0, 4).map(p => 
         `<span class="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-[11px] font-mono font-semibold text-emerald-400">
-          ${p.ticker}: ${p.action} (${p.consensus_score}/100)
+          ${esc(p.ticker)}: ${esc(p.action)} (${esc(p.consensus_score)}/100)
         </span>`
       ).join('') + '</div>';
     }
@@ -1530,17 +1783,17 @@ async function loadMarketReview(market = null) {
           const pnlSign = pos.unrealized_pnl_eur >= 0 ? '+' : '';
           const pnlColor = pos.unrealized_pnl_eur >= 0 ? 'text-emerald-400' : 'text-rose-400';
           return `<span class="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-700/80 text-[11px] font-mono">
-            <b class="text-white">${pos.ticker}</b> (${pos.shares} shs @ ${pos.entry_price_native} ${pos.currency}) ➔ <span class="${pnlColor} font-bold">${pnlSign}€${(pos.unrealized_pnl_eur || 0).toFixed(2)} (${pnlSign}${(pos.unrealized_pnl_pct || 0).toFixed(1)}%)</span>
+            <b class="text-white">${esc(pos.ticker)}</b> (${esc(pos.shares)} shs @ ${esc(pos.entry_price_native)} ${esc(pos.currency)}) ➔ <span class="${pnlColor} font-bold">${pnlSign}€${num(pos.unrealized_pnl_eur)} (${pnlSign}${num(pos.unrealized_pnl_pct, 1)}%)</span>
           </span>`;
         }).join('') + '</div></div>';
     }
 
     if (contentEl) {
-      contentEl.innerHTML = `<span>${data.content || ''}</span>${picksHtml}${holdingsHtml}`;
+      contentEl.innerHTML = `<span>${safeRichText(data.content || '')}</span>${picksHtml}${holdingsHtml}`;
     }
 
     if (textContainer && data.review_text) {
-      textContainer.innerHTML = data.review_text;
+      textContainer.innerHTML = safeRichText(data.review_text);
       textContainer.classList.remove('hidden');
     } else if (textContainer) {
       textContainer.classList.add('hidden');
@@ -1676,9 +1929,10 @@ async function loadWeeklyReviewComparison() {
         const pnlCol = isPos ? 'text-emerald-400' : 'text-rose-400';
         
         let badgeClass = 'bg-slate-700/50 text-slate-300 border-slate-600';
-        if (p.status_badge.includes('TARGET')) {
+        const badgeText = String(p.status_badge || '');
+        if (badgeText.includes('TARGET')) {
           badgeClass = 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30';
-        } else if (p.status_badge.includes('STOP')) {
+        } else if (badgeText.includes('STOP')) {
           badgeClass = 'bg-rose-500/20 text-rose-300 border-rose-500/30';
         } else if (isPos) {
           badgeClass = 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20';
@@ -1690,20 +1944,20 @@ async function loadWeeklyReviewComparison() {
           <div class="p-3 bg-slate-900/60 rounded-lg border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
             <div>
               <div class="flex items-center gap-2">
-                <span class="font-bold text-white text-sm">${p.ticker}</span>
-                <span class="text-xs text-slate-400">${p.name || ''}</span>
-                <span class="text-[10px] px-2 py-0.5 rounded border ${badgeClass} font-semibold">${p.status_badge}</span>
+                <span class="font-bold text-white text-sm">${esc(p.ticker)}</span>
+                <span class="text-xs text-slate-400">${esc(p.name)}</span>
+                <span class="text-[10px] px-2 py-0.5 rounded border ${badgeClass} font-semibold">${esc(p.status_badge)}</span>
               </div>
               <div class="text-xs text-slate-400 mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
-                <span>Advised In: <strong class="text-slate-200">${p.rec_session}</strong></span>
-                <span>Rec Price: <strong class="text-slate-300">${p.rec_price} ${p.currency}</strong></span>
-                <span>Live Price: <strong class="text-white">${p.current_price} ${p.currency}</strong></span>
-                ${p.target_price ? `<span>TP: <code class="text-emerald-400">${p.target_price}</code></span>` : ''}
-                ${p.stop_loss ? `<span>SL: <code class="text-rose-400">${p.stop_loss}</code></span>` : ''}
+                <span>Advised In: <strong class="text-slate-200">${esc(p.rec_session)}</strong></span>
+                <span>Rec Price: <strong class="text-slate-300">${esc(p.rec_price)} ${esc(p.currency)}</strong></span>
+                <span>Live Price: <strong class="text-white">${esc(p.current_price)} ${esc(p.currency)}</strong></span>
+                ${p.target_price ? `<span>TP: <code class="text-emerald-400">${esc(p.target_price)}</code></span>` : ''}
+                ${p.stop_loss ? `<span>SL: <code class="text-rose-400">${esc(p.stop_loss)}</code></span>` : ''}
               </div>
             </div>
             <div class="sm:text-right">
-              <div class="text-sm font-bold ${pnlCol}">${sign}${p.pnl_pct}%</div>
+              <div class="text-sm font-bold ${pnlCol}">${sign}${esc(p.pnl_pct)}%</div>
               <div class="text-[10px] text-slate-500">Performance vs Rec</div>
             </div>
           </div>
@@ -1743,15 +1997,15 @@ function renderWeeklyArchive() {
   }
 
   container.innerHTML = weeklyReviewsCache.map(r => {
-    const picks = (r.top_picks || []).map(p => p.ticker).join(', ') || 'None';
+    const picks = (r.top_picks || []).map(p => p.ticker).join(', ') || 'None'; // escaped below
     return `
       <div class="p-3 bg-slate-900/80 rounded-lg border border-slate-800 text-xs space-y-1">
-        <div class="flex items-center justify-between">
-          <span class="font-bold text-slate-200">${r.market} ${r.session} — ${r.headline}</span>
-          <span class="text-[10px] font-mono text-slate-500">${r.timestamp}</span>
+        <div class="flex flex-wrap items-center justify-between gap-1">
+          <span class="font-bold text-slate-200">${esc(r.market)} ${esc(r.session)} — ${esc(r.headline)}</span>
+          <span class="text-[10px] font-mono text-slate-500">${esc(r.timestamp)}</span>
         </div>
-        <div class="text-slate-400">${r.content}</div>
-        <div class="text-[11px] text-slate-500">Picks: <strong class="text-slate-300">${picks}</strong></div>
+        <div class="text-slate-400">${safeRichText(r.content)}</div>
+        <div class="text-[11px] text-slate-500">Picks: <strong class="text-slate-300">${esc(picks)}</strong></div>
       </div>
     `;
   }).join('');
@@ -1815,10 +2069,10 @@ function renderMemoryAssets(assets) {
       atomsContainer.innerHTML = atoms.map(a => `
         <div class="p-2.5 bg-slate-900/70 border border-slate-800 rounded-lg text-xs space-y-1">
           <div class="flex items-center justify-between">
-            <span class="font-bold text-cyan-300 font-mono">[${(a.type || 'fact').toUpperCase()}] ${a.subject || ''}</span>
-            <span class="text-[10px] text-slate-500">${Math.round((a.confidence || 1) * 100)}% conf</span>
+            <span class="font-bold text-cyan-300 font-mono">[${esc((a.type || 'fact').toUpperCase())}] ${esc(a.subject)}</span>
+            <span class="text-[10px] text-slate-500">${esc(Math.round((a.confidence || 1) * 100))}% conf</span>
           </div>
-          <div class="text-slate-300">${a.content}</div>
+          <div class="text-slate-300">${esc(a.content)}</div>
         </div>
       `).join('');
     }
@@ -1836,12 +2090,12 @@ function renderMemoryAssets(assets) {
       skillsContainer.innerHTML = skills.map(s => `
         <div class="p-3 bg-slate-900/70 border border-slate-800 rounded-lg text-xs space-y-1.5">
           <div class="flex items-center justify-between">
-            <span class="font-bold text-emerald-300">${s.name}</span>
-            <span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 font-mono">${s.category || 'skill'}</span>
+            <span class="font-bold text-emerald-300">${esc(s.name)}</span>
+            <span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 font-mono">${esc(s.category || 'skill')}</span>
           </div>
-          <div class="text-slate-400">${s.description}</div>
+          <div class="text-slate-400">${esc(s.description)}</div>
           <div class="text-[11px] text-slate-500 bg-slate-950/60 p-2 rounded border border-slate-900">
-            <strong class="text-slate-400">Steps:</strong> ${(s.execution_steps || []).join(' → ')}
+            <strong class="text-slate-400">Steps:</strong> ${esc((s.execution_steps || []).join(' → '))}
           </div>
         </div>
       `).join('');
@@ -1860,12 +2114,12 @@ function renderMemoryAssets(assets) {
       wikiContainer.innerHTML = wiki.map(w => `
         <div class="p-3 bg-slate-900/70 border border-slate-800 rounded-lg text-xs space-y-1">
           <div class="font-bold text-blue-300 flex items-center justify-between">
-            <span>${w.title}</span>
-            <span class="text-[10px] font-mono text-slate-500">${w.page_id}</span>
+            <span>${esc(w.title)}</span>
+            <span class="text-[10px] font-mono text-slate-500">${esc(w.page_id)}</span>
           </div>
-          <div class="text-slate-400 line-clamp-2">${(w.content_md || '').split('\n').slice(2, 5).join(' ')}</div>
+          <div class="text-slate-400 line-clamp-2">${esc((w.content_md || '').split('\n').slice(2, 5).join(' '))}</div>
           <div class="flex flex-wrap gap-1 mt-1">
-            ${(w.tags || []).map(t => `<span class="text-[9px] px-1.5 py-0.2 bg-blue-500/10 text-blue-400 rounded">#${t}</span>`).join('')}
+            ${(w.tags || []).map(t => `<span class="text-[10px] px-1.5 py-0.5 bg-blue-500/10 text-blue-400 rounded">#${esc(t)}</span>`).join('')}
           </div>
         </div>
       `).join('');
@@ -1880,21 +2134,21 @@ function renderMemoryAssets(assets) {
     coreContainer.innerHTML = `
       <div class="p-3 bg-slate-900/70 border border-slate-800 rounded-lg text-xs space-y-1.5 mb-2">
         <div class="font-bold text-purple-300 flex items-center justify-between">
-          <span>${l3.persona_name || 'Committee Persona'}</span>
+          <span>${esc(l3.persona_name || 'Committee Persona')}</span>
           <span class="text-[10px] text-purple-400 bg-purple-500/10 px-1.5 py-0.5 rounded font-mono">L3 Core</span>
         </div>
-        <div class="text-slate-300 font-semibold">${l3.core_profile || ''}</div>
-        <div class="text-slate-400 text-[11px] bg-slate-950/60 p-2 rounded border border-slate-900 whitespace-pre-wrap">${l3.cumulative_wisdom || ''}</div>
+        <div class="text-slate-300 font-semibold">${esc(l3.core_profile)}</div>
+        <div class="text-slate-400 text-[11px] bg-slate-950/60 p-2 rounded border border-slate-900 whitespace-pre-wrap">${esc(l3.cumulative_wisdom)}</div>
       </div>
       <div class="space-y-1.5">
         <div class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Indexed Code-Graph Symbols</div>
         ${graph.map(g => `
-          <div class="p-2 bg-slate-950/60 border border-slate-800/80 rounded text-[11px] flex items-center justify-between">
+          <div class="p-2 bg-slate-950/60 border border-slate-800/80 rounded text-[11px] flex flex-wrap items-center justify-between gap-1 break-all">
             <div>
-              <span class="text-emerald-400 font-mono font-bold">${g.symbol_name}</span>
-              <span class="text-slate-500 text-[10px] ml-1">(${g.symbol_type})</span>
+              <span class="text-emerald-400 font-mono font-bold">${esc(g.symbol_name)}</span>
+              <span class="text-slate-500 text-[10px] ml-1">(${esc(g.symbol_type)})</span>
             </div>
-            <span class="text-slate-500 font-mono text-[10px]">${g.file_path}:${g.line_start || 1}</span>
+            <span class="text-slate-500 font-mono text-[10px]">${esc(g.file_path)}:${esc(g.line_start || 1)}</span>
           </div>
         `).join('')}
       </div>

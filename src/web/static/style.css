@@ -39,9 +39,14 @@
 }
 
 /* Font and text selection */
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
 body {
   -webkit-tap-highlight-color: transparent;
   padding-bottom: max(1.5rem, env(safe-area-inset-bottom));
+  overflow-wrap: break-word;
 }
 
 /* Hide scrollbar utility */
@@ -58,15 +63,15 @@ body {
   -webkit-overflow-scrolling: touch;
 }
 
-/* Mobile dropdown animation */
+/* Mobile "More" sheet animation */
 #mobileDropdownMenu {
-  transform-origin: top;
+  transform-origin: bottom;
 }
 
 @keyframes dropdownSlide {
   from {
     opacity: 0;
-    transform: translateY(-8px);
+    transform: translateY(8px);
   }
   to {
     opacity: 1;
@@ -82,3 +87,148 @@ body {
 button:active {
   transform: scale(0.98);
 }
+
+/* ------------------------------------------------------------------ */
+/* Bottom navigation (mobile)                                          */
+/* ------------------------------------------------------------------ */
+.bottom-nav-btn {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-height: 60px;
+  padding: 6px 2px;
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.1;
+  background: transparent;
+  cursor: pointer;
+}
+.bottom-nav-btn i { font-size: 18px; }
+.bottom-nav-btn.active { color: #10b981; }
+.bottom-nav-btn.active::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 25%;
+  right: 25%;
+  height: 2px;
+  border-radius: 0 0 2px 2px;
+  background: #10b981;
+}
+.bottom-nav-btn b {
+  position: absolute;
+  top: 6px;
+  left: calc(50% + 6px);
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 9px;
+  background: #6366f1;
+  color: #fff;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+}
+.bottom-nav-btn b.hidden { display: none; }
+
+/* Checkbox with a 44px tap area */
+.check-wrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+}
+
+/* Kill switch engaged state */
+.kill-switch-engaged {
+  background-color: rgba(244, 63, 94, 0.9) !important;
+  border-color: #f43f5e !important;
+  color: #fff !important;
+}
+
+/* Never let the page scroll sideways */
+html, body { max-width: 100%; overflow-x: hidden; }
+img, canvas, svg { max-width: 100%; }
+pre, code { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* ------------------------------------------------------------------ */
+/* Mobile (< 768px)                                                    */
+/* ------------------------------------------------------------------ */
+@media (max-width: 767px) {
+  body { padding-bottom: calc(76px + env(safe-area-inset-bottom)) !important; }
+
+  /* Readable type: body copy >= 14px, micro labels >= 12px */
+  .text-xs { font-size: 0.875rem !important; line-height: 1.35rem !important; }
+  .text-sm { font-size: 0.9375rem !important; line-height: 1.4rem !important; }
+  .text-\[11px\] { font-size: 0.8125rem !important; line-height: 1.2rem !important; }
+  .text-\[10px\], .text-\[9px\] { font-size: 0.75rem !important; line-height: 1.1rem !important; }
+
+  /* 44px tap targets */
+  button, select, summary, [role="button"] { min-height: 44px; }
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]) { min-height: 44px; }
+  input[type="range"] { min-height: 44px; }
+
+  /* 16px inputs stop iOS from zooming the page on focus */
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, textarea {
+    font-size: 16px !important;
+  }
+
+  /* Tables become stacked cards */
+  .responsive-table { min-width: 0 !important; width: 100%; }
+  .responsive-table thead { display: none; }
+  .responsive-table tbody, .responsive-table tr, .responsive-table td { display: block; width: 100%; }
+  .responsive-table tr {
+    margin: 0 0 10px;
+    padding: 6px 12px;
+    border: 1px solid #1e293b;
+    border-radius: 12px;
+    background: rgba(15, 23, 42, 0.6);
+  }
+  .responsive-table tbody { padding: 10px; }
+  .responsive-table tbody.divide-y > :not([hidden]) ~ :not([hidden]) { border-top-width: 1px; }
+  .responsive-table td {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 6px 0 !important;
+    max-width: none !important;
+    text-align: right;
+    white-space: normal !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
+    border: 0;
+  }
+  .responsive-table td::before {
+    content: attr(data-label);
+    flex: 0 0 auto;
+    color: #94a3b8;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    text-align: left;
+  }
+  .responsive-table td[colspan] { display: block; text-align: center; }
+  .responsive-table td[colspan]::before { content: none; }
+  .responsive-table td.cell-wide { display: block; text-align: left; }
+  .responsive-table td.cell-wide::before { display: block; margin-bottom: 2px; }
+
+  .stock-card:hover { transform: none; }
+}
+
+@media (min-width: 768px) {
+  #bottomNav { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+
+.mobile-active-check.hidden { display: none !important; }
