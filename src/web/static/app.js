@@ -2300,6 +2300,15 @@ function shadowParamChips(p) {
   return chips.map(c => `<span class="ui-badge">${c}</span>`).join('');
 }
 
+// The shadow keeps the main bot's values from its start; say so when the learner has moved them since
+function shadowFrozenNote(p) {
+  const f = p.frozen_main_params || {};
+  const c = p.current_main_params || {};
+  const changed = ['trigger_min_score', 'breakeven_pct', 'max_positions'].some(k => f[k] !== undefined && c[k] !== undefined && f[k] !== c[k]);
+  if (!changed) return '';
+  return `<p class="text-xs mt-1" style="color:var(--warn)"><i class="fa-solid fa-snowflake mr-1"></i>Main bot values frozen at start (score ${esc(f.trigger_min_score)}, breakeven +${esc(num((f.breakeven_pct || 0) * 100, 1))}%, max ${esc(f.max_positions)}). Main now: score ${esc(c.trigger_min_score)}, breakeven +${esc(num((c.breakeven_pct || 0) * 100, 1))}%, max ${esc(c.max_positions)}. Reset to adopt them.</p>`;
+}
+
 function shadowCompareRow(label, mainHtml, shadowHtml) {
   return `<div class="grid grid-cols-3 gap-2 py-2 text-[13px]">
     <span class="ui-muted">${label}</span>
@@ -2351,6 +2360,7 @@ function renderShadowStrategy(s, mainLabel) {
           <h3 class="ui-section-title">${esc(s.label)}</h3>
           <p class="text-[13px] ui-muted mt-1">${esc(s.description)}</p>
           <p class="text-xs ui-faint mt-1 ui-num">Since ${esc(s.started_at || '--')} · start ${esc(eur(s.initial_capital_eur))}</p>
+          ${shadowFrozenNote(s.params || {})}
         </div>
         <button type="button" class="ui-btn ui-btn-sm shrink-0" style="min-height:44px" data-action="reset-shadow" data-key="${esc(s.key)}">
           <i class="fa-solid fa-rotate-left"></i> Reset

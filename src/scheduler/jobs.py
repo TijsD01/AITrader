@@ -315,8 +315,7 @@ class TradingScheduler:
                         report["status_type"] = "ON_RADAR"
 
                     await shadow_portfolios.follow_report(
-                        report, data, trigger_min_score,
-                        followed_main=report.get("status_type") == "TRIGGER_ARMED"
+                        report, data, followed_main=report.get("status_type") == "TRIGGER_ARMED"
                     )
                     reports.append(report)
                 except asyncio.TimeoutError:
@@ -541,7 +540,7 @@ class TradingScheduler:
                             logger.info(f"Opportunity Scanner auto-armed trigger #{trig_res['trigger_id']} for {tk} (Score {report['consensus_score']}/100 >= {trigger_min_score})")
                             await telegram_bot.notify_trigger_armed(trig_res)
                             armed = True
-                    await shadow_portfolios.follow_report(report, data, trigger_min_score, followed_main=armed)
+                    await shadow_portfolios.follow_report(report, data, followed_main=armed)
         except Exception as e:
             logger.error(f"Error in scan_market_opportunities: {e}")
 

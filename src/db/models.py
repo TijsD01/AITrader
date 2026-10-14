@@ -175,6 +175,9 @@ class ShadowAccount(Base):
     initial_capital_eur = Column(Float, nullable=False)
     # Main portfolio value when this shadow started, so both returns are measured over the same period
     main_value_at_start_eur = Column(Float, nullable=True)
+    # Main-bot parameters the shadow builds on (trigger threshold, breakeven %, max positions), frozen at start
+    # so the learner's later recalibrations of the main bot do not change the experiment halfway
+    frozen_params = Column(JSON, nullable=True)
     started_at = Column(DateTime, default=datetime.datetime.utcnow)
 
 class ShadowTrigger(Base):

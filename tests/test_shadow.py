@@ -26,6 +26,17 @@ def _data(ticker, price=100.0):
     return {"ticker": ticker, "name": f"{ticker} Corp", "price": price, "currency": "EUR"}
 
 
+async def _set_config(key, value):
+    from src.db.models import SystemConfig
+    async with AsyncSessionLocal() as session:
+        row = await session.get(SystemConfig, key)
+        if row:
+            row.value = value
+        else:
+            session.add(SystemConfig(key=key, value=value))
+        await session.commit()
+
+
 @pytest.fixture
 def shadows(monkeypatch):
     """Enables the given strategies on a clean slate and fakes open markets and quotes."""
@@ -38,7 +49,9 @@ def shadows(monkeypatch):
         monkeypatch.setattr(settings, "TRIGGER_MIN_SCORE", 80)
         return prices
 
-    async def _reset_all():
+    async def _reset_all(main_trigger_min_score=80):
+        await _set_config("TRIGGER_MIN_SCORE", str(main_trigger_min_score))
+        await _set_config("BREAKEVEN_TRIGGER_PCT", "0.025")
         for key in list(PRESETS) + ["tight"]:
             await shadow_portfolios.reset(key)
 
@@ -86,18 +99,18 @@ async def test_follow_report_respects_each_strategy_threshold(shadows):
     await reset_all()
 
     # Score 72 clears aggressive (80 - 10) but not baseline (80)
-    armed = await shadow_portfolios.follow_report(_report("SHA.AS", score=72), _data("SHA.AS"), 80)
+    armed = await shadow_portfolios.follow_report(_report("SHA.AS", score=72), _data("SHA.AS"))
     assert [a["strategy"] for a in armed] == ["aggressive"]
 
     # Same ticker again: no duplicate trigger
-    assert await shadow_portfolios.follow_report(_report("SHA.AS", score=90), _data("SHA.AS"), 80) == [
+    assert await shadow_portfolios.follow_report(_report("SHA.AS", score=90), _data("SHA.AS")) == [
         {"strategy": "baseline", "ticker": "SHA.AS", "trigger_type": "LIMIT_PULLBACK",
          "target_price": 95.0, "stop_loss": 90.0, "take_profit": 110.0}
     ]
 
     # HOLD verdicts and Risk Officer vetoes are skipped
-    assert await shadow_portfolios.follow_report(_report("SHB.AS", action="HOLD"), _data("SHB.AS"), 80) == []
-    assert await shadow_portfolios.follow_report(_report("SHC.AS", approved=False), _data("SHC.AS"), 80) == []
+    assert await shadow_portfolios.follow_report(_report("SHB.AS", action="HOLD"), _data("SHB.AS")) == []
+    assert await shadow_portfolios.follow_report(_report("SHC.AS", approved=False), _data("SHC.AS")) == []
 
     # Nothing lands in the main portfolio's tables
     async with AsyncSessionLocal() as session:
@@ -112,7 +125,7 @@ async def test_trigger_fill_trailing_stop_and_exit(shadows):
     await reset_all()
 
     prices["SHD.AS"] = 100.0
-    await shadow_portfolios.follow_report(_report("SHD.AS"), _data("SHD.AS"), 80)
+    await shadow_portfolios.follow_report(_report("SHD.AS"), _data("SHD.AS"))
 
     # Not yet at the 97.5 entry
     assert await shadow_portfolios.check_triggers() == []
@@ -154,7 +167,7 @@ async def test_market_entry_time_exit_and_reset(shadows):
     await reset_all()
 
     prices["SHE.AS"] = 100.0
-    await shadow_portfolios.follow_report(_report("SHE.AS"), _data("SHE.AS"), 80)
+    await shadow_portfolios.follow_report(_report("SHE.AS"), _data("SHE.AS"))
     async with AsyncSessionLocal() as session:
         pos = (await session.execute(select(ShadowPosition).where(ShadowPosition.ticker == "SHE.AS"))).scalars().one()
         assert pos.status == "OPEN" and pos.take_profit_native is None
@@ -175,7 +188,7 @@ async def test_shadow_errors_never_reach_the_main_bot(shadows):
     enable, _ = shadows
     enable(["aggressive"])
     with patch.object(shadow_module, "derive_trigger_levels", side_effect=RuntimeError("boom")):
-        assert await shadow_portfolios.follow_report(_report("SHF.AS"), _data("SHF.AS"), 80) == []
+        assert await shadow_portfolios.follow_report(_report("SHF.AS"), _data("SHF.AS")) == []
 
 
 @pytest.mark.asyncio
@@ -245,3 +258,31 @@ async def test_snapshots_set_the_main_baseline_and_throttle(shadows):
         assert acc.main_value_at_start_eur == 12000.0
         snaps = (await session.execute(select(ShadowSnapshot).where(ShadowSnapshot.strategy == "baseline"))).scalars().all()
         assert len(snaps) == 1
+
+
+@pytest.mark.asyncio
+async def test_learner_changes_to_the_main_bot_do_not_move_a_running_shadow(shadows):
+    """The shadow keeps the main threshold and breakeven % it started with; a reset picks up the new ones."""
+    enable, reset_all = shadows
+    enable(["aggressive"])
+    await reset_all(main_trigger_min_score=80)
+
+    # Shadow starts while the main threshold is 80 (aggressive: 70)
+    assert await shadow_portfolios.follow_report(_report("SHI.AS", score=1), _data("SHI.AS")) == []
+
+    # The learner tightens the main bot to 90 and moves breakeven to 5%
+    await _set_config("TRIGGER_MIN_SCORE", "90")
+    await _set_config("BREAKEVEN_TRIGGER_PCT", "0.05")
+    armed = await shadow_portfolios.follow_report(_report("SHI.AS", score=72), _data("SHI.AS"))
+    assert [a["strategy"] for a in armed] == ["aggressive"]
+
+    comparison = await shadow_portfolios.get_comparison({"total_value_eur": 10000.0}, False)
+    params = comparison["strategies"][0]["params"]
+    assert params["effective_trigger_min_score"] == 70
+    assert params["effective_breakeven_pct"] == 0.025
+    assert params["current_main_params"]["trigger_min_score"] == 90
+
+    # After a reset the shadow restarts on the main bot's new values (aggressive: 80)
+    await shadow_portfolios.reset("aggressive")
+    assert await shadow_portfolios.follow_report(_report("SHJ.AS", score=75), _data("SHJ.AS")) == []
+    await _set_config("TRIGGER_MIN_SCORE", "80")

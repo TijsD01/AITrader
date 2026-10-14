@@ -5,6 +5,10 @@ Each shadow strategy is a fully simulated portfolio with its own cash, triggers 
 same committee verdicts as the main bot (paper or live), but applies its own entry, exit and sizing rules,
 so the results show whether other parameter values would have done better. Shadows never call a broker,
 never touch the main portfolio's tables, and never feed the learner, agent memory or Telegram.
+
+The main-bot parameters a shadow builds on (trigger threshold, breakeven %, max positions) are frozen when
+the shadow starts, so the learner recalibrating the main bot does not change the experiment halfway.
+Resetting a shadow restarts it on the main bot's values of that moment.
 """
 import asyncio
 import dataclasses
@@ -47,7 +51,7 @@ class ShadowStrategy:
     key: str
     label: str
     description: str
-    score_offset: int = 0                     # Added to the main TRIGGER_MIN_SCORE (negative = takes more setups)
+    score_offset: int = 0                     # Added to the (frozen) main TRIGGER_MIN_SCORE (negative = takes more setups)
     accept_hold: bool = False                 # Also act on HOLD verdicts that clear the score threshold
     ignore_risk_veto: bool = False            # Act even when the Risk Officer rejected the trade
     entry_mode: str = "trigger"               # "trigger": main bot's pullback/breakout level; "market": buy right away
@@ -55,9 +59,9 @@ class ShadowStrategy:
     stop_scale: float = 1.0                   # Multiplier on the stop distance below the entry
     reward_risk: Optional[float] = None       # Take profit at entry + R x stop distance (None = main bot's target)
     use_take_profit: bool = True              # False = no fixed target; exits come from the stop / trailing stop / time
-    breakeven_pct: Optional[float] = None     # Gain at which the stop moves to entry +1% (None = main bot's setting)
+    breakeven_pct: Optional[float] = None     # Gain at which the stop moves to entry +1% (None = main bot's, frozen)
     trailing_stop_pct: Optional[float] = None # Stop trails the highest price by this fraction
-    max_positions: Optional[int] = None       # None = main bot's MAX_POSITIONS
+    max_positions: Optional[int] = None       # None = main bot's MAX_POSITIONS (frozen)
     max_hold_days: Optional[int] = None       # Close positions older than this many days
 
     def threshold(self, main_threshold: int) -> int:
@@ -200,6 +204,30 @@ class ShadowPortfolios:
     def _initial_capital(self) -> float:
         return settings.SHADOW_INITIAL_CAPITAL or settings.INITIAL_PAPER_CAPITAL
 
+    async def _main_params(self, session) -> Dict[str, Any]:
+        """The main bot's current values for the parameters a shadow builds on (as the learner left them)."""
+        res = await session.execute(select(SystemConfig).where(SystemConfig.key == "TRIGGER_MIN_SCORE"))
+        row = res.scalars().first()
+        try:
+            trigger_min_score = int(row.value) if row and row.value else settings.TRIGGER_MIN_SCORE
+        except ValueError:
+            trigger_min_score = settings.TRIGGER_MIN_SCORE
+        return {
+            "trigger_min_score": trigger_min_score,
+            "breakeven_pct": await self._breakeven_pct(session),
+            "max_positions": settings.MAX_POSITIONS,
+        }
+
+    @staticmethod
+    def _effective(s: ShadowStrategy, acc: ShadowAccount) -> Dict[str, Any]:
+        """A strategy's working values: its own settings, else the main bot's values frozen at the shadow's start."""
+        frozen = acc.frozen_params or {}
+        return {
+            "trigger_min_score": s.threshold(frozen.get("trigger_min_score", settings.TRIGGER_MIN_SCORE)),
+            "breakeven_pct": s.breakeven_pct if s.breakeven_pct is not None else frozen.get("breakeven_pct", 0.025),
+            "max_positions": s.max_positions or frozen.get("max_positions") or settings.MAX_POSITIONS,
+        }
+
     async def _ensure_accounts(self, session, strategies: List[ShadowStrategy]) -> Dict[str, ShadowAccount]:
         res = await session.execute(select(ShadowAccount))
         accounts = {a.strategy: a for a in res.scalars().all()}
@@ -207,7 +235,8 @@ class ShadowPortfolios:
         for s in strategies:
             if s.key not in accounts:
                 cap = self._initial_capital()
-                acc = ShadowAccount(strategy=s.key, cash_eur=cap, initial_capital_eur=cap, started_at=_utcnow())
+                acc = ShadowAccount(strategy=s.key, cash_eur=cap, initial_capital_eur=cap,
+                                    frozen_params=await self._main_params(session), started_at=_utcnow())
                 session.add(acc)
                 accounts[s.key] = acc
                 created = True
@@ -234,7 +263,6 @@ class ShadowPortfolios:
         self,
         report: Dict[str, Any],
         data: Dict[str, Any],
-        main_trigger_min_score: int,
         followed_main: bool = False,
     ) -> List[Dict[str, Any]]:
         """Lets every shadow strategy decide on a committee verdict the main bot just received."""
@@ -243,7 +271,7 @@ class ShadowPortfolios:
             return []
         try:
             async with self._lock:
-                armed = await self._follow_report(report, data, main_trigger_min_score, followed_main, strategies)
+                armed = await self._follow_report(report, data, followed_main, strategies)
             if any(a["trigger_type"] == "MARKET" for a in armed):
                 await self.check_triggers()
             return armed
@@ -251,7 +279,7 @@ class ShadowPortfolios:
             logger.error(f"Shadow portfolios could not follow the report for {report.get('ticker')}: {e}", exc_info=True)
             return []
 
-    async def _follow_report(self, report, data, main_threshold, followed_main, strategies) -> List[Dict[str, Any]]:
+    async def _follow_report(self, report, data, followed_main, strategies) -> List[Dict[str, Any]]:
         ticker = (report.get("ticker") or data.get("ticker") or "").upper()
         price = data.get("price")
         if not ticker or not price or price <= 0:
@@ -264,9 +292,9 @@ class ShadowPortfolios:
 
         armed = []
         async with AsyncSessionLocal() as session:
-            await self._ensure_accounts(session, strategies)
+            accounts = await self._ensure_accounts(session, strategies)
             for s in strategies:
-                if score < s.threshold(main_threshold):
+                if score < self._effective(s, accounts[s.key])["trigger_min_score"]:
                     continue
                 if not (action in ("BUY", "STRONG_BUY") or (s.accept_hold and action == "HOLD")):
                     continue
@@ -363,7 +391,7 @@ class ShadowPortfolios:
         res = await session.execute(select(ShadowPosition).where(
             ShadowPosition.strategy == s.key, ShadowPosition.status == "OPEN"))
         open_positions = res.scalars().all()
-        max_positions = s.max_positions or settings.MAX_POSITIONS
+        max_positions = self._effective(s, account)["max_positions"]
         if len(open_positions) >= max_positions or any(p.ticker == t.ticker for p in open_positions):
             return None  # stays pending until a slot frees up (or it expires)
 
@@ -438,7 +466,6 @@ class ShadowPortfolios:
         quotes: Dict[str, Optional[Dict[str, Any]]] = {}
         async with AsyncSessionLocal() as session:
             accounts = await self._ensure_accounts(session, list(strategies.values()))
-            main_be_pct = await self._breakeven_pct(session)
             res = await session.execute(select(ShadowPosition).where(ShadowPosition.status == "OPEN"))
             for p in res.scalars().all():
                 s = strategies.get(p.strategy)
@@ -457,7 +484,7 @@ class ShadowPortfolios:
                 p.current_price_eur = currency_service.to_eur(price, p.currency)
                 p.highest_price_native = max(p.highest_price_native or price, price)
 
-                be_pct = s.breakeven_pct if s.breakeven_pct is not None else main_be_pct
+                be_pct = self._effective(s, accounts[s.key])["breakeven_pct"]
                 gain = (p.highest_price_native / p.entry_price_native) - 1.0
                 if gain >= be_pct and (p.stop_loss_native is None or p.stop_loss_native < p.entry_price_native):
                     p.stop_loss_native = round(p.entry_price_native * 1.01, 2)
@@ -591,7 +618,7 @@ class ShadowPortfolios:
         main_value = main_summary.get("total_value_eur")
         async with AsyncSessionLocal() as session:
             accounts = await self._ensure_accounts(session, strategies)
-            main_be_pct = await self._breakeven_pct(session)
+            current_main = await self._main_params(session)
             for s in strategies:
                 acc = accounts[s.key]
                 since = acc.started_at
@@ -631,9 +658,12 @@ class ShadowPortfolios:
                         history["shadow"].append([snap.timestamp.strftime("%Y-%m-%d %H:%M"), snap.return_pct])
 
                 params = s.to_params()
-                params["effective_breakeven_pct"] = s.breakeven_pct if s.breakeven_pct is not None else main_be_pct
-                params["effective_max_positions"] = s.max_positions or settings.MAX_POSITIONS
-                params["effective_trigger_min_score"] = s.threshold(settings.TRIGGER_MIN_SCORE)
+                eff = self._effective(s, acc)
+                params["effective_breakeven_pct"] = eff["breakeven_pct"]
+                params["effective_max_positions"] = eff["max_positions"]
+                params["effective_trigger_min_score"] = eff["trigger_min_score"]
+                params["frozen_main_params"] = acc.frozen_params or {}
+                params["current_main_params"] = current_main
 
                 result["strategies"].append({
                     "key": s.key,
