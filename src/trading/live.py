@@ -220,15 +220,22 @@ class LiveBroker(BaseBroker):
 
                     # Cancel resting bracket legs (stop / take-profit) first, otherwise a leg
                     # can still fill after our market sell and open a short position.
+                    legs = []
                     for open_trade in ib.openTrades():
                         oc = open_trade.contract
                         if oc.symbol.upper() == symbol and (oc.currency or "").upper() == currency.upper() \
                                 and open_trade.order.action == "SELL":
                             ib.cancelOrder(open_trade.order)
+                            legs.append(open_trade)
+                    # Give the cancels up to 2s to settle: a leg that fills meanwhile must show up in the position below
+                    for _ in range(20):
+                        if all(leg.isDone() for leg in legs):
+                            break
+                        await asyncio.sleep(0.1)
 
-                    # Never sell more than the broker actually holds
+                    # Never sell more than the broker actually holds (fresh positions, not the cached list)
                     held = sum(
-                        float(bp.position) for bp in ib.positions()
+                        float(bp.position) for bp in await ib.reqPositionsAsync()
                         if bp.contract.symbol.upper() == symbol and (bp.contract.currency or "").upper() == currency.upper()
                     )
                     if held <= 0:
@@ -256,6 +263,16 @@ class LiveBroker(BaseBroker):
                             client.cancel_order_by_id(o.id)
                     except Exception as cancel_err:
                         logger.info(f"Alpaca cancel open orders note: {cancel_err}")
+                    # A filled bracket leg already closed the position: report it as closed instead of
+                    # failing, otherwise the local position could never be closed
+                    from alpaca.common.exceptions import APIError
+                    try:
+                        client.get_open_position(ticker.upper())
+                    except APIError as pos_err:
+                        if pos_err.status_code == 404:
+                            logger.info(f"Alpaca position for {ticker} already flat (bracket leg filled); no exit order sent.")
+                            return "alpaca_exit_already_flat"
+                        raise
                     pos = client.close_position(ticker.upper())
                     return f"alpaca_exit_{pos.id}"
             except Exception as e:
@@ -1119,13 +1136,20 @@ class LiveBroker(BaseBroker):
         return triggered
 
     async def refresh_positions_pnl(self):
-        """Refreshes quotes and unrealized PnL for active positions."""
+        """Refreshes quotes, unrealized PnL, trailing high and breakeven stop for active positions."""
         async with self._refresh_lock:
             now = time.time()
             if (now - self._last_pnl_refresh) < self._pnl_refresh_ttl:
                 return
 
             async with AsyncSessionLocal() as session:
+                # Query dynamic breakeven trigger pct
+                be_cfg = await session.execute(
+                    select(SystemConfig).where(SystemConfig.key == "BREAKEVEN_TRIGGER_PCT")
+                )
+                be_row = be_cfg.scalars().first()
+                breakeven_trigger_pct = float(be_row.value) if be_row else 0.025
+
                 res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == True))
                 positions = res.scalars().all()
                 if not positions:
@@ -1149,6 +1173,15 @@ class LiveBroker(BaseBroker):
                     if curr_price:
                         p.current_price_native = curr_price
                         p.current_price_eur = currency_service.to_eur(curr_price, p.currency)
+                        if curr_price > (p.highest_price_native or 0.0):
+                            p.highest_price_native = curr_price
+                            # Dynamic Trailing Stop (same as paper): past breakeven_trigger_pct, ratchet the stop to breakeven + 1%.
+                            # Positions without a stop are left alone: those are holdings synced from the broker, not bot trades.
+                            if p.stop_loss_native and p.entry_price_native and p.stop_loss_native < p.entry_price_native:
+                                gain_pct = (curr_price / p.entry_price_native) - 1.0
+                                if gain_pct >= breakeven_trigger_pct:
+                                    p.stop_loss_native = round(p.entry_price_native * 1.01, 2)  # Secure breakeven + 1%
+                                    logger.info(f"Live trailing stop ratcheted to breakeven for {p.ticker} at {p.stop_loss_native} (+{gain_pct*100:.1f}%)")
                         curr_val_eur = p.current_price_eur * p.shares
                         p.unrealized_pnl_eur = round(curr_val_eur - p.cost_basis_eur, 2)
                         p.unrealized_pnl_pct = round(((p.current_price_eur / p.entry_price_eur) - 1.0) * 100, 2)

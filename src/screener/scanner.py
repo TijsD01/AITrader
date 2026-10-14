@@ -107,7 +107,7 @@ class MarketScanner:
         rev_growth = f.get("revenue_growth")
         if rev_growth and rev_growth > 0.08:
             score += 5
-            notes.append("Double-digit revenue growth")
+            notes.append(f"Revenue growth above 8% ({round(rev_growth * 100)}% YoY)")
         
         target_price = f.get("target_mean_price")
         if target_price and target_price > t["price"] * 1.10:
