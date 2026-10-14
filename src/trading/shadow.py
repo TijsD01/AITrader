@@ -6,9 +6,11 @@ same committee verdicts as the main bot (paper or live), but applies its own ent
 so the results show whether other parameter values would have done better. Shadows never call a broker,
 never touch the main portfolio's tables, and never feed the learner, agent memory or Telegram.
 
-The main-bot parameters a shadow builds on (trigger threshold, breakeven %, max positions) are frozen when
-the shadow starts, so the learner recalibrating the main bot does not change the experiment halfway.
-Resetting a shadow restarts it on the main bot's values of that moment.
+Unless a strategy sets its own value, a shadow uses the main bot's rules: trigger threshold, breakeven %,
+max positions, risk per trade, ATR trailing stop and market regime filter. Those values are frozen when the
+shadow starts, so the learner (or an .env edit) changing the main bot does not change the experiment halfway.
+Resetting a shadow restarts it on the main bot's values of that moment. Like the main bot, shadows buy whole
+shares when WHOLE_SHARES_ONLY is on.
 """
 import asyncio
 import dataclasses
@@ -28,11 +30,15 @@ from src.data.market_hours import check_market_hours
 from src.db.models import ShadowAccount, ShadowPosition, ShadowSnapshot, ShadowTrigger, SystemConfig, Trade
 from src.db.session import AsyncSessionLocal
 from src.trading.risk import (
+    apply_risk_budget,
     calculate_position_allocation,
+    compute_trailing_stop,
     derive_trigger_levels,
     evaluate_trigger_condition,
     get_effective_deployable_cash,
     is_trigger_expired,
+    regime_index_for_ticker,
+    whole_share_count,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,6 +69,9 @@ class ShadowStrategy:
     trailing_stop_pct: Optional[float] = None # Stop trails the highest price by this fraction
     max_positions: Optional[int] = None       # None = main bot's MAX_POSITIONS (frozen)
     max_hold_days: Optional[int] = None       # Close positions older than this many days
+    risk_per_trade_pct: Optional[float] = None  # Loss at the stop as % of the portfolio (None = main bot's, 0 = off)
+    trailing_atr_mult: Optional[float] = None   # Past breakeven, trail at high - N x ATR (None = main bot's, 0 = off)
+    regime_filter: Optional[bool] = None        # No new entries while the index is below its average (None = main bot's)
 
     def threshold(self, main_threshold: int) -> int:
         return max(0, min(100, main_threshold + self.score_offset))
@@ -77,8 +86,9 @@ PRESETS: Dict[str, ShadowStrategy] = {
         label="Aggressive",
         description="Takes setups 10 points below the main threshold, enters at half the pullback depth, "
                     "uses a 25% wider stop, aims for 3R and trails the stop 6% under the high. "
-                    "Fewer, larger positions (max 5).",
+                    "Risks 1% of the portfolio per trade, in at most 5 positions.",
         score_offset=-10,
+        risk_per_trade_pct=1.0,
         pullback_scale=0.5,
         stop_scale=1.25,
         reward_risk=3.0,
@@ -98,8 +108,9 @@ PRESETS: Dict[str, ShadowStrategy] = {
     "baseline": ShadowStrategy(
         key="baseline",
         label="Baseline",
-        description="Same rules as the main bot. A control group: differences against the main portfolio "
-                    "come from the simulation itself (fills, cash timing), not from parameters.",
+        description="Same rules as the main bot (as they were when this shadow started). A control group: "
+                    "differences against the main portfolio come from the simulation itself (fills, cash timing), "
+                    "not from parameters.",
     ),
 }
 
@@ -216,32 +227,60 @@ class ShadowPortfolios:
             "trigger_min_score": trigger_min_score,
             "breakeven_pct": await self._breakeven_pct(session),
             "max_positions": settings.MAX_POSITIONS,
+            "risk_per_trade_pct": settings.RISK_PER_TRADE_PCT,
+            "trailing_atr_mult": settings.TRAILING_STOP_ATR_MULT,
+            "regime_filter": settings.REGIME_FILTER_ENABLED,
         }
 
     @staticmethod
     def _effective(s: ShadowStrategy, acc: ShadowAccount) -> Dict[str, Any]:
         """A strategy's working values: its own settings, else the main bot's values frozen at the shadow's start."""
         frozen = acc.frozen_params or {}
+
+        def own_or_main(own, key, fallback):
+            # Shadows started before a main parameter existed fall back to the main bot's current value
+            return own if own is not None else frozen.get(key, fallback)
+
         return {
             "trigger_min_score": s.threshold(frozen.get("trigger_min_score", settings.TRIGGER_MIN_SCORE)),
-            "breakeven_pct": s.breakeven_pct if s.breakeven_pct is not None else frozen.get("breakeven_pct", 0.025),
+            "breakeven_pct": own_or_main(s.breakeven_pct, "breakeven_pct", 0.025),
             "max_positions": s.max_positions or frozen.get("max_positions") or settings.MAX_POSITIONS,
+            "risk_per_trade_pct": own_or_main(s.risk_per_trade_pct, "risk_per_trade_pct", settings.RISK_PER_TRADE_PCT),
+            "trailing_atr_mult": own_or_main(s.trailing_atr_mult, "trailing_atr_mult", settings.TRAILING_STOP_ATR_MULT),
+            "regime_filter": own_or_main(s.regime_filter, "regime_filter", settings.REGIME_FILTER_ENABLED),
         }
+
+    @staticmethod
+    def _regime_allows(ticker: str, currency: Optional[str]) -> bool:
+        """Same test as the main bot's regime filter, but switched by the shadow's own setting. Fails open."""
+        regime = market_data_provider.get_index_regime(regime_index_for_ticker(ticker, currency), settings.REGIME_SMA_DAYS)
+        return not regime or bool(regime.get("above_sma"))
 
     async def _ensure_accounts(self, session, strategies: List[ShadowStrategy]) -> Dict[str, ShadowAccount]:
         res = await session.execute(select(ShadowAccount))
         accounts = {a.strategy: a for a in res.scalars().all()}
-        created = False
+        changed = False
+        main_params = None
         for s in strategies:
             if s.key not in accounts:
+                main_params = main_params or await self._main_params(session)
                 cap = self._initial_capital()
                 acc = ShadowAccount(strategy=s.key, cash_eur=cap, initial_capital_eur=cap,
-                                    frozen_params=await self._main_params(session), started_at=_utcnow())
+                                    frozen_params=dict(main_params), started_at=_utcnow())
                 session.add(acc)
                 accounts[s.key] = acc
-                created = True
+                changed = True
                 logger.info(f"Shadow portfolio '{s.key}' started with €{cap:.2f}.")
-        if created:
+            else:
+                # A shadow started before a main parameter existed freezes that parameter from now on
+                acc = accounts[s.key]
+                frozen = acc.frozen_params or {}
+                main_params = main_params or await self._main_params(session)
+                missing = {k: v for k, v in main_params.items() if k not in frozen}
+                if missing:
+                    acc.frozen_params = {**frozen, **missing}
+                    changed = True
+        if changed:
             await session.commit()
         return accounts
 
@@ -346,6 +385,7 @@ class ShadowPortfolios:
     async def _check_triggers(self, strategies: Dict[str, ShadowStrategy]) -> List[Dict[str, Any]]:
         filled = []
         quotes: Dict[str, Optional[Dict[str, Any]]] = {}
+        regimes: Dict[str, bool] = {}
         async with AsyncSessionLocal() as session:
             accounts = await self._ensure_accounts(session, list(strategies.values()))
             res = await session.execute(select(ShadowTrigger).where(ShadowTrigger.status == "PENDING").order_by(
@@ -379,8 +419,18 @@ class ShadowPortfolios:
                 if not met:
                     continue
 
+                if self._effective(s, accounts[s.key])["regime_filter"]:
+                    index = regime_index_for_ticker(t.ticker, t.currency)
+                    if index not in regimes:
+                        regimes[index] = await asyncio.to_thread(self._regime_allows, t.ticker, t.currency)
+                    if not regimes[index]:
+                        continue  # stays pending (and expires as usual) while the market is in a downtrend
+
                 fill = await self._open_position(session, s, accounts[s.key], t, price)
-                if fill:
+                if fill == "UNAFFORDABLE":
+                    t.status = "CANCELLED"
+                    t.note = "Not even one whole share fits the allocation."
+                elif fill:
                     t.status = "TRIGGERED"
                     t.triggered_at = _utcnow()
                     filled.append(fill)
@@ -395,6 +445,7 @@ class ShadowPortfolios:
         if len(open_positions) >= max_positions or any(p.ticker == t.ticker for p in open_positions):
             return None  # stays pending until a slot frees up (or it expires)
 
+        eff = self._effective(s, account)
         usable_cash, _ = get_effective_deployable_cash(account.cash_eur)
         alloc = calculate_position_allocation(
             available_cash=usable_cash,
@@ -404,18 +455,37 @@ class ShadowPortfolios:
             ticker=t.ticker,
             currency=t.currency,
         )
+        # Same risk budget as the main bot's automated buys: a wide stop gets a smaller position
+        portfolio_value = account.cash_eur + sum(p.current_price_eur * p.shares for p in open_positions)
+        alloc = apply_risk_budget(alloc, price, t.stop_loss, portfolio_value, risk_pct=eff["risk_per_trade_pct"])
         price_eur = currency_service.to_eur(price, t.currency)
         if alloc < 20.0 or price_eur <= 0:
             return None
 
         from src.trading.fees import calculate_broker_fee
-        shares = round(alloc / price_eur, 4)
-        fee = calculate_broker_fee(
-            ticker=t.ticker, shares=shares, price_native=price, currency=t.currency,
-            broker=settings.LIVE_BROKER, pricing_tier=getattr(settings, "IBKR_PRICING_TIER", "tiered"), order_action="BUY",
-        )["fee_eur"]
-        if shares * price_eur + fee > account.cash_eur:
-            shares = math.floor(((account.cash_eur - fee) / price_eur) * 10000.0) / 10000.0
+
+        def fee_for(n: float) -> float:
+            return calculate_broker_fee(
+                ticker=t.ticker, shares=n, price_native=price, currency=t.currency,
+                broker=settings.LIVE_BROKER, pricing_tier=getattr(settings, "IBKR_PRICING_TIER", "tiered"), order_action="BUY",
+            )["fee_eur"]
+
+        if settings.WHOLE_SHARES_ONLY:
+            # Like the main bot: the whole number of shares closest to the allocation
+            shares = float(whole_share_count(alloc, price_eur, max_eur=usable_cash))
+            if shares < 1:
+                return "UNAFFORDABLE"
+            fee = fee_for(shares)
+            while shares >= 1 and shares * price_eur + fee > account.cash_eur:
+                shares -= 1
+                fee = fee_for(shares)
+            if shares < 1:
+                return None
+        else:
+            shares = round(alloc / price_eur, 4)
+            fee = fee_for(shares)
+            if shares * price_eur + fee > account.cash_eur:
+                shares = math.floor(((account.cash_eur - fee) / price_eur) * 10000.0) / 10000.0
         cost = round(shares * price_eur, 2)
         if shares <= 0 or cost < 20.0:
             return None
@@ -484,10 +554,12 @@ class ShadowPortfolios:
                 p.current_price_eur = currency_service.to_eur(price, p.currency)
                 p.highest_price_native = max(p.highest_price_native or price, price)
 
-                be_pct = self._effective(s, accounts[s.key])["breakeven_pct"]
-                gain = (p.highest_price_native / p.entry_price_native) - 1.0
-                if gain >= be_pct and (p.stop_loss_native is None or p.stop_loss_native < p.entry_price_native):
-                    p.stop_loss_native = round(p.entry_price_native * 1.01, 2)
+                eff = self._effective(s, accounts[s.key])
+                # Main bot's ratchet: breakeven +1% past breakeven_pct, then high - N x ATR
+                p.stop_loss_native = compute_trailing_stop(
+                    p.entry_price_native, p.stop_loss_native, p.highest_price_native,
+                    (data.get("technicals") or {}).get("atr14"), eff["breakeven_pct"], atr_mult=eff["trailing_atr_mult"],
+                )
                 if s.trailing_stop_pct:
                     trail = round(p.highest_price_native * (1.0 - s.trailing_stop_pct), 2)
                     if p.stop_loss_native is None or trail > p.stop_loss_native:
@@ -662,6 +734,10 @@ class ShadowPortfolios:
                 params["effective_breakeven_pct"] = eff["breakeven_pct"]
                 params["effective_max_positions"] = eff["max_positions"]
                 params["effective_trigger_min_score"] = eff["trigger_min_score"]
+                params["effective_risk_per_trade_pct"] = eff["risk_per_trade_pct"]
+                params["effective_trailing_atr_mult"] = eff["trailing_atr_mult"]
+                params["effective_regime_filter"] = eff["regime_filter"]
+                params["whole_shares"] = settings.WHOLE_SHARES_ONLY
                 params["frozen_main_params"] = acc.frozen_params or {}
                 params["current_main_params"] = current_main
 
