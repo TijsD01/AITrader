@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select, desc, func
@@ -9,7 +9,11 @@ from config.settings import settings, update_env_file
 from src.db.session import AsyncSessionLocal
 from src.db.models import Position, Trade, PortfolioSnapshot, AnalysisReport, WatchlistItem, SystemConfig, MarketDigest, TradeLesson
 from src.trading.broker import active_broker as paper_broker, get_active_broker, active_broker, live_broker, check_broker_status
-from src.trading.risk import calculate_position_allocation
+from src.trading.risk import calculate_position_allocation, derive_trigger_levels
+from src.trading.trigger_gate import (
+    TriggerGateResult, normalize_ticker, invalid_ticker_result, precheck_manual_trigger,
+    get_trigger_min_score, evaluate_manual_trigger
+)
 from src.data.market import market_data_provider
 from src.screener.scanner import market_scanner
 from src.agents.committee import investment_committee
@@ -44,10 +48,12 @@ class CreateTriggerRequest(BaseModel):
     take_profit: Optional[float] = None
     allocation_eur: Optional[float] = None
     ai_rationale: Optional[str] = None
+    force: bool = False  # arm despite a soft block (HOLD verdict, low score); hard blocks stay blocked
 
 class CreateTriggerFromAIRequest(BaseModel):
     ticker: str
     allocation_eur: Optional[float] = None
+    force: bool = False  # arm despite a soft block (HOLD verdict, low score); hard blocks stay blocked
 
 class SettingsUpdateRequest(BaseModel):
     auto_buy_enabled: Optional[bool] = None
@@ -284,17 +290,34 @@ async def manual_sell(req: SellRequest):
 async def get_triggers(status: Optional[str] = None):
     return await active_broker.get_triggers(status=status)
 
+def _trigger_precheck_error(result: TriggerGateResult) -> HTTPException:
+    """A check that failed before the committee ran: 404 for missing market data, else 400."""
+    return HTTPException(status_code=404 if result.code == "NO_MARKET_DATA" else 400, detail=result.to_detail())
+
+def _trigger_blocked_error(result: TriggerGateResult, report: Dict[str, Any]) -> HTTPException:
+    """The committee's verdict does not allow this trigger: 422, with its summary so the UI can show why."""
+    detail = {**result.to_detail(), "summary": str(report.get("summary") or "")[:400]}
+    return HTTPException(status_code=422, detail=detail)
+
+async def _precheck_trigger(raw_ticker: str) -> Tuple[str, Dict[str, Any], Dict[str, Any], float]:
+    """
+    Cheap checks that run before the expensive committee: ticker format, market data, instrument type,
+    no open position or pending trigger, enough cash. Returns (ticker, data, portfolio summary, available cash).
+    """
+    ticker = normalize_ticker(raw_ticker)
+    if not ticker:
+        raise _trigger_precheck_error(invalid_ticker_result(raw_ticker))
+    data = await asyncio.to_thread(market_data_provider.get_stock_data, ticker)
+    summary = await active_broker.get_portfolio_summary() if data else {}
+    available_cash = summary.get("available_cash_eur", 0.0)
+    blocked = await precheck_manual_trigger(ticker, data, available_cash)
+    if blocked:
+        raise _trigger_precheck_error(blocked)
+    return ticker, data, summary, available_cash
+
 @router.post("/api/triggers")
 async def create_trigger(req: CreateTriggerRequest):
-    ticker = req.ticker.strip().upper()
-    data = await asyncio.to_thread(market_data_provider.get_stock_data, ticker)
-    if not data:
-        raise HTTPException(status_code=404, detail=f"Market data not found for '{ticker}'.")
-
-    summary = await active_broker.get_portfolio_summary()
-    available_cash = summary.get("available_cash_eur", 0.0)
-    if available_cash < 20.0:
-        raise HTTPException(status_code=400, detail=f"Insufficient available cash (€{available_cash:.2f}) to arm trigger.")
+    ticker, data, summary, available_cash = await _precheck_trigger(req.ticker)
 
     report = await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
 
@@ -312,6 +335,12 @@ async def create_trigger(req: CreateTriggerRequest):
     tp = req.take_profit or report["risk"]["take_profit_price"]
     rationale = req.ai_rationale or report.get("trigger_rationale", report["summary"])
 
+    gate = await evaluate_manual_trigger(
+        ticker, data, report, target_price, alloc_eur, await get_trigger_min_score(), force=req.force
+    )
+    if not gate.allowed:
+        raise _trigger_blocked_error(gate, report)
+
     res = await active_broker.create_price_trigger(
         ticker=ticker,
         name=data.get("name", ticker),
@@ -327,25 +356,16 @@ async def create_trigger(req: CreateTriggerRequest):
     )
     if not res.get("success"):
         raise HTTPException(status_code=400, detail=res.get("message"))
-    return res
+    return {**res, "gate": gate.to_detail()}
 
 @router.post("/api/triggers/from-ai")
 async def create_trigger_from_ai(req: CreateTriggerFromAIRequest):
     """Convenience endpoint: Runs AI committee and arms optimal limit trigger directly."""
-    ticker = req.ticker.strip().upper()
-    data = await asyncio.to_thread(market_data_provider.get_stock_data, ticker)
-    if not data:
-        raise HTTPException(status_code=404, detail=f"Market data not found for '{ticker}'.")
-
-    summary = await active_broker.get_portfolio_summary()
-    available_cash = summary.get("available_cash_eur", 0.0)
-    if available_cash < 20.0:
-        raise HTTPException(status_code=400, detail=f"Insufficient available cash (€{available_cash:.2f}) to arm trigger.")
+    ticker, data, summary, available_cash = await _precheck_trigger(req.ticker)
 
     report = await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
 
-    trigger_price = report.get("entry_trigger_price", data["price"])
-    trigger_type = report.get("trigger_type", "LIMIT_PULLBACK")
+    trigger_type, trigger_price, sl, tp = derive_trigger_levels(report, data["price"])
     alloc_eur = _calculate_safe_allocation(
         available_cash,
         req.allocation_eur,
@@ -356,6 +376,12 @@ async def create_trigger_from_ai(req: CreateTriggerFromAIRequest):
     )
     rationale = report.get("trigger_rationale", report["summary"])
 
+    gate = await evaluate_manual_trigger(
+        ticker, data, report, trigger_price, alloc_eur, await get_trigger_min_score(), force=req.force
+    )
+    if not gate.allowed:
+        raise _trigger_blocked_error(gate, report)
+
     res = await active_broker.create_price_trigger(
         ticker=ticker,
         name=data.get("name", ticker),
@@ -363,8 +389,8 @@ async def create_trigger_from_ai(req: CreateTriggerFromAIRequest):
         trigger_type=trigger_type,
         target_price=trigger_price,
         current_price_at_creation=data["price"],
-        stop_loss=report["risk"]["stop_loss_price"],
-        take_profit=report["risk"]["take_profit_price"],
+        stop_loss=sl,
+        take_profit=tp,
         allocation_eur=alloc_eur,
         consensus_score=report["consensus_score"],
         ai_rationale=rationale
@@ -376,7 +402,7 @@ async def create_trigger_from_ai(req: CreateTriggerFromAIRequest):
     from src.telegram.bot import telegram_bot
     await telegram_bot.notify_trigger_armed(res)
 
-    return res
+    return {**res, "gate": gate.to_detail()}
 
 @router.delete("/api/triggers/{trigger_id}")
 async def cancel_trigger(trigger_id: int):

@@ -506,12 +506,13 @@
       <div class="space-y-2">
         <div class="flex items-stretch gap-2">
           <label for="triggerTickerInput" class="sr-only">Ticker</label>
-          <input type="text" id="triggerTickerInput" inputmode="text" autocapitalize="characters" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="go" placeholder="Ticker, e.g. NVDA or ASML.AS" class="ui-input ui-num uppercase placeholder:normal-case flex-1 min-w-0">
+          <input type="text" id="triggerTickerInput" inputmode="text" autocapitalize="characters" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="go" oninput="clearTriggerFeedback()" placeholder="Ticker, e.g. NVDA or ASML.AS" class="ui-input ui-num uppercase placeholder:normal-case flex-1 min-w-0">
           <button onclick="armTriggerFromInput()" id="armTriggerBtn" type="button" class="ui-btn ui-btn-primary shrink-0" style="min-height:48px">
             <i class="fa-solid fa-crosshairs"></i> Arm
           </button>
         </div>
-        <p class="text-xs ui-faint px-1">The committee analyses the ticker and sets a pullback or breakout entry. It fills automatically during market hours.</p>
+        <div id="triggerArmFeedback" role="status" aria-live="polite" class="empty:hidden"></div>
+        <p class="text-xs ui-faint px-1">The committee analyses the ticker and sets a pullback or breakout entry. A trigger is only armed when the committee gives a buy verdict at or above the trigger score threshold. It fills automatically during market hours.</p>
       </div>
 
       <!-- Pending triggers -->

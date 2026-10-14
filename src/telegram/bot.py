@@ -11,7 +11,11 @@ from config.settings import settings
 from src.data.market import market_data_provider
 from src.agents.committee import investment_committee
 from src.trading.broker import active_broker as paper_broker, get_active_broker, active_broker, live_broker
-from src.trading.risk import calculate_position_allocation
+from src.trading.risk import calculate_position_allocation, derive_trigger_levels
+from src.trading.trigger_gate import (
+    normalize_ticker, invalid_ticker_result, precheck_manual_trigger, evaluate_trigger_verdict,
+    evaluate_manual_trigger, get_trigger_min_score
+)
 
 logger = logging.getLogger(__name__)
 
@@ -497,44 +501,50 @@ class TelegramAssistant:
         if self._polling_task:
             self._polling_task.cancel()
 
-    async def _arm_trigger_from_report(
-        self, ticker: str, data: Dict[str, Any], report: Dict[str, Any], available_cash: float, explicit_price: Optional[float] = None
+    def _plan_trigger(
+        self, data: Dict[str, Any], report: Dict[str, Any], available_cash: float, explicit_price: Optional[float] = None
     ) -> Dict[str, Any]:
+        """
+        The levels and euro allocation an armed trigger would use, without arming anything, so the trigger gate
+        can judge them first. An explicit price decides the trigger type (below the market: pullback, else breakout).
+        """
         cur_pr = data["price"]
-        trigger_price = explicit_price or report.get("entry_trigger_price", cur_pr)
-        trigger_type = ("LIMIT_PULLBACK" if explicit_price < cur_pr else "BREAKOUT_BUY") if explicit_price else report.get("trigger_type", "LIMIT_PULLBACK")
-        if trigger_type == "LIMIT_PULLBACK" and trigger_price >= cur_pr:
-            trigger_price = round(cur_pr * 0.985, 2)
-        elif trigger_type == "BREAKOUT_BUY" and trigger_price <= cur_pr:
-            trigger_price = round(cur_pr * 1.01, 2)
-
-        sl = report.get("risk", {}).get("stop_loss_price")
-        tp = report.get("risk", {}).get("take_profit_price")
-        if sl and sl >= trigger_price:
-            sl = round(trigger_price * 0.96, 2)
-        if tp and tp <= trigger_price:
-            tp = round(trigger_price * 1.06, 2)
+        levels_report = {**report, "risk": report.get("risk") or {}}
+        if explicit_price:
+            levels_report["entry_trigger_price"] = explicit_price
+            levels_report["trigger_type"] = "LIMIT_PULLBACK" if explicit_price < cur_pr else "BREAKOUT_BUY"
+        trigger_type, trigger_price, sl, tp = derive_trigger_levels(levels_report, cur_pr)
 
         alloc = calculate_position_allocation(
             available_cash=available_cash,
-            recommended_size_pct=report.get("risk", {}).get("recommended_size_pct"),
+            recommended_size_pct=levels_report["risk"].get("recommended_size_pct"),
             full_budget_utilization=settings.FULL_BUDGET_UTILIZATION
         )
+        return {"target_price": trigger_price, "trigger_type": trigger_type, "stop_loss": sl, "take_profit": tp, "alloc_eur": alloc}
+
+    async def _arm_trigger_from_report(
+        self, ticker: str, data: Dict[str, Any], report: Dict[str, Any], available_cash: float,
+        explicit_price: Optional[float] = None, plan: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Arms the trigger for a committee report. Pass the plan from _plan_trigger when the gate already used it."""
+        plan = plan or self._plan_trigger(data, report, available_cash, explicit_price)
 
         res = await paper_broker.create_price_trigger(
             ticker=ticker,
             name=data.get("name", ticker),
             currency=data.get("currency", "USD"),
-            trigger_type=trigger_type,
-            target_price=trigger_price,
-            current_price_at_creation=cur_pr,
-            stop_loss=sl,
-            take_profit=tp,
-            allocation_eur=alloc,
+            trigger_type=plan["trigger_type"],
+            target_price=plan["target_price"],
+            current_price_at_creation=data["price"],
+            stop_loss=plan["stop_loss"],
+            take_profit=plan["take_profit"],
+            allocation_eur=plan["alloc_eur"],
             consensus_score=report.get("consensus_score", 70),
             ai_rationale=report.get("trigger_rationale", report.get("summary", ""))
         )
-        res.update({"target_price": trigger_price, "trigger_type": trigger_type, "stop_loss": sl, "take_profit": tp, "alloc_eur": alloc})
+        res.update(plan)
+        # Show the allocation the broker actually stored, not the planned one
+        res["alloc_eur"] = res.get("allocation_eur", plan["alloc_eur"])
         return res
 
     async def _handle_update(self, update: Dict[str, Any]):
@@ -591,7 +601,7 @@ class TelegramAssistant:
                 "🔔 <code>/review [eu|us] [open|close]</code> - Instant Market Review & Daily Advice\n"
                 "📜 <code>/compare</code> - Past-week reviews comparison & pick follow-through\n"
                 "🎯 <code>/triggers</code> - View active AI limit price triggers\n"
-                "⚡ <code>/trigger TICKER [PRICE]</code> - AI calculates entry level (or specify custom level) and arms limit buy trigger\n"
+                "⚡ <code>/trigger TICKER [PRICE] [force]</code> - AI calculates entry level (or specify custom level) and arms limit buy trigger. Needs a committee buy verdict at or above the trigger score; <code>force</code> overrides a HOLD verdict or low score, never a SELL, Risk Officer veto, falling market or too-expensive share\n"
                 "❌ <code>/cancel_trigger ID_OR_TICKER</code> - Cancel a pending trigger (e.g. <code>/cancel 1</code> or <code>/cancel NVDA</code>)\n"
                 "🔍 <code>/analyze TICKER</code> - Instant multi-agent committee debate (e.g. <code>/analyze NVDA</code>)\n"
                 "📋 <code>/watchlist [add|del TICKER]</code> - View or manage radar stocks\n"
@@ -836,36 +846,62 @@ class TelegramAssistant:
 
         elif command in ("trigger", "buy_trigger", "limit"):
             try:
-                if len(parts) < 2:
-                    await self._reply_chat(chat_id, "⚠️ Usage: <code>/trigger TICKER [TARGET_PRICE]</code> (e.g. <code>/trigger NVDA</code> or <code>/trigger ASML.AS 750</code>)")
+                usage = "<code>/trigger TICKER [TARGET_PRICE] [force]</code>"
+                if len(parts) < 2 or parts[1].lower() == "force":
+                    await self._reply_chat(chat_id, f"⚠️ Usage: {usage} (e.g. <code>/trigger NVDA</code> or <code>/trigger ASML.AS 750</code>)")
                     return
-                
-                target_ticker = parts[1].upper().lstrip("$")
+
+                # "force" may be the 3rd or 4th word: /trigger NVDA force, /trigger NVDA 750 force
+                force = any(p.lower() == "force" for p in parts[2:4])
+                price_args = [p for p in parts[2:4] if p.lower() != "force"]
+
+                target_ticker = normalize_ticker(parts[1])
+                if not target_ticker:
+                    await self._reply_chat(chat_id, f"⚠️ {html.escape(invalid_ticker_result(parts[1]).message)} Usage: {usage}")
+                    return
+
                 explicit_price = None
-                if len(parts) >= 3:
+                if price_args:
                     try:
-                        explicit_price = float(parts[2].replace(",", ".").lstrip("$€£"))
+                        explicit_price = float(price_args[0].replace(",", ".").lstrip("$€£"))
                     except ValueError:
                         explicit_price = None
                     if explicit_price is None or not math.isfinite(explicit_price) or explicit_price <= 0:
-                        await self._reply_chat(chat_id, "⚠️ Invalid price. Usage: <code>/trigger TICKER [TARGET_PRICE]</code> (price must be a number greater than 0, e.g. <code>/trigger ASML.AS 750</code>)")
+                        await self._reply_chat(chat_id, f"⚠️ Invalid price. Usage: {usage} (price must be a number greater than 0, e.g. <code>/trigger ASML.AS 750</code>)")
                         return
 
                 await self._reply_chat(chat_id, f"⏳ Analyzing <b>{target_ticker}</b> to determine optimal AI entry trigger level...")
-                
-                data = await asyncio.to_thread(market_data_provider.get_stock_data, target_ticker)
-                if not data:
-                    await self._reply_chat(chat_id, f"❌ Could not fetch market data for {target_ticker}. Please check ticker symbol.")
-                    return
 
-                summary = await paper_broker.get_portfolio_summary()
+                data = await asyncio.to_thread(market_data_provider.get_stock_data, target_ticker)
+                summary = await paper_broker.get_portfolio_summary() if data else {}
                 available_cash = summary.get("available_cash_eur", 0.0)
-                if available_cash < 20.0:
-                    await self._reply_chat(chat_id, f"⚠️ Cannot arm trigger: insufficient available cash (€{available_cash:.2f}).")
+
+                # Cheap checks first, so a bad ticker or an empty wallet never costs a committee run
+                blocked = await precheck_manual_trigger(target_ticker, data, available_cash)
+                if blocked:
+                    if blocked.code == "NO_MARKET_DATA":
+                        await self._reply_chat(chat_id, f"❌ Could not fetch market data for {target_ticker}. Please check ticker symbol.")
+                    else:
+                        await self._reply_chat(chat_id, f"⚠️ Cannot arm trigger: {html.escape(blocked.message)}")
                     return
 
                 report = await investment_committee.evaluate_ticker(data, summary.get("total_value_eur", 10000.0))
-                trig_res = await self._arm_trigger_from_report(target_ticker, data, report, available_cash, explicit_price)
+                plan = self._plan_trigger(data, report, available_cash, explicit_price)
+                gate = await evaluate_manual_trigger(
+                    target_ticker, data, report, plan["target_price"], plan["alloc_eur"], await get_trigger_min_score(), force=force
+                )
+                if not gate.allowed:
+                    reply = f"🛑 <b>TRIGGER NOT ARMED:</b> {target_ticker}\n\n{html.escape(gate.message)}"
+                    if gate.overridable:
+                        price_part = f" {explicit_price}" if explicit_price else ""
+                        reply += (
+                            f"\n\n💡 <i>To arm it anyway, against the committee's verdict, resend "
+                            f"<code>/trigger {target_ticker}{price_part} force</code>.</i>"
+                        )
+                    await self._reply_chat(chat_id, reply)
+                    return
+
+                trig_res = await self._arm_trigger_from_report(target_ticker, data, report, available_cash, explicit_price, plan=plan)
 
                 if trig_res.get("success"):
                     dist_pct = round(((trig_res["target_price"] / data["price"]) - 1.0) * 100, 1)
@@ -879,8 +915,13 @@ class TelegramAssistant:
                         f"🧠 <b>AI Rationale:</b>\n{html.escape(report.get('trigger_rationale', report.get('summary', '')))}\n\n"
                         f"⚡ <i>When price hits {trig_res['target_price']} during open market hours, it will automatically buy and notify you.</i>"
                     )
+                    if gate.code == "OK_FORCED":
+                        reply += (
+                            f"\n\n⚠️ <i>Forced: armed against the committee verdict ({html.escape(gate.action or 'no verdict')}, "
+                            f"score {gate.consensus_score}/100, trigger threshold {gate.trigger_min_score}).</i>"
+                        )
                 else:
-                    reply = f"⚠️ {trig_res.get('message')}"
+                    reply = f"⚠️ {html.escape(str(trig_res.get('message')))}"
                 await self._reply_chat(chat_id, reply)
             except Exception as e:
                 logger.error(f"Error handling /trigger: {e}", exc_info=True)
@@ -941,34 +982,48 @@ class TelegramAssistant:
                 action_icon = "🟢" if "BUY" in report.get('action', '') else ("🔴" if "SELL" in report.get('action', '') else "🟡")
                 score = report.get("consensus_score", 50)
 
+                # Auto-arm only what the trigger gate allows: a buy verdict the Risk Officer approved, at or above the threshold
                 auto_armed_note = ""
-                if score >= settings.TRIGGER_MIN_SCORE:
-                    # Automatic trigger arming for scores >= 80
-                    triggers = await paper_broker.get_triggers()
-                    pending_tickers = {t["ticker"].upper() for t in triggers if t.get("status") == "PENDING"}
-                    positions = await paper_broker.get_positions()
-                    held_tickers = {p["ticker"].upper() for p in positions}
-
-                    if target_ticker in held_tickers:
-                        auto_armed_note = "\n\n💼 <i>Position already open in portfolio (anti-overlap active).</i>"
-                    elif target_ticker in pending_tickers:
-                        auto_armed_note = f"\n\n⏳ <i>Pending trigger already active for {target_ticker}.</i>"
+                trigger_min_score = await get_trigger_min_score()
+                verdict = evaluate_trigger_verdict(report, trigger_min_score)
+                if verdict.allowed:
+                    available_cash = summary.get("available_cash_eur", 0.0)
+                    if normalize_ticker(target_ticker):
+                        blocked = await precheck_manual_trigger(target_ticker, data, available_cash)
                     else:
-                        available_cash = summary.get("available_cash_eur", 0.0)
-                        if available_cash >= 20.0:
-                            trig_res = await self._arm_trigger_from_report(target_ticker, data, report, available_cash)
-                            if trig_res.get("success"):
-                                dist_pct = round(((trig_res["target_price"] / data["price"]) - 1.0) * 100, 1)
-                                auto_armed_note = (
-                                    f"\n\n🎯 <b>AUTOMATIC TRIGGER ARMED #{trig_res['trigger_id']}:</b>\n"
-                                    f"Conviction score (<b>{score}/100</b>) exceeds 80! Automatically armed {trig_res['trigger_type']} "
-                                    f"at <b>{trig_res['target_price']} {data.get('currency', 'USD')}</b> ({dist_pct:+.1f}%) with €{trig_res['alloc_eur']:,.2f} reserved."
-                                )
-                                await self.notify_trigger_armed(trig_res)
-                            else:
-                                auto_armed_note = f"\n\n⚠️ <i>Could not auto-arm trigger: {trig_res.get('message')}</i>"
+                        blocked = invalid_ticker_result(target_ticker)
+                    plan = None
+                    if not blocked:
+                        plan = self._plan_trigger(data, report, available_cash)
+                        gate = await evaluate_manual_trigger(
+                            target_ticker, data, report, plan["target_price"], plan["alloc_eur"], trigger_min_score
+                        )
+                        blocked = None if gate.allowed else gate
+
+                    if blocked is None:
+                        trig_res = await self._arm_trigger_from_report(target_ticker, data, report, available_cash, plan=plan)
+                        if trig_res.get("success"):
+                            dist_pct = round(((trig_res["target_price"] / data["price"]) - 1.0) * 100, 1)
+                            auto_armed_note = (
+                                f"\n\n🎯 <b>AUTOMATIC TRIGGER ARMED #{trig_res['trigger_id']}:</b>\n"
+                                f"Conviction score (<b>{score}/100</b>) meets the trigger threshold of {trigger_min_score}! Automatically armed {trig_res['trigger_type']} "
+                                f"at <b>{trig_res['target_price']} {data.get('currency', 'USD')}</b> ({dist_pct:+.1f}%) with €{trig_res['alloc_eur']:,.2f} reserved."
+                            )
+                            await self.notify_trigger_armed(trig_res)
                         else:
-                            auto_armed_note = f"\n\n⏸️ <i>Conviction score {score}/100 exceeds 80, but cash is insufficient (€{available_cash:.2f}).</i>"
+                            auto_armed_note = f"\n\n⚠️ <i>Could not auto-arm trigger: {html.escape(str(trig_res.get('message')))}</i>"
+                    elif blocked.code == "POSITION_OPEN":
+                        auto_armed_note = "\n\n💼 <i>Position already open in portfolio (anti-overlap active).</i>"
+                    elif blocked.code == "TRIGGER_PENDING":
+                        auto_armed_note = f"\n\n⏳ <i>Pending trigger already active for {html.escape(target_ticker)}.</i>"
+                    elif blocked.code == "INSUFFICIENT_CASH":
+                        auto_armed_note = f"\n\n⏸️ <i>Conviction score {score}/100 meets the trigger threshold of {trigger_min_score}, but cash is insufficient (€{available_cash:.2f}).</i>"
+                    else:
+                        auto_armed_note = f"\n\n🚫 <i>Not auto-armed: {html.escape(blocked.message)}</i>"
+                elif verdict.consensus_score is not None and verdict.consensus_score >= trigger_min_score:
+                    # A score that would have armed a trigger, held back by the verdict (HOLD, SELL, Risk Officer veto).
+                    # A score below the threshold is simply not high enough, which needs no comment.
+                    auto_armed_note = f"\n\n🚫 <i>Not auto-armed: {html.escape(verdict.message)}</i>"
 
                 tech = report.get('technical', {})
                 fund = report.get('fundamental', {})
