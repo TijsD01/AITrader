@@ -219,5 +219,43 @@ def validate_buy_order(
 
     return True, "Approved"
 
+def evaluate_trigger_condition(
+    trigger_type: str,
+    target_price: float,
+    curr_price: float,
+    stop_loss: Optional[float] = None,
+    take_profit: Optional[float] = None
+) -> Tuple[bool, Optional[str]]:
+    """
+    Decides whether a pending price trigger should fire at curr_price.
+    Returns (condition_met, invalidation_reason). A non-empty reason means the
+    setup no longer holds (price already through the stop or the target) and
+    the trigger should be cancelled instead of bought.
+    """
+    if trigger_type == "LIMIT_PULLBACK":
+        if curr_price > target_price:
+            return False, None
+        if stop_loss and curr_price <= stop_loss:
+            return False, f"price {curr_price} already at/below stop-loss {stop_loss}"
+        return True, None
+    if trigger_type == "BREAKOUT_BUY":
+        if curr_price < target_price:
+            return False, None
+        if take_profit and curr_price >= take_profit:
+            return False, f"price {curr_price} already at/above take-profit {take_profit}"
+        return True, None
+    return False, None
+
+def is_trigger_expired(created_at, now=None, max_age_days: Optional[int] = None) -> bool:
+    """True when a pending trigger (naive UTC created_at) is older than TRIGGER_EXPIRY_DAYS."""
+    import datetime
+    if created_at is None:
+        return False
+    days = max_age_days if max_age_days is not None else settings.TRIGGER_EXPIRY_DAYS
+    if not days or days <= 0:
+        return False
+    now = now or datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    return (now - created_at) > datetime.timedelta(days=days)
+
 import sys
 risk_guardrail = sys.modules[__name__]

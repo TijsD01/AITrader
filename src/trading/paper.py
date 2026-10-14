@@ -10,7 +10,7 @@ from src.db.models import Position, Trade, PortfolioSnapshot, SystemConfig, Orde
 from src.db.session import AsyncSessionLocal
 from src.data.currency import currency_service
 from src.data.market import market_data_provider
-from src.trading.risk import risk_guardrail, get_effective_deployable_cash, calculate_position_allocation, allocate_pending_triggers
+from src.trading.risk import risk_guardrail, get_effective_deployable_cash, calculate_position_allocation, allocate_pending_triggers, evaluate_trigger_condition, is_trigger_expired
 from src.data.market_hours import check_market_hours
 from src.trading.base import BaseBroker
 
@@ -840,6 +840,12 @@ class PaperBroker(BaseBroker):
 
             executed = []
             for t in pending:
+                if is_trigger_expired(t.created_at):
+                    logger.info(f"Trigger #{t.id} for {t.ticker} expired (older than {settings.TRIGGER_EXPIRY_DAYS} days).")
+                    t.status = "EXPIRED"
+                    await session.commit()
+                    continue
+
                 # 0. Unfunded triggers (outranked for cash or slots) wait until funding frees up
                 if t.allocation_eur <= 0:
                     continue
@@ -856,12 +862,15 @@ class PaperBroker(BaseBroker):
                     continue
                 curr_price = data["price"]
 
-                # 3. Check trigger condition
-                condition_met = False
-                if t.trigger_type == "LIMIT_PULLBACK" and curr_price <= t.target_price:
-                    condition_met = True
-                elif t.trigger_type == "BREAKOUT_BUY" and curr_price >= t.target_price:
-                    condition_met = True
+                # Check trigger condition; cancel setups the price has already run through
+                condition_met, invalid_reason = evaluate_trigger_condition(
+                    t.trigger_type, t.target_price, curr_price, t.stop_loss, t.take_profit
+                )
+                if invalid_reason:
+                    logger.info(f"Cancelling trigger #{t.id} for {t.ticker}: {invalid_reason}")
+                    t.status = "CANCELLED"
+                    await session.commit()
+                    continue
 
                 if condition_met:
                     logger.info(f"🎯 AI Trigger hit for {t.ticker}: {t.trigger_type} at {curr_price} (Target: {t.target_price})")
@@ -875,7 +884,7 @@ class PaperBroker(BaseBroker):
                         allocation_eur=t.allocation_eur,
                         consensus_score=t.consensus_score or 75,
                         rationale=f"AI Trigger #{t.id} Hit ({t.trigger_type} @ {t.target_price}): {t.ai_rationale}",
-                        is_manual=True,
+                        is_manual=False,
                         trigger_id=t.id
                     )
                     if trade_res.get("success"):

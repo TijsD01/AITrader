@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     AUTO_BUY_ENABLED: bool = True           # Auto-execute high conviction signals
     MIN_CONSENSUS_SCORE: int = 70           # Out of 100 to trigger auto-trade
     TRIGGER_MIN_SCORE: int = 80             # Score threshold (>= 80) to automatically arm AI price triggers
+    TRIGGER_EXPIRY_DAYS: int = 7            # Pending price triggers older than this are marked EXPIRED
     ENFORCE_MARKET_HOURS: bool = True       # When true, trades are strictly blocked when markets are closed
 
     # Real Money Trading & Broker Scheme
