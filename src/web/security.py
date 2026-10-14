@@ -25,7 +25,24 @@ def _is_private_client(host: Optional[str]) -> bool:
         ip = ipaddress.ip_address(host)
     except ValueError:
         return False
-    return ip.is_loopback or ip.is_private or ip.is_link_local
+    if getattr(ip, "ipv4_mapped", None):
+        ip = ip.ipv4_mapped
+    if ip.is_loopback or ip.is_private or ip.is_link_local:
+        return True
+    return any(ip in net for net in _trusted_networks())
+
+
+def _trusted_networks():
+    nets = []
+    for cidr in (settings.WEB_TRUSTED_NETWORKS or "").split(","):
+        cidr = cidr.strip()
+        if not cidr:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(cidr, strict=False))
+        except ValueError:
+            logger.warning(f"Ignoring invalid WEB_TRUSTED_NETWORKS entry: {cidr}")
+    return nets
 
 
 def _check_basic_auth(header: Optional[str]) -> bool:
