@@ -2,6 +2,7 @@ import logging
 import math
 import re
 from typing import Dict, Any, Optional
+from config.settings import settings
 from src.agents.base import llm_client
 from src.agents.technical import TechnicalAnalystAgent
 from src.agents.fundamental import FundamentalAnalystAgent
@@ -34,6 +35,17 @@ class InvestmentCommittee:
         if score is None or not math.isfinite(score):
             return None
         return action, int(max(0, min(100, round(score))))
+
+    @staticmethod
+    def _sentiment_veto(sent_rep: Dict[str, Any]) -> bool:
+        """
+        News sentiment counts only as a red flag (Lopez-Lira & Tang 2023: for large caps the signal sits
+        mostly in negative news). At or below SENTIMENT_VETO_SCORE it blocks a buy.
+        """
+        try:
+            return float(sent_rep.get("score", 0.0)) <= settings.SENTIMENT_VETO_SCORE
+        except (TypeError, ValueError):
+            return False
 
     @staticmethod
     async def evaluate_ticker(stock_data: Dict[str, Any], portfolio_equity_eur: float = 10000.0) -> Dict[str, Any]:
@@ -79,6 +91,7 @@ class InvestmentCommittee:
         fund_rep = await FundamentalAnalystAgent.analyze(stock_data)
         sent_rep = await SentimentAnalystAgent.analyze(stock_data)
         risk_rep = await RiskManagerAgent.evaluate_risk(stock_data, tech_rep, fund_rep, portfolio_equity_eur)
+        sentiment_veto = InvestmentCommittee._sentiment_veto(sent_rep)
 
         # 3. Conduct LLM Committee Debate (if LLM active)
         system_prompt = (
@@ -110,6 +123,8 @@ Analyst Reports:
 3. Sentiment Analyst:
    Mood: {sent_rep.get('mood')} (Score: {sent_rep.get('score')})
    Summary: {sent_rep.get('sentiment_summary')}
+   Note: for these large caps news is only a red flag. Clearly negative news is a reason not to buy;
+   positive news is not a reason to buy or to raise the score.
 
 4. Risk Officer:
    Approved: {risk_rep.get('approved')}
@@ -135,6 +150,9 @@ Synthesize the debate and return JSON with:
                     if res_action in ("BUY", "STRONG_BUY"):
                         res_action = "HOLD"
                     res_score = min(res_score, 55)
+                # Negative-news veto: downgrade a buy to HOLD (the score cap below then applies)
+                if sentiment_veto and res_action in ("BUY", "STRONG_BUY"):
+                    res_action = "HOLD"
                 # A non-buy verdict must not carry a buy-level score either
                 if res_action in ("HOLD", "SELL"):
                     res_score = min(res_score, 55)
@@ -176,7 +194,8 @@ Synthesize the debate and return JSON with:
         # Structured Synthetic Debate Generator Fallback with Dynamic Weights
         tech_score = tech_rep["confidence"] if tech_rep["bias"] == "BULLISH" else (30 if tech_rep["bias"] == "BEARISH" else 50)
         fund_score = fund_rep["confidence"] if fund_rep["valuation"] in ("UNDERVALUED", "FAIR") else 35
-        sent_score = int(50 + (sent_rep["score"] * 40))
+        # Sentiment can only pull the score down: positive news is not a buy reason
+        sent_score = int(50 + (min(0.0, sent_rep["score"]) * 40))
         
         # Weighted score with dynamically adapted weights
         final_score = int((tech_score * tech_w) + (fund_score * fund_w) + (sent_score * sent_w) + (75 * risk_w))
@@ -197,6 +216,10 @@ Synthesize the debate and return JSON with:
         # Risk Officer Veto Power (e.g. excessive fee drag or unviable trade economics)
         risk_veto = not risk_rep.get("approved", True)
         if risk_veto and action in ("BUY", "STRONG_BUY"):
+            action = "HOLD"
+            final_score = min(final_score, 55)
+        news_veto = sentiment_veto and action in ("BUY", "STRONG_BUY")
+        if news_veto:
             action = "HOLD"
             final_score = min(final_score, 55)
 
@@ -224,6 +247,7 @@ Synthesize the debate and return JSON with:
         summary = (
             f"Committee assigns **{action}** (Score {final_score}/100) for {ticker}. "
             f"{'Vetoed to HOLD by Risk Officer. ' if risk_veto else ''}"
+            f"{'Vetoed to HOLD on negative news. ' if news_veto else ''}"
             f"AI Trigger: {trig_type} @ {trigger_pr}. Technical: {tech_rep['bias']}; "
             f"Fundamental: {fund_rep['valuation']}; Sentiment: {sent_rep['mood']}. "
             f"Target R:R is {risk_rep['risk_reward_ratio']}:1."

@@ -12,6 +12,7 @@ settings.DATABASE_URL = f"sqlite+aiosqlite:///{TEST_DB_FILE}"
 settings.TRADING_MODE = "PAPER"
 settings.LIVE_TRADING_ENABLED = False
 settings.ENFORCE_MARKET_HOURS = True
+settings.REGIME_FILTER_ENABLED = False  # offline tests: no index lookups; covered in test_research_strategy.py
 
 # Re-bind session engine to the test database
 from src.db import session as db_session_module

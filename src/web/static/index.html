@@ -118,6 +118,11 @@
         <span><span class="more-title">Debate</span><span class="more-sub">Ask the committee</span></span>
         <i class="fa-solid fa-check text-xs text-indigo-300 mobile-active-check hidden absolute top-3.5 right-3.5"></i>
       </button>
+      <button type="button" onclick="switchTab('shadow')" class="mobile-dropdown-item more-tile" data-tab="shadow">
+        <i class="fa-solid fa-flask text-pink-300"></i>
+        <span><span class="more-title">Shadow</span><span class="more-sub">Paper strategy test</span></span>
+        <i class="fa-solid fa-check text-xs text-indigo-300 mobile-active-check hidden absolute top-3.5 right-3.5"></i>
+      </button>
       <button type="button" onclick="switchTab('memory')" class="mobile-dropdown-item more-tile" data-tab="memory">
         <i class="fa-solid fa-brain text-amber-300"></i>
         <span><span class="more-title">Memory</span><span class="more-sub">Agent memory hub</span></span>
@@ -152,6 +157,7 @@
       <button onclick="switchTab('history')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="history"><i class="fa-solid fa-clock-rotate-left mr-2"></i>History</button>
       <button onclick="switchTab('screener')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="screener"><i class="fa-solid fa-magnifying-glass-chart mr-2"></i>Screener</button>
       <button onclick="switchTab('debate')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="debate"><i class="fa-solid fa-comments mr-2"></i>Debate</button>
+      <button onclick="switchTab('shadow')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="shadow"><i class="fa-solid fa-flask mr-2"></i>Shadow</button>
       <button onclick="switchTab('memory')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="memory"><i class="fa-solid fa-brain mr-2"></i>Memory</button>
       <button onclick="switchTab('settings')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="settings"><i class="fa-solid fa-sliders mr-2"></i>Settings</button>
     </div>
@@ -623,6 +629,22 @@
             </table>
           </div>
         </div>
+      </div>
+    </section>
+
+    <!-- TAB: SHADOW PAPER PORTFOLIOS -->
+    <section id="tab-shadow" class="tab-content hidden space-y-6">
+      <div class="ui-page-head" style="flex-wrap:nowrap;align-items:flex-start">
+        <div class="min-w-0">
+          <h2 class="ui-page-title">Shadow paper</h2>
+          <p class="ui-page-sub">Simulated strategies that follow the same committee verdicts with other rules. No real orders.</p>
+        </div>
+        <button onclick="loadShadow()" type="button" class="ui-btn ui-btn-quiet ui-icon-btn shrink-0" aria-label="Refresh shadow portfolios" title="Refresh">
+          <i class="fa-solid fa-arrows-rotate"></i>
+        </button>
+      </div>
+      <div id="shadowContainer" class="space-y-6">
+        <div class="ui-card ui-card-pad text-[13px] ui-muted">Loading shadow portfolios...</div>
       </div>
     </section>
 

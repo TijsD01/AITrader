@@ -791,3 +791,24 @@ async def sync_account():
     return {"success": True, "portfolio": summary}
 
 
+
+# 9. Shadow paper portfolios (simulated strategy variants next to the main portfolio)
+@router.get("/api/shadow")
+async def get_shadow_comparison():
+    """Main portfolio versus every enabled shadow strategy, each measured since the shadow started."""
+    from src.trading.shadow import shadow_portfolios
+    main_is_live = settings.TRADING_MODE.upper() == "LIVE" and settings.LIVE_TRADING_ENABLED
+    try:
+        main_summary = await active_broker.get_portfolio_summary()
+    except Exception as e:
+        logger.warning(f"Shadow comparison: main portfolio summary unavailable: {e}")
+        main_summary = {}
+    return await shadow_portfolios.get_comparison(main_summary, main_is_live)
+
+@router.post("/api/shadow/{strategy_key}/reset")
+async def reset_shadow(strategy_key: str):
+    """Restarts one shadow portfolio from fresh simulated capital. Never touches the main portfolio."""
+    from src.trading.shadow import shadow_portfolios
+    if not await shadow_portfolios.reset(strategy_key.strip().lower()):
+        raise HTTPException(status_code=404, detail=f"No shadow portfolio named '{strategy_key}'.")
+    return {"success": True, "message": f"Shadow portfolio '{strategy_key}' was reset."}

@@ -156,6 +156,7 @@ document.addEventListener('click', (e) => {
     case 'analyze': analyzeDirect(ticker); break;
     case 'inspect': inspectReport(Number(el.dataset.idx)); break;
     case 'cancel-trigger': cancelTrigger(Number(el.dataset.id), ticker); break;
+    case 'reset-shadow': resetShadow(el.dataset.key || ''); break;
     default: break;
   }
 });
@@ -195,6 +196,7 @@ const TAB_CONFIG = {
   debate: { label: 'Committee Debate', icon: 'fa-solid fa-comments' },
   triggers: { label: 'AI Triggers', icon: 'fa-solid fa-crosshairs' },
   history: { label: 'Trade History', icon: 'fa-solid fa-clock-rotate-left' },
+  shadow: { label: 'Shadow Paper', icon: 'fa-solid fa-flask' },
   memory: { label: 'Memory Hub', icon: 'fa-solid fa-brain' },
   settings: { label: 'Settings', icon: 'fa-solid fa-sliders' }
 };
@@ -246,7 +248,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 // Tab Switching
-const MORE_TABS = ['screener', 'debate', 'memory', 'settings'];
+const MORE_TABS = ['screener', 'debate', 'shadow', 'memory', 'settings'];
 
 function switchTabUi(tabId) {
   currentTab = tabId;
@@ -282,7 +284,7 @@ function switchTab(tabId) {
   const mobileLabel = document.getElementById('mobileDropdownActiveText');
   const mobileIcon = document.getElementById('mobileDropdownActiveIcon');
   const inMore = MORE_TABS.includes(tabId);
-  const SHORT = { screener: 'Screener', debate: 'Debate', memory: 'Memory', settings: 'Settings' };
+  const SHORT = { screener: 'Screener', debate: 'Debate', shadow: 'Shadow', memory: 'Memory', settings: 'Settings' };
   if (mobileLabel) mobileLabel.textContent = inMore ? (SHORT[tabId] || cfg.label) : 'More';
   if (mobileIcon) mobileIcon.className = inMore ? cfg.icon : 'fa-solid fa-table-cells-large';
 
@@ -306,6 +308,7 @@ function switchTab(tabId) {
   if (tabId === 'screener') loadScreener();
   if (tabId === 'triggers') loadTriggers();
   if (tabId === 'history') { loadTrades(); loadLearningInsights(); }
+  if (tabId === 'shadow') loadShadow();
   if (tabId === 'memory') loadMemoryHub();
   if (tabId === 'settings') { loadSettings(); loadBrokerStatus(); }
 }
@@ -2273,3 +2276,202 @@ async function openExtractModal() {
 }
 
 
+
+
+// Shadow paper portfolios: simulated strategies next to the main portfolio
+const shadowCharts = {};
+
+function signedPct(value, digits = 2) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return '--';
+  const v = Number(value);
+  return `${v > 0 ? '+' : v < 0 ? '-' : ''}${num(Math.abs(v), digits)}%`;
+}
+function gainCls(value) {
+  const v = Number(value);
+  return v > 0 ? 'ui-gain' : (v < 0 ? 'ui-loss' : '');
+}
+
+function shadowParamChips(p) {
+  const chips = [];
+  chips.push(`Score &ge; ${esc(p.effective_trigger_min_score)}`);
+  if (p.entry_mode === 'market') chips.push('Buy at market');
+  else if (p.pullback_scale !== 1) chips.push(`${esc(num(p.pullback_scale * 100, 0))}% of pullback`);
+  if (p.stop_scale !== 1) chips.push(`Stop &times;${esc(num(p.stop_scale, 2))}`);
+  if (!p.use_take_profit) chips.push('No fixed target');
+  else if (p.reward_risk) chips.push(`Target ${esc(num(p.reward_risk, 1))}R`);
+  if (p.trailing_stop_pct) chips.push(`Trail ${esc(num(p.trailing_stop_pct * 100, 0))}%`);
+  chips.push(`Breakeven at +${esc(num(p.effective_breakeven_pct * 100, 1))}%`);
+  chips.push(`Max ${esc(p.effective_max_positions)} positions`);
+  if (p.max_hold_days) chips.push(`Exit after ${esc(p.max_hold_days)}d`);
+  if (p.accept_hold) chips.push('Also HOLD verdicts');
+  if (p.ignore_risk_veto) chips.push('Ignores risk veto');
+  return chips.map(c => `<span class="ui-badge">${c}</span>`).join('');
+}
+
+// The shadow keeps the main bot's values from its start; say so when the learner has moved them since
+function shadowFrozenNote(p) {
+  const f = p.frozen_main_params || {};
+  const c = p.current_main_params || {};
+  const changed = ['trigger_min_score', 'breakeven_pct', 'max_positions'].some(k => f[k] !== undefined && c[k] !== undefined && f[k] !== c[k]);
+  if (!changed) return '';
+  return `<p class="text-xs mt-1" style="color:var(--warn)"><i class="fa-solid fa-snowflake mr-1"></i>Main bot values frozen at start (score ${esc(f.trigger_min_score)}, breakeven +${esc(num((f.breakeven_pct || 0) * 100, 1))}%, max ${esc(f.max_positions)}). Main now: score ${esc(c.trigger_min_score)}, breakeven +${esc(num((c.breakeven_pct || 0) * 100, 1))}%, max ${esc(c.max_positions)}. Reset to adopt them.</p>`;
+}
+
+function shadowCompareRow(label, mainHtml, shadowHtml) {
+  return `<div class="grid grid-cols-3 gap-2 py-2 text-[13px]">
+    <span class="ui-muted">${label}</span>
+    <span class="ui-num text-right">${mainHtml}</span>
+    <span class="ui-num text-right" style="color:var(--text)">${shadowHtml}</span>
+  </div>`;
+}
+
+function renderShadowStrategy(s, mainLabel) {
+  const m = s.main_same_period || {};
+  const winRate = v => (v === null || v === undefined) ? '--' : `${esc(num(v, 0))}%`;
+  const positions = (s.open_positions || []).map(p => `
+    <div class="flex items-center justify-between gap-3 py-2 text-[13px]">
+      <div class="min-w-0">
+        <span class="font-semibold" style="color:var(--text)">${esc(p.ticker)}</span>
+        ${p.followed_main ? '' : '<span class="ui-badge ui-badge-accent ml-1">Shadow only</span>'}
+        <div class="ui-faint ui-num text-xs">${esc(num(p.entry_price_native))} &rarr; ${esc(num(p.current_price_native))} ${esc(p.currency)} · stop ${p.stop_loss_native ? esc(num(p.stop_loss_native)) : '--'}</div>
+      </div>
+      <div class="text-right shrink-0 ui-num ${gainCls(p.unrealized_pnl_eur)}">${esc(signedEur(p.unrealized_pnl_eur))}<div class="text-xs">${esc(signedPct(p.unrealized_pnl_pct, 1))}</div></div>
+    </div>`).join('');
+  const pending = (s.pending_triggers || []).map(t => `
+    <div class="flex items-center justify-between gap-3 py-2 text-[13px]">
+      <div class="min-w-0">
+        <span class="font-semibold" style="color:var(--text)">${esc(t.ticker)}</span>
+        ${t.followed_main ? '' : '<span class="ui-badge ui-badge-accent ml-1">Shadow only</span>'}
+        <div class="ui-faint text-xs">${esc(t.trigger_type === 'MARKET' ? 'Buy at market (next open)' : triggerTypeLabel(t.trigger_type))} · score ${esc(t.consensus_score)}</div>
+      </div>
+      <span class="ui-num shrink-0">${esc(num(t.target_price))} ${esc(t.currency)}</span>
+    </div>`).join('');
+  const closed = (s.recent_closed || []).map(c => `
+    <div class="flex items-center justify-between gap-3 py-2 text-[13px]">
+      <div class="min-w-0">
+        <span class="font-semibold" style="color:var(--text)">${esc(c.ticker)}</span>
+        ${c.followed_main ? '' : '<span class="ui-badge ui-badge-accent ml-1">Shadow only</span>'}
+        <div class="ui-faint text-xs">${esc(c.closed_at)} · ${esc(c.exit_reason || '')}</div>
+      </div>
+      <div class="text-right shrink-0 ui-num ${gainCls(c.realized_pnl_eur)}">${esc(signedEur(c.realized_pnl_eur))}<div class="text-xs">${esc(signedPct(c.realized_pnl_pct, 1))}</div></div>
+    </div>`).join('');
+  const list = (title, html, empty) => `
+    <div class="space-y-1">
+      <p class="ui-eyebrow px-1">${title}</p>
+      <div class="ui-inset px-3 divide-y divide-borderCol">${html || `<p class="py-2 text-[13px] ui-faint">${empty}</p>`}</div>
+    </div>`;
+
+  return `
+    <div class="ui-card ui-card-pad space-y-4">
+      <div class="flex items-start justify-between gap-3">
+        <div class="min-w-0">
+          <h3 class="ui-section-title">${esc(s.label)}</h3>
+          <p class="text-[13px] ui-muted mt-1">${esc(s.description)}</p>
+          <p class="text-xs ui-faint mt-1 ui-num">Since ${esc(s.started_at || '--')} · start ${esc(eur(s.initial_capital_eur))}</p>
+          ${shadowFrozenNote(s.params || {})}
+        </div>
+        <button type="button" class="ui-btn ui-btn-sm shrink-0" style="min-height:44px" data-action="reset-shadow" data-key="${esc(s.key)}">
+          <i class="fa-solid fa-rotate-left"></i> Reset
+        </button>
+      </div>
+      <div class="flex flex-wrap gap-1.5">${shadowParamChips(s.params || {})}</div>
+
+      <div class="ui-inset px-3 divide-y divide-borderCol">
+        <div class="grid grid-cols-3 gap-2 py-2 ui-eyebrow">
+          <span>Same period</span><span class="text-right">${esc(mainLabel)}</span><span class="text-right">${esc(s.label)}</span>
+        </div>
+        ${shadowCompareRow('Return', `<span class="${gainCls(m.return_pct)}">${esc(signedPct(m.return_pct))}</span>`, `<span class="${gainCls(s.return_pct)}">${esc(signedPct(s.return_pct))}</span>`)}
+        ${shadowCompareRow('Realized P&amp;L', `<span class="${gainCls(m.realized_pnl_eur)}">${esc(signedEur(m.realized_pnl_eur || 0))}</span>`, `<span class="${gainCls(s.realized_pnl_eur)}">${esc(signedEur(s.realized_pnl_eur || 0))}</span>`)}
+        ${shadowCompareRow('Closed trades', esc(m.closed_trades ?? 0), esc(s.closed_trades ?? 0))}
+        ${shadowCompareRow('Win rate', winRate(m.win_rate_pct), winRate(s.win_rate_pct))}
+        ${shadowCompareRow('Avg. trade', m.avg_trade_eur == null ? '--' : esc(signedEur(m.avg_trade_eur)), s.avg_trade_eur == null ? '--' : esc(signedEur(s.avg_trade_eur)))}
+      </div>
+
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-2.5">
+        <div class="ui-card kpi"><span class="ui-label">Value</span><span class="kpi-value">${esc(eur(s.total_value_eur))}</span><span class="kpi-sub ui-num">Cash ${esc(eur(s.cash_eur))}</span></div>
+        <div class="ui-card kpi"><span class="ui-label">Open P&amp;L</span><span class="kpi-value ${gainCls(s.unrealized_pnl_eur)}">${esc(signedEur(s.unrealized_pnl_eur))}</span><span class="kpi-sub">${esc((s.open_positions || []).length)} positions</span></div>
+        <div class="ui-card kpi"><span class="ui-label">Fees</span><span class="kpi-value">${esc(eur(s.fees_eur))}</span><span class="kpi-sub">Simulated commissions</span></div>
+        <div class="ui-card kpi"><span class="ui-label">Shadow-only trades</span><span class="kpi-value">${esc(s.shadow_only_trades)}</span><span class="kpi-sub">The main bot skipped these</span></div>
+      </div>
+
+      <div class="relative h-44 ${(s.history && s.history.shadow && s.history.shadow.length > 1) ? '' : 'hidden'}"><canvas id="shadowChart-${esc(s.key)}"></canvas></div>
+
+      ${list('Open positions', positions, 'No open shadow positions.')}
+      ${list('Pending entries', pending, 'No pending shadow entries.')}
+      ${list('Recently closed', closed, 'No closed shadow trades yet.')}
+    </div>`;
+}
+
+function drawShadowChart(s, mainLabel) {
+  const canvas = document.getElementById(`shadowChart-${s.key}`);
+  if (!canvas || typeof Chart === 'undefined') return;
+  if (shadowCharts[s.key]) { shadowCharts[s.key].destroy(); delete shadowCharts[s.key]; }
+  const hist = s.history || {};
+  if (!hist.shadow || hist.shadow.length < 2) return;
+  const labels = hist.shadow.map(p => p[0].slice(5));  // 'MM-DD HH:MM'
+  const mainMap = new Map((hist.main || []).map(p => [p[0].slice(5), p[1]]));
+  shadowCharts[s.key] = new Chart(canvas.getContext('2d'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: s.label, data: hist.shadow.map(p => p[1]), borderColor: '#8EA2FF', backgroundColor: '#8EA2FF', borderWidth: 2, pointRadius: 0, tension: 0.2 },
+        { label: mainLabel, data: labels.map(l => mainMap.has(l) ? mainMap.get(l) : null), borderColor: '#A3ADBD', backgroundColor: '#A3ADBD', borderWidth: 2, borderDash: [4, 4], pointRadius: 0, tension: 0.2, spanGaps: true }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { position: 'bottom', labels: { color: '#A3ADBD', boxWidth: 12 } },
+        tooltip: { callbacks: { label: c => `${c.dataset.label}: ${signedPct(c.parsed.y)}` } }
+      },
+      scales: {
+        x: { ticks: { color: '#7D8799', maxTicksLimit: 4, maxRotation: 0, callback(v) { return String(this.getLabelForValue(v)).slice(0, 5); } }, grid: { display: false } },
+        y: { ticks: { color: '#7D8799', callback: v => `${v}%` }, grid: { color: '#1E2533' } }
+      }
+    }
+  });
+}
+
+async function loadShadow() {
+  const container = document.getElementById('shadowContainer');
+  if (!container) return;
+  try {
+    const res = await fetch('/api/shadow');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Request failed');
+    const mainLabel = (data.main && data.main.label) || 'Main';
+    if (!data.enabled || !(data.strategies || []).length) {
+      const presets = (data.presets || []).map(p => `<li><span class="ui-num" style="color:var(--text)">${esc(p.key)}</span>: ${esc(p.description)}</li>`).join('');
+      container.innerHTML = `<div class="ui-card ui-card-pad text-[13px] ui-muted space-y-2">
+        <p>No shadow strategy is enabled. Set <span class="ui-num">SHADOW_ENABLED=true</span> and <span class="ui-num">SHADOW_STRATEGIES</span> in .env, then restart.</p>
+        <ul class="list-disc pl-5 space-y-1">${presets}</ul>
+      </div>`;
+      return;
+    }
+    container.innerHTML = data.strategies.map(s => renderShadowStrategy(s, mainLabel)).join('');
+    data.strategies.forEach(s => drawShadowChart(s, mainLabel));
+  } catch (e) {
+    container.innerHTML = `<div class="ui-card ui-card-pad text-[13px] ui-muted">Could not load shadow portfolios.</div>`;
+    console.debug('Error loading shadow portfolios:', e);
+  }
+}
+
+async function resetShadow(key) {
+  if (!key) return;
+  if (!confirm(`Reset the "${key}" shadow portfolio? Its simulated positions and history are deleted and it restarts with fresh capital. The main portfolio is not touched.`)) return;
+  try {
+    const res = await fetch(`/api/shadow/${encodeURIComponent(key)}/reset`, { method: 'POST' });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      showToast(data.message);
+      loadShadow();
+    } else {
+      showToast(data.detail || data.message || 'Reset failed.', true);
+    }
+  } catch (e) {
+    showToast('Error resetting shadow portfolio.', true);
+  }
+}
