@@ -161,6 +161,7 @@ Synthesize the debate and return JSON with:
                     "price": price,
                     "action": res_action,
                     "consensus_score": res_score,
+                    "score_source": "llm",  # Portfolio Manager LLM judgement
                     "summary": res.get("verdict_summary", ""),
                     "debate_transcript": res.get("debate_transcript", ""),
                     "entry_trigger_price": risk_rep.get("entry_trigger_price", price),
@@ -250,6 +251,7 @@ Synthesize the debate and return JSON with:
             "price": price,
             "action": action,
             "consensus_score": final_score,
+            "score_source": "rules",  # weighted formula (LLM unavailable or invalid)
             "summary": summary,
             "debate_transcript": transcript,
             "entry_trigger_price": trigger_pr,
