@@ -67,6 +67,15 @@ class Settings(BaseSettings):
     TRIGGER_EXPIRY_DAYS: int = 7            # Pending price triggers older than this are marked EXPIRED
     ENFORCE_MARKET_HOURS: bool = True       # When true, trades are strictly blocked when markets are closed
 
+    # Real Money Trading & Broker Scheme
+    TRADING_MODE: str = "PAPER"             # "PAPER" or "LIVE"
+    LIVE_TRADING_ENABLED: bool = False      # Explicit safety interlock for real money
+    FULL_BUDGET_UTILIZATION: bool = True    # Fully deploy available capital across active slots
+    LIVE_BROKER: str = "ibkr"               # "ibkr" (Interactive Brokers) or "alpaca"
+    KILL_SWITCH_ACTIVE: bool = False        # Emergency trading halt
+    MAX_DAILY_LOSS_EUR: float = 500.0       # Daily drawdown stop (halts buys if exceeded)
+    MAX_SINGLE_ORDER_EUR: float = 10000.0   # Hard cap on any single order
+
     # Research-backed strategy controls (see analyse/onderzoekspapers.md in the project files)
     REGIME_FILTER_ENABLED: bool = True      # No new automated entries while the market index is below its long-term average
     REGIME_SMA_DAYS: int = 200              # Moving-average length for the regime filter
@@ -77,15 +86,6 @@ class Settings(BaseSettings):
     SENTIMENT_ANONYMIZE: bool = True        # Hide company name and ticker from the news-sentiment prompt
     SENTIMENT_VETO_SCORE: float = -0.4      # News sentiment at or below this blocks a buy; positive news adds nothing
     LEARNER_MIN_TRADES: int = 20            # Closed trades required between automatic learner recalibrations
-
-    # Real Money Trading & Broker Scheme
-    TRADING_MODE: str = "PAPER"             # "PAPER" or "LIVE"
-    LIVE_TRADING_ENABLED: bool = False      # Explicit safety interlock for real money
-    FULL_BUDGET_UTILIZATION: bool = True    # Fully deploy available capital across active slots
-    LIVE_BROKER: str = "ibkr"               # "ibkr" (Interactive Brokers) or "alpaca"
-    KILL_SWITCH_ACTIVE: bool = False        # Emergency trading halt
-    MAX_DAILY_LOSS_EUR: float = 500.0       # Daily drawdown stop (halts buys if exceeded)
-    MAX_SINGLE_ORDER_EUR: float = 10000.0   # Hard cap on any single order
 
     # Interactive Brokers (IBKR) Config (Supports EU & US equities)
     IBKR_HOST: str = "172.17.0.2"

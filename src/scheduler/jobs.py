@@ -12,12 +12,13 @@ from src.screener.scanner import market_scanner
 from src.data.market import market_data_provider
 from src.agents.committee import investment_committee
 from src.trading.broker import active_broker as paper_broker, get_active_broker, active_broker
-from src.trading.risk import calculate_position_allocation, check_market_regime
+from src.trading.risk import calculate_position_allocation
 from src.telegram.bot import telegram_bot
 from sqlalchemy import select, desc
 from src.db.session import AsyncSessionLocal
 from src.db.models import AnalysisReport, MarketDigest, Position, OrderTrigger, SystemConfig
 from src.data.review_tracker import review_tracker
+from src.trading.risk import check_market_regime
 
 logger = logging.getLogger(__name__)
 
@@ -517,14 +518,12 @@ class TradingScheduler:
                     if avail < 20.0:
                         break
 
-                    # Regime filter before the committee: no LLM calls for entries that would be blocked anyway
-                    regime_ok, regime_msg = await asyncio.to_thread(check_market_regime, tk, data.get("currency"))
-                    if not regime_ok:
-                        logger.info(f"Opportunity Scanner skipped {tk}: {regime_msg}")
-                        continue
-
                     report = await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
                     if self._should_arm_trigger(report, trigger_min_score):
+                        regime_ok, regime_msg = await asyncio.to_thread(check_market_regime, tk, data.get("currency"))
+                        if not regime_ok:
+                            logger.info(f"Opportunity Scanner skipped {tk}: {regime_msg}")
+                            continue
                         alloc = calculate_position_allocation(
                             available_cash=avail,
                             current_positions_count=len(open_tickers),
