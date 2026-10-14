@@ -101,9 +101,11 @@ function showToast(message, kind = false) {
 
   msg.textContent = message;
   if (isError) {
-    icon.className = 'fa-solid fa-circle-exclamation text-rose-400';
+    icon.className = 'fa-solid fa-circle-exclamation ui-loss';
+  } else if (kind === 'info') {
+    icon.className = 'fa-solid fa-circle-info text-accent';
   } else {
-    icon.className = 'fa-solid fa-circle-check text-emerald-400';
+    icon.className = 'fa-solid fa-circle-check ui-gain';
   }
 
   toast.classList.remove('translate-y-[-100px]', 'opacity-0');
@@ -1070,25 +1072,27 @@ async function loadSettings() {
     recalcCapitalPreview();
 
     const tgBadge = document.getElementById('telegramStatusBadge');
-    if (data.has_telegram) {
-      tgBadge.textContent = 'Connected & Active';
-      tgBadge.className = 'px-2 py-0.5 rounded text-xs font-bold bg-emerald-500/20 text-emerald-400';
-    } else {
-      tgBadge.textContent = 'Not Configured (Optional)';
-      tgBadge.className = 'px-2 py-0.5 rounded text-xs font-bold bg-slate-800 text-slate-400';
+    if (tgBadge) {
+      if (data.has_telegram) {
+        tgBadge.textContent = 'Connected';
+        tgBadge.className = 'ui-badge ui-badge-gain shrink-0';
+      } else {
+        tgBadge.textContent = 'Not set up';
+        tgBadge.className = 'ui-badge shrink-0';
+      }
     }
 
     const aiBadge = document.getElementById('aiEngineStatusBadge');
     if (aiBadge) {
       if (data.has_antigravity) {
-        aiBadge.textContent = 'Antigravity Plan Active (Zero API Cost)';
-        aiBadge.className = 'px-2 py-0.5 rounded text-xs font-bold bg-emerald-500/20 text-emerald-400';
+        aiBadge.textContent = 'Antigravity';
+        aiBadge.className = 'ui-badge ui-badge-gain shrink-0';
       } else if (data.has_gemini_key) {
-        aiBadge.textContent = 'Gemini API Active';
-        aiBadge.className = 'px-2 py-0.5 rounded text-xs font-bold bg-emerald-500/20 text-emerald-400';
+        aiBadge.textContent = 'Gemini API';
+        aiBadge.className = 'ui-badge ui-badge-gain shrink-0';
       } else {
-        aiBadge.textContent = 'Active (Quant & LLM Ready)';
-        aiBadge.className = 'px-2 py-0.5 rounded text-xs font-bold bg-slate-800 text-slate-300';
+        aiBadge.textContent = 'Ready';
+        aiBadge.className = 'ui-badge shrink-0';
       }
     }
 
@@ -2023,9 +2027,9 @@ async function loadMemoryHub() {
 }
 
 async function refreshMemoryHub() {
-  showToast('Refreshing TencentDB Agent Memory...', 'info');
+  showToast('Refreshing memory...', 'info');
   await loadMemoryHub();
-  showToast('Memory Hub updated.', 'success');
+  showToast('Memory updated.', 'success');
 }
 
 async function loadColdStartRecap() {
@@ -2057,22 +2061,25 @@ async function loadMemoryAssets() {
 }
 
 function renderMemoryAssets(assets) {
-  // 1. L1 Atoms
+  const empty = (text) => `<div class="mem-empty">${esc(text)}</div>`;
+
+  // 1. L1 atoms (facts and constraints)
   const atoms = (assets.chat_memory && assets.chat_memory.l1_atoms) || [];
   const atomsBadge = document.getElementById('atomsCountBadge');
   const atomsContainer = document.getElementById('atomsListContainer');
-  if (atomsBadge) atomsBadge.textContent = `${atoms.length} Atoms`;
+  if (atomsBadge) atomsBadge.textContent = String(atoms.length);
   if (atomsContainer) {
     if (atoms.length === 0) {
-      atomsContainer.innerHTML = `<div class="text-xs text-slate-500 italic p-3">No atoms extracted yet.</div>`;
+      atomsContainer.innerHTML = empty('No facts extracted yet.');
     } else {
       atomsContainer.innerHTML = atoms.map(a => `
-        <div class="p-2.5 bg-slate-900/70 border border-slate-800 rounded-lg text-xs space-y-1">
-          <div class="flex items-center justify-between">
-            <span class="font-bold text-cyan-300 font-mono">[${esc((a.type || 'fact').toUpperCase())}] ${esc(a.subject)}</span>
-            <span class="text-[10px] text-slate-500">${esc(Math.round((a.confidence || 1) * 100))}% conf</span>
+        <div class="mem-row">
+          <div class="flex items-start justify-between gap-3">
+            <span class="font-semibold text-[15px] min-w-0 break-words">${esc(a.subject)}</span>
+            <span class="ui-badge shrink-0">${esc((a.type || 'fact').toLowerCase())}</span>
           </div>
-          <div class="text-slate-300">${esc(a.content)}</div>
+          <p class="text-sm ui-muted mt-1 leading-relaxed">${esc(a.content)}</p>
+          <p class="text-xs ui-faint ui-num mt-1.5">${esc(Math.round((a.confidence || 1) * 100))}% confidence</p>
         </div>
       `).join('');
     }
@@ -2082,21 +2089,19 @@ function renderMemoryAssets(assets) {
   const skills = assets.skills || [];
   const skillsBadge = document.getElementById('skillsCountBadge');
   const skillsContainer = document.getElementById('skillsListContainer');
-  if (skillsBadge) skillsBadge.textContent = `${skills.length} Skills`;
+  if (skillsBadge) skillsBadge.textContent = String(skills.length);
   if (skillsContainer) {
     if (skills.length === 0) {
-      skillsContainer.innerHTML = `<div class="text-xs text-slate-500 italic p-3">No skill playbooks registered.</div>`;
+      skillsContainer.innerHTML = empty('No skills registered.');
     } else {
       skillsContainer.innerHTML = skills.map(s => `
-        <div class="p-3 bg-slate-900/70 border border-slate-800 rounded-lg text-xs space-y-1.5">
-          <div class="flex items-center justify-between">
-            <span class="font-bold text-emerald-300">${esc(s.name)}</span>
-            <span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 font-mono">${esc(s.category || 'skill')}</span>
+        <div class="mem-row">
+          <div class="flex items-start justify-between gap-3">
+            <span class="font-semibold text-[15px] min-w-0 break-words">${esc(s.name)}</span>
+            <span class="ui-badge ui-badge-accent shrink-0">${esc(s.category || 'skill')}</span>
           </div>
-          <div class="text-slate-400">${esc(s.description)}</div>
-          <div class="text-[11px] text-slate-500 bg-slate-950/60 p-2 rounded border border-slate-900">
-            <strong class="text-slate-400">Steps:</strong> ${esc((s.execution_steps || []).join(' → '))}
-          </div>
+          <p class="text-sm ui-muted mt-1 leading-relaxed">${esc(s.description)}</p>
+          ${(s.execution_steps || []).length ? `<p class="text-xs ui-faint mt-1.5 leading-relaxed">${esc((s.execution_steps || []).join(' → '))}</p>` : ''}
         </div>
       `).join('');
     }
@@ -2106,60 +2111,58 @@ function renderMemoryAssets(assets) {
   const wiki = assets.llm_wiki || [];
   const wikiBadge = document.getElementById('wikiCountBadge');
   const wikiContainer = document.getElementById('wikiListContainer');
-  if (wikiBadge) wikiBadge.textContent = `${wiki.length} Pages`;
+  if (wikiBadge) wikiBadge.textContent = String(wiki.length);
   if (wikiContainer) {
     if (wiki.length === 0) {
-      wikiContainer.innerHTML = `<div class="text-xs text-slate-500 italic p-3">No wiki pages registered.</div>`;
+      wikiContainer.innerHTML = empty('No wiki pages registered.');
     } else {
       wikiContainer.innerHTML = wiki.map(w => `
-        <div class="p-3 bg-slate-900/70 border border-slate-800 rounded-lg text-xs space-y-1">
-          <div class="font-bold text-blue-300 flex items-center justify-between">
-            <span>${esc(w.title)}</span>
-            <span class="text-[10px] font-mono text-slate-500">${esc(w.page_id)}</span>
+        <div class="mem-row">
+          <div class="flex items-start justify-between gap-3">
+            <span class="font-semibold text-[15px] min-w-0 break-words">${esc(w.title)}</span>
+            <span class="text-xs ui-faint ui-num shrink-0">${esc(w.page_id)}</span>
           </div>
-          <div class="text-slate-400 line-clamp-2">${esc((w.content_md || '').split('\n').slice(2, 5).join(' '))}</div>
-          <div class="flex flex-wrap gap-1 mt-1">
-            ${(w.tags || []).map(t => `<span class="text-[10px] px-1.5 py-0.5 bg-blue-500/10 text-blue-400 rounded">#${esc(t)}</span>`).join('')}
-          </div>
+          <p class="text-sm ui-muted mt-1 leading-relaxed line-clamp-2">${esc((w.content_md || '').split('\n').slice(2, 5).join(' '))}</p>
+          ${(w.tags || []).length ? `<p class="text-xs ui-faint mt-1.5">${(w.tags || []).map(t => `#${esc(t)}`).join(' ')}</p>` : ''}
         </div>
       `).join('');
     }
   }
 
-  // 4. L3 Core & Code-Graph
+  // 4. L3 core profile & code graph
   const l3 = (assets.chat_memory && assets.chat_memory.l3_core) || {};
   const graph = assets.code_graph || [];
+  const graphBadge = document.getElementById('codegraphCountBadge');
+  if (graphBadge) graphBadge.textContent = graph.length ? String(graph.length) : '';
   const coreContainer = document.getElementById('coreAndGraphContainer');
   if (coreContainer) {
     coreContainer.innerHTML = `
-      <div class="p-3 bg-slate-900/70 border border-slate-800 rounded-lg text-xs space-y-1.5 mb-2">
-        <div class="font-bold text-purple-300 flex items-center justify-between">
-          <span>${esc(l3.persona_name || 'Committee Persona')}</span>
-          <span class="text-[10px] text-purple-400 bg-purple-500/10 px-1.5 py-0.5 rounded font-mono">L3 Core</span>
+      <div class="mem-row">
+        <div class="flex items-start justify-between gap-3">
+          <span class="font-semibold text-[15px] min-w-0 break-words">${esc(l3.persona_name || 'Committee persona')}</span>
+          <span class="ui-badge shrink-0">core</span>
         </div>
-        <div class="text-slate-300 font-semibold">${esc(l3.core_profile)}</div>
-        <div class="text-slate-400 text-[11px] bg-slate-950/60 p-2 rounded border border-slate-900 whitespace-pre-wrap">${esc(l3.cumulative_wisdom)}</div>
+        ${l3.core_profile ? `<p class="text-sm mt-1 leading-relaxed">${esc(l3.core_profile)}</p>` : ''}
+        ${l3.cumulative_wisdom ? `<div class="ui-inset p-3 mt-2.5 text-sm ui-muted leading-relaxed whitespace-pre-wrap">${esc(l3.cumulative_wisdom)}</div>` : ''}
       </div>
-      <div class="space-y-1.5">
-        <div class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Indexed Code-Graph Symbols</div>
-        ${graph.map(g => `
-          <div class="p-2 bg-slate-950/60 border border-slate-800/80 rounded text-[11px] flex flex-wrap items-center justify-between gap-1 break-all">
-            <div>
-              <span class="text-emerald-400 font-mono font-bold">${esc(g.symbol_name)}</span>
-              <span class="text-slate-500 text-[10px] ml-1">(${esc(g.symbol_type)})</span>
-            </div>
-            <span class="text-slate-500 font-mono text-[10px]">${esc(g.file_path)}:${esc(g.line_start || 1)}</span>
+      ${graph.length ? `<div class="mem-row" style="padding-bottom: 6px;"><span class="ui-eyebrow">Code graph</span></div>` : ''}
+      ${graph.map(g => `
+        <div class="mem-row" style="padding-top: 10px; padding-bottom: 10px;">
+          <div class="flex items-baseline justify-between gap-3">
+            <span class="ui-num text-sm font-semibold min-w-0 break-all">${esc(g.symbol_name)}</span>
+            <span class="text-xs ui-faint shrink-0">${esc(g.symbol_type)}</span>
           </div>
-        `).join('')}
-      </div>
+          <div class="text-xs ui-faint ui-num mt-0.5 break-all">${esc(g.file_path)}:${esc(g.line_start || 1)}</div>
+        </div>
+      `).join('')}
     `;
   }
 }
 
 async function openExtractModal() {
-  const sample = prompt("Enter text, trade rationale, or interaction to extract assets from (or leave blank to extract from recent system activity):");
+  const sample = prompt("Text, trade rationale or conversation to extract memory from (leave blank to use recent activity):");
   if (sample === null) return;
-  showToast("Running TencentDB Agent Memory Asset Extraction...", "info");
+  showToast("Extracting memory...", "info");
   try {
     const res = await fetch("/v3/memory/extract", {
       method: "POST",
@@ -2171,7 +2174,7 @@ async function openExtractModal() {
     });
     const json = await res.json();
     if (json.code === 0) {
-      showToast(`Asset extraction completed: ${json.data.extracted_atoms_count} atoms extracted!`, "success");
+      showToast(`Extraction done: ${json.data.extracted_atoms_count} facts added.`, "success");
       await loadMemoryHub();
     } else {
       showToast(`Extraction failed: ${json.message}`, "error");
