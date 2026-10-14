@@ -387,6 +387,12 @@ class TradingScheduler:
     async def monitor_open_positions(self) -> List[Dict[str, Any]]:
         """Monitors open positions for stop-loss and take-profit triggers."""
         async with self._monitor_lock:
+            if settings.TRADING_MODE == "LIVE":
+                try:
+                    # Adopt fills the bot never booked so they get stops; never closes positions
+                    await paper_broker.sync_account_state(adopt_only=True)
+                except Exception as e:
+                    logger.error(f"Periodic broker adoption failed: {e}")
             closed = await self._check_stops_and_targets()
             await shadow_portfolios.check_exits()
             await shadow_portfolios.record_snapshots(main_summary_fn=get_active_broker().get_portfolio_summary)

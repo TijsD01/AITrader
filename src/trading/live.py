@@ -1352,10 +1352,24 @@ class LiveBroker(BaseBroker):
         except Exception as e:
             logger.warning(f"IBKR cash balance sync note: {e}")
 
-    async def sync_account_state(self) -> Dict[str, Any]:
+    async def _planned_levels(self, session, sym: str, entry: float) -> Tuple[float, float]:
+        """Stop/target for a broker holding: the latest buy-plan trigger for the symbol, else the default percentages."""
+        res = await session.execute(
+            select(OrderTrigger).where(
+                OrderTrigger.is_live == True,
+                OrderTrigger.status.in_(["PENDING", "TRIGGERED"]),
+                (OrderTrigger.ticker == sym) | OrderTrigger.ticker.like(f"{sym}.%"),
+            ).order_by(desc(OrderTrigger.created_at)).limit(1)
+        )
+        t = res.scalars().first()
+        sl = t.stop_loss if t and t.stop_loss else round(entry * (1.0 - settings.DEFAULT_STOP_LOSS_PCT), 2)
+        tp = t.take_profit if t and t.take_profit else round(entry * (1.0 + settings.DEFAULT_TAKE_PROFIT_PCT), 2)
+        return sl, tp
+
+    async def sync_account_state(self, adopt_only: bool = False) -> Dict[str, Any]:
         """
         Polls broker API (IBKR / Alpaca) for live account values and positions,
-        and aligns the local database snapshot.
+        and aligns the local database snapshot. adopt_only (periodic use) never closes local positions.
         """
         logger.info(f"Syncing account state with {settings.LIVE_BROKER.upper()}...")
         broker = settings.LIVE_BROKER.lower()
@@ -1378,6 +1392,7 @@ class LiveBroker(BaseBroker):
                     }
 
                     ib_keys = set()
+                    adopted = []
                     for p in ib_positions:
                         sym = p.contract.symbol.upper()
                         shares = float(p.position)
@@ -1393,7 +1408,12 @@ class LiveBroker(BaseBroker):
                             pos = existing_live[key]
                             pos.shares = shares
                             pos.cost_basis_eur = cost_eur
+                            if not pos.stop_loss_native or not pos.take_profit_native:
+                                sl, tp = await self._planned_levels(session, sym, pos.entry_price_native or cost_native)
+                                pos.stop_loss_native = pos.stop_loss_native or sl
+                                pos.take_profit_native = pos.take_profit_native or tp
                         else:
+                            sl, tp = await self._planned_levels(session, sym, cost_native)
                             new_pos = Position(
                                 ticker=sym,
                                 name=sym,
@@ -1402,6 +1422,8 @@ class LiveBroker(BaseBroker):
                                 entry_price_native=cost_native,
                                 current_price_native=cost_native,
                                 highest_price_native=cost_native,
+                                stop_loss_native=sl,
+                                take_profit_native=tp,
                                 entry_price_eur=currency_service.to_eur(cost_native, curr_code),
                                 current_price_eur=currency_service.to_eur(cost_native, curr_code),
                                 cost_basis_eur=cost_eur,
@@ -1409,9 +1431,10 @@ class LiveBroker(BaseBroker):
                                 is_live=True
                             )
                             session.add(new_pos)
+                            adopted.append(f"{shares:g} {sym} @ {cost_native:.2f} {curr_code} | SL {sl} | TP {tp}")
 
                     for key, pos in existing_live.items():
-                        if key not in ib_keys:
+                        if key not in ib_keys and not adopt_only:
                             pos.status = "CLOSED"
 
                     if ib_cash is not None:
@@ -1428,6 +1451,13 @@ class LiveBroker(BaseBroker):
                         )
                         session.add(snapshot)
                     await session.commit()
+                for a in adopted:
+                    logger.warning(f"Adopted untracked IBKR holding: {a}")
+                    try:
+                        from src.telegram.bot import telegram_bot
+                        await telegram_bot.send_message(f"⚠️ <b>Untracked broker position adopted</b>\n{a}")
+                    except Exception as e:
+                        logger.error(f"Failed to send adoption alert: {e}")
             except Exception as e:
                 logger.warning(f"IBKR sync communication note: {e}")
         elif broker == "alpaca":
