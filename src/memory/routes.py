@@ -298,7 +298,8 @@ async def extract_assets_endpoint(req: ExtractAssetsRequest):
     text = req.raw_text or ""
     if not text and req.session_id:
         msgs = await memory_store.query_l0(session_id=req.session_id, team_id=req.team_id, limit=20)
-        text = "\n".join(f"{m['role']}: {m['content']}" for m in msgs)
+        # query_l0 returns newest first; the transcript must read chronologically
+        text = "\n".join(f"{m['role']}: {m['content']}" for m in reversed(msgs))
 
     result = await asset_extractor.extract_from_text(
         text=text,

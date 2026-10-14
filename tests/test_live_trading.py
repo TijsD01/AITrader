@@ -139,7 +139,9 @@ async def test_live_broker_full_execution_lifecycle():
 
         # Mock quote for NVDA_LIVE_TEST so it doesn't make slow network calls
         mock_quote = {"price": 120.0, "currency": "USD", "name": "NVIDIA Corp"}
-        with patch("src.trading.live.market_data_provider.get_stock_data", return_value=mock_quote):
+        with patch("src.trading.live.market_data_provider.get_stock_data", return_value=mock_quote), \
+             patch.object(live_broker, "_dispatch_real_order", return_value="ibkr_1001"), \
+             patch.object(live_broker, "_dispatch_real_close", return_value="ibkr_exit_1002"):
             # 1. Execute live buy
             buy_res = await live_broker.execute_buy(
                 ticker=ticker,
@@ -153,7 +155,7 @@ async def test_live_broker_full_execution_lifecycle():
                 rationale="High conviction live trade test",
                 is_manual=True
             )
-            assert buy_res["success"] is True
+            assert buy_res["success"] is True, buy_res
             assert buy_res["is_live"] is True
             assert buy_res["broker"] == "IBKR"
             assert buy_res["broker_order_id"].startswith("ibkr_")
@@ -232,3 +234,39 @@ async def test_live_broker_get_triggers_has_current_price_and_distance():
             await session.execute(delete(OrderTrigger).where(OrderTrigger.ticker == ticker))
             await session.commit()
 
+
+
+@pytest.mark.asyncio
+async def test_live_buy_not_recorded_when_broker_rejects():
+    """A buy that never reached the broker must not create a position."""
+    await init_db()
+    orig = (settings.TRADING_MODE, settings.LIVE_TRADING_ENABLED, settings.KILL_SWITCH_ACTIVE, settings.LIVE_BROKER)
+    settings.TRADING_MODE = "LIVE"
+    settings.LIVE_TRADING_ENABLED = True
+    settings.KILL_SWITCH_ACTIVE = False
+    settings.LIVE_BROKER = "ibkr"
+    ticker = "REJ_LIVE_TEST"
+    try:
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(Position).where(Position.ticker == ticker))
+            snap_res = await session.execute(select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True))
+            if not snap_res.scalars().first():
+                session.add(PortfolioSnapshot(cash_eur=1000.0, equity_eur=0.0, total_value_eur=1000.0, is_live=True, open_positions_count=0))
+            await session.commit()
+
+        mock_quote = {"price": 120.0, "currency": "USD", "name": "Rejected Corp"}
+        with patch("src.trading.live.market_data_provider.get_stock_data", return_value=mock_quote), \
+             patch.object(live_broker, "_dispatch_real_order", return_value=None):
+            res = await live_broker.execute_buy(
+                ticker=ticker, name="Rejected Corp", price_native=120.0, currency="USD",
+                stop_loss_native=114.0, take_profit_native=132.0, allocation_eur=600.0,
+                consensus_score=88, rationale="broker down", is_manual=True
+            )
+        assert res["success"] is False
+        positions = await live_broker.get_positions()
+        assert not any(p["ticker"] == ticker for p in positions)
+    finally:
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(Position).where(Position.ticker == ticker))
+            await session.commit()
+        settings.TRADING_MODE, settings.LIVE_TRADING_ENABLED, settings.KILL_SWITCH_ACTIVE, settings.LIVE_BROKER = orig

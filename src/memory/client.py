@@ -66,7 +66,8 @@ class AgentMemoryClient:
                     session_id=session_id,
                     team_id=self.team_id,
                     agent_id=self.agent_id,
-                    sync_to_store=True
+                    sync_to_store=True,
+                    metadata=metadata
                 )
             )
 

@@ -6,7 +6,6 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from fastapi.middleware.cors import CORSMiddleware
 
 from config.settings import settings
 from src.db.session import init_db
@@ -14,6 +13,7 @@ from src.scheduler.jobs import trading_scheduler
 from src.telegram.bot import telegram_bot
 from src.trading.broker import live_broker
 from src.web.routes import router
+from src.web.security import install_web_security
 from src.memory.store import memory_store
 from src.memory.routes import memory_router
 from src.memory.proxy import proxy_router
@@ -58,13 +58,8 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Only LAN clients (or HTTP Basic auth when WEB_PASSWORD is set), same-origin writes, no open CORS
+install_web_security(app)
 
 app.include_router(router)
 app.include_router(memory_router)

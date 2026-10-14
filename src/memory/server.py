@@ -4,7 +4,6 @@ import logging
 import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
 from src.memory.store import memory_store
 from src.memory.routes import memory_router
@@ -32,13 +31,9 @@ def create_memory_app() -> FastAPI:
         lifespan=lifespan
     )
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # Same protection as the dashboard: LAN-only or Basic auth, same-origin writes, no open CORS
+    from src.web.security import install_web_security
+    install_web_security(app)
 
     # Include memory v3 endpoints and LLM proxy
     app.include_router(memory_router)
@@ -50,7 +45,7 @@ app = create_memory_app()
 
 def main():
     parser = argparse.ArgumentParser(description="TencentDB Agent Memory Server")
-    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind")
+    parser.add_argument("--host", type=str, default="127.0.0.1", help="Host to bind (default: localhost only)")
     parser.add_argument("--port", type=int, default=8420, help="Port to bind (default 8420)")
     parser.add_argument("--reload", action="store_true", help="Enable auto-reload")
     args = parser.parse_args()

@@ -1,6 +1,6 @@
 import logging
 from typing import Dict, Any
-from src.agents.base import llm_client
+from src.agents.base import llm_client, merge_llm_report
 
 logger = logging.getLogger(__name__)
 
@@ -56,11 +56,6 @@ Return JSON with exactly these keys:
   "analysis_summary": string
 }}
 """
-        if llm_client.has_active_key():
-            res = await llm_client.generate_json(system_prompt, user_prompt)
-            if res and "bias" in res:
-                return res
-
         # High-precision Quantitative Fallback
         score = 50
         drivers = []
@@ -105,7 +100,7 @@ Return JSON with exactly these keys:
             f"with tactical support at {support_20d}."
         )
 
-        return {
+        fallback = {
             "bias": bias,
             "confidence": confidence,
             "key_drivers": drivers,
@@ -113,3 +108,15 @@ Return JSON with exactly these keys:
             "resistance_level": resistance_20d,
             "analysis_summary": summary
         }
+
+        if llm_client.has_active_key():
+            res = await llm_client.generate_json(system_prompt, user_prompt)
+            return merge_llm_report(fallback, res, {
+                "bias": ("enum", {"BULLISH", "NEUTRAL", "BEARISH"}),
+                "confidence": ("int", 0, 100),
+                "key_drivers": "list",
+                "support_level": ("float", 1e-9, float("inf")),
+                "resistance_level": ("float", 1e-9, float("inf")),
+                "analysis_summary": "str",
+            }, "bias")
+        return fallback

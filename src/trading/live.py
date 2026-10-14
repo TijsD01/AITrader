@@ -2,7 +2,6 @@ import logging
 import datetime
 import asyncio
 import time
-import uuid
 from typing import Dict, Any, List, Optional, Tuple
 from sqlalchemy import select, desc
 
@@ -11,7 +10,7 @@ from src.db.models import Position, Trade, PortfolioSnapshot, SystemConfig, Orde
 from src.db.session import AsyncSessionLocal
 from src.data.currency import currency_service
 from src.data.market import market_data_provider
-from src.trading.risk import risk_guardrail, calculate_position_allocation, get_effective_deployable_cash, allocate_pending_triggers
+from src.trading.risk import risk_guardrail, calculate_position_allocation, get_effective_deployable_cash, allocate_pending_triggers, evaluate_trigger_condition, is_trigger_expired, validate_trigger_levels
 from src.data.market_hours import check_market_hours
 from src.trading.base import BaseBroker
 
@@ -215,9 +214,34 @@ class LiveBroker(BaseBroker):
                 from ib_async import Stock, MarketOrder
                 ib = await self._get_ib()
                 if ib and ib.isConnected():
-                    contract = Stock(ticker.upper().split(".")[0], "SMART", currency.upper())
+                    symbol = ticker.upper().split(".")[0]
+                    contract = Stock(symbol, "SMART", currency.upper())
                     await ib.qualifyContractsAsync(contract)
-                    order = MarketOrder("SELL", shares)
+
+                    # Cancel resting bracket legs (stop / take-profit) first, otherwise a leg
+                    # can still fill after our market sell and open a short position.
+                    legs = []
+                    for open_trade in ib.openTrades():
+                        oc = open_trade.contract
+                        if oc.symbol.upper() == symbol and (oc.currency or "").upper() == currency.upper() \
+                                and open_trade.order.action == "SELL":
+                            ib.cancelOrder(open_trade.order)
+                            legs.append(open_trade)
+                    # Give the cancels up to 2s to settle: a leg that fills meanwhile must show up in the position below
+                    for _ in range(20):
+                        if all(leg.isDone() for leg in legs):
+                            break
+                        await asyncio.sleep(0.1)
+
+                    # Never sell more than the broker actually holds (fresh positions, not the cached list)
+                    held = sum(
+                        float(bp.position) for bp in await ib.reqPositionsAsync()
+                        if bp.contract.symbol.upper() == symbol and (bp.contract.currency or "").upper() == currency.upper()
+                    )
+                    if held <= 0:
+                        logger.info(f"IBKR position for {ticker} already flat (bracket leg filled); no exit order sent.")
+                        return "ibkr_exit_already_flat"
+                    order = MarketOrder("SELL", min(shares, held))
                     placed = ib.placeOrder(contract, order)
                     return f"ibkr_exit_{placed.order.orderId}"
             except Exception as e:
@@ -231,6 +255,24 @@ class LiveBroker(BaseBroker):
                         secret_key=settings.ALPACA_SECRET_KEY,
                         paper=not settings.LIVE_TRADING_ENABLED
                     )
+                    # Cancel resting bracket legs before closing so none can fill afterwards
+                    try:
+                        from alpaca.trading.requests import GetOrdersRequest
+                        from alpaca.trading.enums import QueryOrderStatus
+                        for o in client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[ticker.upper()])):
+                            client.cancel_order_by_id(o.id)
+                    except Exception as cancel_err:
+                        logger.info(f"Alpaca cancel open orders note: {cancel_err}")
+                    # A filled bracket leg already closed the position: report it as closed instead of
+                    # failing, otherwise the local position could never be closed
+                    from alpaca.common.exceptions import APIError
+                    try:
+                        client.get_open_position(ticker.upper())
+                    except APIError as pos_err:
+                        if pos_err.status_code == 404:
+                            logger.info(f"Alpaca position for {ticker} already flat (bracket leg filled); no exit order sent.")
+                            return "alpaca_exit_already_flat"
+                        raise
                     pos = client.close_position(ticker.upper())
                     return f"alpaca_exit_{pos.id}"
             except Exception as e:
@@ -254,7 +296,8 @@ class LiveBroker(BaseBroker):
             res = await session.execute(
                 select(Trade).where(
                     Trade.executed_at >= today_start,
-                    Trade.order_type == "SELL"
+                    Trade.order_type == "SELL",
+                    Trade.is_live == True
                 )
             )
             trades = res.scalars().all()
@@ -481,6 +524,13 @@ class LiveBroker(BaseBroker):
                 order_action="BUY"
             )
             fee_eur = fee_info["fee_eur"]
+            # Leave room for the commission when the allocation uses all remaining cash (same as paper)
+            if actual_cost_eur + fee_eur > cash_eur and cash_eur > fee_eur:
+                import math
+                shares = math.floor(((cash_eur - fee_eur) / price_eur) * 10000.0) / 10000.0
+                actual_cost_eur = round(shares * price_eur, 2)
+            if shares <= 0 or actual_cost_eur + fee_eur > cash_eur:
+                return {"success": False, "message": f"Insufficient cash (€{cash_eur:.2f}) for {ticker} cost €{actual_cost_eur:.2f} plus fee €{fee_eur:.2f}."}
 
             # 9. Dispatch real order to broker API
             dispatched_id = await self._dispatch_real_order(
@@ -491,7 +541,10 @@ class LiveBroker(BaseBroker):
                 stop_loss=stop_loss_native,
                 take_profit=take_profit_native
             )
-            broker_order_id = dispatched_id or f"{settings.LIVE_BROKER.lower()}_{uuid.uuid4().hex[:12]}"
+            if not dispatched_id:
+                logger.error(f"[LIVE EXECUTION] BUY {ticker} was not accepted by {settings.LIVE_BROKER.upper()}; nothing recorded.")
+                return {"success": False, "message": f"Order for {ticker} could not be placed at {settings.LIVE_BROKER.upper()} (broker not connected or order rejected)."}
+            broker_order_id = dispatched_id
             logger.info(
                 f"[LIVE EXECUTION] Submitting real order to {settings.LIVE_BROKER.upper()}: "
                 f"BUY {shares} {ticker} @ {price_native} {currency} (Cost: €{actual_cost_eur}, Fee: €{fee_eur:.2f} [{fee_info['breakdown']}]) | "
@@ -631,7 +684,10 @@ class LiveBroker(BaseBroker):
             realized_pnl_pct = round((realized_pnl_eur / pos.cost_basis_eur) * 100, 2) if pos.cost_basis_eur > 0 else 0.0
 
             dispatched_id = await self._dispatch_real_close(ticker=ticker, shares=pos.shares, currency=pos.currency)
-            broker_order_id = dispatched_id or f"{settings.LIVE_BROKER.lower()}_exit_{uuid.uuid4().hex[:12]}"
+            if not dispatched_id:
+                logger.error(f"[LIVE EXECUTION] SELL {ticker} was not accepted by {settings.LIVE_BROKER.upper()}; position left open.")
+                return {"success": False, "message": f"Exit order for {ticker} could not be placed at {settings.LIVE_BROKER.upper()} (broker not connected or order rejected)."}
+            broker_order_id = dispatched_id
             logger.info(
                 f"[LIVE EXECUTION] Submitting exit order to {settings.LIVE_BROKER.upper()}: "
                 f"SELL {pos.shares} {ticker} @ {exit_price_native} {pos.currency} | "
@@ -749,6 +805,14 @@ class LiveBroker(BaseBroker):
         ai_rationale: str
     ) -> Dict[str, Any]:
         """Creates an armed price trigger for live execution."""
+        target_price = round(target_price, 2)
+        current_price_at_creation = round(current_price_at_creation, 2)
+        stop_loss = round(stop_loss, 2) if stop_loss else None
+        take_profit = round(take_profit, 2) if take_profit else None
+        level_error = validate_trigger_levels(trigger_type, target_price, current_price_at_creation, stop_loss, take_profit)
+        if level_error:
+            return {"success": False, "message": level_error}
+
         async with AsyncSessionLocal() as session:
             pos_res = await session.execute(
                 select(Position).where(Position.ticker == ticker.upper(), Position.status == "OPEN", Position.is_live == True)
@@ -991,6 +1055,12 @@ class LiveBroker(BaseBroker):
 
             executed = []
             for t in pending:
+                if is_trigger_expired(t.created_at):
+                    logger.info(f"Trigger #{t.id} for {t.ticker} expired (older than {settings.TRIGGER_EXPIRY_DAYS} days).")
+                    t.status = "EXPIRED"
+                    await session.commit()
+                    continue
+
                 # Unfunded triggers (outranked for cash or slots) wait until funding frees up
                 if t.allocation_eur <= 0:
                     continue
@@ -1010,11 +1080,15 @@ class LiveBroker(BaseBroker):
                 if not curr_price:
                     continue
 
-                condition_met = False
-                if t.trigger_type == "LIMIT_PULLBACK" and curr_price <= t.target_price:
-                    condition_met = True
-                elif t.trigger_type == "BREAKOUT_BUY" and curr_price >= t.target_price:
-                    condition_met = True
+                # Check trigger condition; cancel setups the price has already run through
+                condition_met, invalid_reason = evaluate_trigger_condition(
+                    t.trigger_type, t.target_price, curr_price, t.stop_loss, t.take_profit
+                )
+                if invalid_reason:
+                    logger.info(f"Cancelling trigger #{t.id} for {t.ticker}: {invalid_reason}")
+                    t.status = "CANCELLED"
+                    await session.commit()
+                    continue
 
                 if condition_met:
                     trade_res = await self.execute_buy(
@@ -1027,7 +1101,7 @@ class LiveBroker(BaseBroker):
                         allocation_eur=t.allocation_eur,
                         consensus_score=t.consensus_score or 80,
                         rationale=f"Live Trigger #{t.id} Hit ({t.trigger_type} @ {t.target_price})",
-                        is_manual=True,
+                        is_manual=False,
                         trigger_id=t.id
                     )
                     if trade_res.get("success"):
@@ -1062,13 +1136,20 @@ class LiveBroker(BaseBroker):
         return triggered
 
     async def refresh_positions_pnl(self):
-        """Refreshes quotes and unrealized PnL for active positions."""
+        """Refreshes quotes, unrealized PnL, trailing high and breakeven stop for active positions."""
         async with self._refresh_lock:
             now = time.time()
             if (now - self._last_pnl_refresh) < self._pnl_refresh_ttl:
                 return
 
             async with AsyncSessionLocal() as session:
+                # Query dynamic breakeven trigger pct
+                be_cfg = await session.execute(
+                    select(SystemConfig).where(SystemConfig.key == "BREAKEVEN_TRIGGER_PCT")
+                )
+                be_row = be_cfg.scalars().first()
+                breakeven_trigger_pct = float(be_row.value) if be_row else 0.025
+
                 res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == True))
                 positions = res.scalars().all()
                 if not positions:
@@ -1092,6 +1173,15 @@ class LiveBroker(BaseBroker):
                     if curr_price:
                         p.current_price_native = curr_price
                         p.current_price_eur = currency_service.to_eur(curr_price, p.currency)
+                        if curr_price > (p.highest_price_native or 0.0):
+                            p.highest_price_native = curr_price
+                            # Dynamic Trailing Stop (same as paper): past breakeven_trigger_pct, ratchet the stop to breakeven + 1%.
+                            # Positions without a stop are left alone: those are holdings synced from the broker, not bot trades.
+                            if p.stop_loss_native and p.entry_price_native and p.stop_loss_native < p.entry_price_native:
+                                gain_pct = (curr_price / p.entry_price_native) - 1.0
+                                if gain_pct >= breakeven_trigger_pct:
+                                    p.stop_loss_native = round(p.entry_price_native * 1.01, 2)  # Secure breakeven + 1%
+                                    logger.info(f"Live trailing stop ratcheted to breakeven for {p.ticker} at {p.stop_loss_native} (+{gain_pct*100:.1f}%)")
                         curr_val_eur = p.current_price_eur * p.shares
                         p.unrealized_pnl_eur = round(curr_val_eur - p.cost_basis_eur, 2)
                         p.unrealized_pnl_pct = round(((p.current_price_eur / p.entry_price_eur) - 1.0) * 100, 2)
@@ -1174,18 +1264,27 @@ class LiveBroker(BaseBroker):
 
                 async with AsyncSessionLocal() as session:
                     res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == True))
-                    existing_live = {p.ticker: p for p in res.scalars().all()}
+                    # Local tickers carry Yahoo suffixes (ASML.AS) while IBKR reports the bare
+                    # symbol (ASML), so match on (base symbol, currency).
+                    existing_live = {
+                        (p.ticker.upper().split(".")[0], (p.currency or "USD").upper()): p
+                        for p in res.scalars().all()
+                    }
 
-                    ib_tickers = set()
+                    ib_keys = set()
                     for p in ib_positions:
                         sym = p.contract.symbol.upper()
-                        ib_tickers.add(sym)
                         shares = float(p.position)
                         cost_native = float(p.avgCost)
                         curr_code = p.contract.currency or "USD"
+                        key = (sym, curr_code.upper())
+                        if shares <= 0:
+                            logger.warning(f"IBKR reports non-long position {shares} {sym}; not tracked as an open position.")
+                            continue
+                        ib_keys.add(key)
                         cost_eur = currency_service.to_eur(cost_native, curr_code) * shares
-                        if sym in existing_live:
-                            pos = existing_live[sym]
+                        if key in existing_live:
+                            pos = existing_live[key]
                             pos.shares = shares
                             pos.cost_basis_eur = cost_eur
                         else:
@@ -1205,8 +1304,8 @@ class LiveBroker(BaseBroker):
                             )
                             session.add(new_pos)
 
-                    for sym, pos in existing_live.items():
-                        if sym not in ib_tickers:
+                    for key, pos in existing_live.items():
+                        if key not in ib_keys:
                             pos.status = "CLOSED"
 
                     if ib_cash is not None:

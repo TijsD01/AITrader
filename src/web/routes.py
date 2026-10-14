@@ -38,7 +38,7 @@ class WatchlistRequest(BaseModel):
 
 class CreateTriggerRequest(BaseModel):
     ticker: str
-    trigger_type: Optional[str] = "LIMIT_PULLBACK"
+    trigger_type: Optional[str] = None  # None = use the committee's trigger type
     target_price: Optional[float] = None
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
@@ -107,7 +107,7 @@ async def get_positions():
 @router.get("/api/trades")
 async def get_trades(limit: int = 30):
     async with AsyncSessionLocal() as session:
-        is_live = settings.TRADING_MODE.upper() == "LIVE" and settings.LIVE_TRADING_ENABLED and not settings.KILL_SWITCH_ACTIVE
+        is_live = settings.TRADING_MODE.upper() == "LIVE" and settings.LIVE_TRADING_ENABLED
         res = await session.execute(
             select(Trade).where(Trade.is_live == is_live).order_by(desc(Trade.executed_at)).limit(limit)
         )

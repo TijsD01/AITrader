@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 import logging
@@ -14,6 +15,24 @@ from src.memory.models import (
 logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "memory.db"
+
+def _query_tokens(query: str, max_tokens: int = 12) -> List[str]:
+    """Splits a free-text query into unique search words (len >= 3). Falls back to the whole query."""
+    tokens: List[str] = []
+    for raw in re.findall(r"[A-Za-z0-9\u20ac][A-Za-z0-9\u20ac._-]*", query or ""):
+        tok = raw.strip("._-")
+        if len(tok) >= 3 and tok.lower() not in (t.lower() for t in tokens):
+            tokens.append(tok)
+    if not tokens and query and query.strip():
+        tokens = [query.strip()]
+    return tokens[:max_tokens]
+
+
+def _like_pattern(token: str) -> str:
+    """Builds a LIKE pattern for a token, escaping %, _ and the escape char itself (use with ESCAPE '\\')."""
+    esc = token.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{esc}%"
+
 
 class AgentMemoryStore:
     def __init__(self, db_path: Optional[Path] = None):
@@ -230,9 +249,14 @@ class AgentMemoryStore:
             sql += " AND type = ?"
             params.append(atom_type)
         if query:
-            sql += " AND (content LIKE ? OR subject LIKE ? OR object LIKE ?)"
-            pat = f"%{query}%"
-            params.extend([pat, pat, pat])
+            clauses = []
+            for tok in _query_tokens(query):
+                clauses.append("content LIKE ? ESCAPE '\\' OR subject LIKE ? ESCAPE '\\' OR object LIKE ? ESCAPE '\\'")
+                pat = _like_pattern(tok)
+                params.extend([pat, pat, pat])
+            # Instruction atoms (rules/constraints) are always relevant
+            clauses.append("type = 'instruction'")
+            sql += " AND (" + " OR ".join(clauses) + ")"
         sql += " ORDER BY updated_at DESC LIMIT ?"
         params.append(limit)
 
@@ -339,11 +363,21 @@ class AgentMemoryStore:
         ]
         async with self._get_conn() as db:
             await db.execute("""
-                INSERT OR REPLACE INTO memory_l3_core
+                INSERT OR IGNORE INTO memory_l3_core
                 (team_id, agent_id, persona_name, core_profile, cumulative_wisdom, risk_rules_json, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (team_id, agent_id, "Hedge Fund PM & Committee", default_profile, default_wisdom, json.dumps(default_rules), now))
             await db.commit()
+            # A concurrent writer may have saved a profile first (seed is IGNOREd): prefer what is stored
+            async with await db.execute(
+                "SELECT * FROM memory_l3_core WHERE team_id = ? AND agent_id = ?",
+                (team_id, agent_id)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    res = dict(row)
+                    res["risk_rules"] = json.loads(res.get("risk_rules_json") or "[]")
+                    return res
 
         return {
             "team_id": team_id,
@@ -395,9 +429,12 @@ class AgentMemoryStore:
             sql += " AND category = ?"
             params.append(category)
         if query:
-            sql += " AND (name LIKE ? OR description LIKE ?)"
-            pat = f"%{query}%"
-            params.extend([pat, pat])
+            clauses = []
+            for tok in _query_tokens(query):
+                clauses.append("name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\'")
+                pat = _like_pattern(tok)
+                params.extend([pat, pat])
+            sql += " AND (" + " OR ".join(clauses) + ")"
         sql += " ORDER BY created_at DESC LIMIT ?"
         params.append(top_k)
 
@@ -480,6 +517,9 @@ class AgentMemoryStore:
 
     async def _seed_default_assets_if_empty(self):
         async with self._get_conn() as db:
+            # Drop stale point-in-time facts seeded by earlier versions (trigger #96, EUR 200 account)
+            await db.execute("DELETE FROM memory_l1_atoms WHERE atom_id IN ('atom_init_besi_trigger', 'atom_init_account_size')")
+            await db.commit()
             async with await db.execute("SELECT COUNT(*) as cnt FROM memory_skills") as c:
                 row = await c.fetchone()
                 if row["cnt"] > 0:
@@ -579,28 +619,12 @@ When total capital is small (€200), rather than dividing into `MAX_POSITIONS =
 
         # Seed Initial L1 Atoms
         await self.add_l1_atom(L1Atom(
-            atom_id="atom_init_besi_trigger",
-            type="episodic",
-            subject="BESI.AS",
-            predicate="has_active_order_trigger",
-            object="Trigger #96 @ €175.88 (Alloc €100.00)",
-            content="BESI.AS limit pullback trigger #96 armed at €175.88 with €100.00 allocation, ring-fencing €100.00 of available cash."
-        ))
-        await self.add_l1_atom(L1Atom(
             atom_id="atom_init_fee_rule",
             type="instruction",
             subject="RiskManager",
             predicate="enforces_fee_drag_limit",
             object="3.8% max round-trip commission drag",
             content="Risk Officer enforces a 3.8% max round-trip fee drag and €100 minimum order size on Euronext equities."
-        ))
-        await self.add_l1_atom(L1Atom(
-            atom_id="atom_init_account_size",
-            type="persona",
-            subject="PortfolioAccount",
-            predicate="operates_with_capital",
-            object="€200.00 initial equity requiring dynamic slot consolidation",
-            content="Account capital is €200.00 with 0 open positions. Deployable cash is consolidated into viable slots."
         ))
 
         # Seed CodeGraph

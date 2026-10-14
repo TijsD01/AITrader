@@ -185,3 +185,170 @@ async def test_memory_api_endpoints():
         assert res.status_code == 200
         comp = res.json()
         assert "choices" in comp
+
+
+# --- Regression tests for memory bug fixes ---
+
+class _FakeBroker:
+    async def get_portfolio_summary(self):
+        return {
+            "total_value_eur": 1234.56,
+            "cash_eur": 1000.0,
+            "available_cash_eur": 800.0,
+            "reserved_triggers_eur": 150.0,
+            "open_positions_count": 1,
+        }
+
+    async def get_triggers(self, status=None):
+        return [{"id": 7, "ticker": "ASML.AS", "trigger_type": "LIMIT_PULLBACK",
+                 "target_price": 700.0, "allocation_eur": 150.0, "created_at": "2026-01-01 10:00"}]
+
+    async def get_positions(self):
+        return [{"ticker": "NVDA", "shares": 2.0, "entry_price_native": 100.0, "unrealized_pnl_eur": 12.5}]
+
+
+@pytest.mark.asyncio
+async def test_cold_start_reads_real_broker_keys(monkeypatch):
+    monkeypatch.setattr(ColdStartEngine, "_portfolio_cache", None)
+    monkeypatch.setattr("src.trading.broker.get_active_broker", lambda: _FakeBroker())
+    state = await ColdStartEngine._fetch_portfolio_status()
+    assert state["available"] is True
+    assert state["total_equity_eur"] == 1234.56
+    assert state["available_cash_eur"] == 800.0
+    assert state["reserved_trigger_cash_eur"] == 150.0
+    assert state["open_positions_count"] == 1
+    assert state["pending_triggers_count"] == 1
+    assert state["active_triggers"][0]["id"] == 7
+    assert state["positions"] == [{"ticker": "NVDA", "shares": 2.0, "entry_price": 100.0, "pnl_eur": 12.5}]
+
+
+@pytest.mark.asyncio
+async def test_cold_start_portfolio_status_cached(monkeypatch):
+    monkeypatch.setattr(ColdStartEngine, "_portfolio_cache", None)
+    calls = {"n": 0}
+
+    def _broker():
+        calls["n"] += 1
+        return _FakeBroker()
+
+    monkeypatch.setattr("src.trading.broker.get_active_broker", _broker)
+    await ColdStartEngine._fetch_portfolio_status()
+    await ColdStartEngine._fetch_portfolio_status()
+    assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_cold_start_unavailable_state_is_not_fabricated(monkeypatch):
+    monkeypatch.setattr(ColdStartEngine, "_portfolio_cache", None)
+
+    def _boom():
+        raise RuntimeError("broker down")
+
+    monkeypatch.setattr("src.trading.broker.get_active_broker", _boom)
+    state = await ColdStartEngine._fetch_portfolio_status()
+    assert state["available"] is False
+    assert state["active_triggers"] == []
+    assert "total_equity_eur" not in state
+    recap = await ColdStartEngine._build_history_recap(state)
+    assert "unavailable" in recap
+    assert "BESI" not in recap and "#96" not in recap
+
+
+@pytest.mark.asyncio
+async def test_history_recap_uses_lesson_and_handles_null_pnl_pct():
+    import datetime
+    from src.db.session import AsyncSessionLocal
+    from src.db.models import Trade, TradeLesson
+
+    async with AsyncSessionLocal() as session:
+        session.add(Trade(
+            ticker="RECAP.AS", order_type="SELL", shares=1.0, currency="EUR",
+            price_native=10.0, price_eur=10.0, total_eur=10.0, fee_eur=1.9,
+            realized_pnl_eur=-3.5, realized_pnl_pct=None,
+            executed_at=datetime.datetime.utcnow() + datetime.timedelta(days=1),
+        ))
+        session.add(TradeLesson(
+            trade_id=1, ticker="RECAP.AS", outcome="LOSS",
+            lesson="Do not chase gaps unique-lesson-marker",
+            created_at=datetime.datetime.utcnow() + datetime.timedelta(days=1),
+        ))
+        await session.commit()
+
+    try:
+        recap = await ColdStartEngine._build_history_recap({"available": True, "total_equity_eur": 100.0})
+        assert "RECAP.AS" in recap
+        assert "PnL: €-3.50" in recap
+        assert "unique-lesson-marker" in recap
+    finally:
+        # Remove the future-dated rows so they don't skew other tests (e.g. learner calibration)
+        from sqlalchemy import delete
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(Trade).where(Trade.ticker == "RECAP.AS"))
+            await session.execute(delete(TradeLesson).where(TradeLesson.ticker == "RECAP.AS"))
+            await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_search_tokenises_sentence_queries_and_keeps_instructions(temp_db_path):
+    store = AgentMemoryStore(db_path=temp_db_path)
+    await store.init_db()
+    await store.add_l1_atom(L1Atom(
+        atom_id="a_asml", type="episodic", subject="ASML.AS", predicate="note",
+        object="strong order book", content="ASML.AS reported a strong order book."
+    ))
+    await store.add_l1_atom(L1Atom(
+        atom_id="a_other", type="episodic", subject="ZZZ", predicate="note",
+        object="nothing", content="Unrelated episodic fact."
+    ))
+    res = await store.search_l1_atoms(query="What do we know about ASML.AS today?")
+    ids = [a["atom_id"] for a in res]
+    assert "a_asml" in ids
+    assert "a_other" not in ids
+    # Instruction atoms (e.g. the seeded fee rule) are always returned, even if unrelated
+    assert "atom_init_fee_rule" in ids
+    # Stale point-in-time seed facts are gone
+    all_ids = [a["atom_id"] for a in await store.search_l1_atoms(limit=100)]
+    assert "atom_init_besi_trigger" not in all_ids
+    assert "atom_init_account_size" not in all_ids
+
+    # Wildcards in the query are literal, not LIKE wildcards
+    assert "a_other" not in [a["atom_id"] for a in await store.search_l1_atoms(query="%%%")]
+    assert "a_other" not in [a["atom_id"] for a in await store.search_l1_atoms(query="Unre_ated")]
+
+    # Empty query keeps returning everything
+    assert {"a_asml", "a_other"} <= {a["atom_id"] for a in await store.search_l1_atoms()}
+
+    # Skills: sentence query matches via individual words
+    skills = await store.search_skills(query="how do I avoid commission erosion on small orders?")
+    assert any(s["skill_id"] == "ibkr-tiered-fee-mitigation" for s in skills)
+    assert await store.search_skills(query="%%%") == []
+
+
+@pytest.mark.asyncio
+async def test_extractor_metadata_dedup_and_fixed_skill_id(temp_db_path, monkeypatch):
+    import src.memory.extractor as ext
+    store = AgentMemoryStore(db_path=temp_db_path)
+    await store.init_db()
+    monkeypatch.setattr(ext, "memory_store", store)
+
+    text = ("User: should I SELL AAPL?\nAssistant: Deliberation: pullback limit entry looks fine; "
+            "veto if fee drag too high.")
+    r1 = await AssetExtractor.extract_from_text(
+        text, metadata={"ticker": "ASML.AS", "action": "BUY", "consensus_score": 82}
+    )
+    verdicts = [a for a in r1["extracted_atoms"] if a["predicate"] == "committee_verdict"]
+    assert len(verdicts) == 1
+    assert verdicts[0]["subject"] == "ASML.AS"
+    assert "BUY (Score: 82)" in verdicts[0]["object"]
+
+    # No metadata: a verdict must not be taken from "User:" lines
+    r2 = await AssetExtractor.extract_from_text("User: SELL AAPL now\nAssistant: Acknowledged.", sync_to_store=False)
+    assert not [a for a in r2["extracted_atoms"] if a["predicate"] == "committee_verdict"]
+
+    await AssetExtractor.extract_from_text(text)
+    skills = [s for s in await store.search_skills(query="pullback", top_k=50) if s["skill_id"].startswith("skill-pullback")]
+    assert len(skills) == 1
+
+    wisdom = (await store.get_core_profile())["cumulative_wisdom"]
+    bullet = "Enforce strict Risk Officer veto"
+    assert wisdom.count(bullet) == 1

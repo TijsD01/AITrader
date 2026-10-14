@@ -219,5 +219,67 @@ def validate_buy_order(
 
     return True, "Approved"
 
+VALID_TRIGGER_TYPES = ("LIMIT_PULLBACK", "BREAKOUT_BUY")
+
+def validate_trigger_levels(
+    trigger_type: str,
+    target_price: float,
+    current_price: float,
+    stop_loss: Optional[float],
+    take_profit: Optional[float]
+) -> Optional[str]:
+    """Returns an error message when a trigger's type or price levels are inconsistent, else None."""
+    if trigger_type not in VALID_TRIGGER_TYPES:
+        return f"Unknown trigger type '{trigger_type}' (expected LIMIT_PULLBACK or BREAKOUT_BUY)."
+    if not target_price or target_price <= 0:
+        return f"Trigger target price ({target_price}) must be positive."
+    if trigger_type == "LIMIT_PULLBACK" and target_price >= current_price:
+        return f"Trigger overlap error: LIMIT_PULLBACK target price ({target_price}) must be below current price ({current_price})."
+    if trigger_type == "BREAKOUT_BUY" and target_price <= current_price:
+        return f"Trigger overlap error: BREAKOUT_BUY target price ({target_price}) must be above current price ({current_price})."
+    if stop_loss is not None and stop_loss >= target_price:
+        return f"Trigger overlap error: Stop Loss ({stop_loss}) must be below target price ({target_price})."
+    if take_profit is not None and take_profit <= target_price:
+        return f"Trigger overlap error: Take Profit ({take_profit}) must be above target price ({target_price})."
+    return None
+
+def evaluate_trigger_condition(
+    trigger_type: str,
+    target_price: float,
+    curr_price: float,
+    stop_loss: Optional[float] = None,
+    take_profit: Optional[float] = None
+) -> Tuple[bool, Optional[str]]:
+    """
+    Decides whether a pending price trigger should fire at curr_price.
+    Returns (condition_met, invalidation_reason). A non-empty reason means the
+    setup no longer holds (price already through the stop or the target) and
+    the trigger should be cancelled instead of bought.
+    """
+    if trigger_type == "LIMIT_PULLBACK":
+        if curr_price > target_price:
+            return False, None
+        if stop_loss and curr_price <= stop_loss:
+            return False, f"price {curr_price} already at/below stop-loss {stop_loss}"
+        return True, None
+    if trigger_type == "BREAKOUT_BUY":
+        if curr_price < target_price:
+            return False, None
+        if take_profit and curr_price >= take_profit:
+            return False, f"price {curr_price} already at/above take-profit {take_profit}"
+        return True, None
+    return False, None
+
+def is_trigger_expired(created_at, now=None, max_age_days: Optional[int] = None) -> bool:
+    """True when a pending trigger (naive UTC created_at) is older than TRIGGER_EXPIRY_DAYS."""
+    import datetime
+    if created_at is None:
+        return False
+    days = max_age_days if max_age_days is not None else settings.TRIGGER_EXPIRY_DAYS
+    if not days or days <= 0:
+        return False
+    now = now or datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    return (now - created_at) > datetime.timedelta(days=days)
+
 import sys
 risk_guardrail = sys.modules[__name__]

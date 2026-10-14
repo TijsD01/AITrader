@@ -8,6 +8,8 @@ from src.memory.store import memory_store
 
 logger = logging.getLogger(__name__)
 
+PORTFOLIO_CACHE_TTL_S = 30.0
+
 class ColdStartEngine:
     """
     Builds the instant situational memory loadout for AI agents upon startup.
@@ -16,6 +18,9 @@ class ColdStartEngine:
     - The live financial status (cash, reserved trigger funds, open positions)
     - Active L1/L2/L3 memory assets and executable skills.
     """
+
+    # (timestamp, state) of the last successful portfolio fetch
+    _portfolio_cache: Optional[tuple] = None
 
     @staticmethod
     async def generate_cold_start_loadout(
@@ -70,12 +75,15 @@ class ColdStartEngine:
         ]
 
         # 8. Assemble Full Prompt Context
-        status_summary = (
-            f"Portfolio: €{portfolio_state.get('total_equity_eur', 0):.2f} Total Equity | "
-            f"€{portfolio_state.get('available_cash_eur', 0):.2f} Deployable Cash | "
-            f"€{portfolio_state.get('reserved_trigger_cash_eur', 0):.2f} Ring-Fenced in {portfolio_state.get('pending_triggers_count', 0)} Trigger(s) | "
-            f"{portfolio_state.get('open_positions_count', 0)} Open Position(s)."
-        )
+        if portfolio_state.get("available", True):
+            status_summary = (
+                f"Portfolio: €{portfolio_state.get('total_equity_eur', 0):.2f} Total Equity | "
+                f"€{portfolio_state.get('available_cash_eur', 0):.2f} Deployable Cash | "
+                f"€{portfolio_state.get('reserved_trigger_cash_eur', 0):.2f} Ring-Fenced in {portfolio_state.get('pending_triggers_count', 0)} Trigger(s) | "
+                f"{portfolio_state.get('open_positions_count', 0)} Open Position(s)."
+            )
+        else:
+            status_summary = "Portfolio status unavailable: live broker state could not be queried. Do not assume cash, positions or triggers."
 
         full_prompt_context = f"""=== INSTANT MEMORY LOADOUT (TENCENTDB AGENT MEMORY) ===
 [SYSTEM SITUATION REPORT]
@@ -120,53 +128,60 @@ class ColdStartEngine:
 
     @staticmethod
     async def _fetch_portfolio_status() -> Dict[str, Any]:
-        """Queries the live trading bot state from database and active broker."""
+        """
+        Queries the live trading bot state from the active broker.
+        Broker reads (paper) refresh P&L and re-adjust triggers (DB writes), so a
+        successful result is cached for PORTFOLIO_CACHE_TTL_S seconds.
+        """
+        cached = ColdStartEngine._portfolio_cache
+        if cached is not None and time.time() - cached[0] < PORTFOLIO_CACHE_TTL_S:
+            return cached[1]
         try:
             from src.trading.broker import get_active_broker
             broker = get_active_broker()
             summary = await broker.get_portfolio_summary()
             triggers = await broker.get_triggers(status="PENDING")
-            return {
-                "total_equity_eur": summary.get("total_equity_eur", 200.0),
-                "cash_eur": summary.get("cash_eur", 200.0),
-                "available_cash_eur": summary.get("available_cash_eur", 100.0),
-                "reserved_trigger_cash_eur": summary.get("reserved_trigger_cash_eur", 100.0),
-                "open_positions_count": len(summary.get("positions", [])),
+            positions = await broker.get_positions()
+            state = {
+                "available": True,
+                "total_equity_eur": summary["total_value_eur"],
+                "cash_eur": summary["cash_eur"],
+                "available_cash_eur": summary["available_cash_eur"],
+                "reserved_trigger_cash_eur": summary["reserved_triggers_eur"],
+                "open_positions_count": summary.get("open_positions_count", len(positions)),
                 "pending_triggers_count": len(triggers),
                 "active_triggers": [
                     {
-                        "id": t.get("id") if isinstance(t, dict) else t.id,
-                        "ticker": t.get("ticker") if isinstance(t, dict) else t.ticker,
-                        "trigger_type": t.get("trigger_type") if isinstance(t, dict) else t.trigger_type,
-                        "target_price": t.get("target_price") if isinstance(t, dict) else t.target_price,
-                        "allocation_eur": t.get("allocation_eur") if isinstance(t, dict) else t.allocation_eur,
-                        "armed_at": str(t.get("created_at", "")) if isinstance(t, dict) else str(getattr(t, "created_at", ""))
+                        "id": t.get("id"),
+                        "ticker": t.get("ticker"),
+                        "trigger_type": t.get("trigger_type"),
+                        "target_price": t.get("target_price") or 0.0,
+                        "allocation_eur": t.get("allocation_eur") or 0.0,
+                        "armed_at": str(t.get("created_at", "")),
                     }
                     for t in triggers
                 ],
                 "positions": [
                     {
-                        "ticker": p.ticker,
-                        "shares": p.shares,
-                        "entry_price": p.entry_price_native,
-                        "pnl_eur": p.unrealized_pnl_eur
+                        "ticker": p.get("ticker"),
+                        "shares": p.get("shares"),
+                        "entry_price": p.get("entry_price_native"),
+                        "pnl_eur": p.get("unrealized_pnl_eur"),
                     }
-                    for p in summary.get("positions", [])
-                ]
+                    for p in positions
+                ],
             }
+            ColdStartEngine._portfolio_cache = (time.time(), state)
+            return state
         except Exception as e:
             logger.warning(f"Failed to query live portfolio status: {e}")
             return {
-                "total_equity_eur": 200.0,
-                "cash_eur": 200.0,
-                "available_cash_eur": 100.0,
-                "reserved_trigger_cash_eur": 100.0,
+                "available": False,
+                "error": str(e),
+                "pending_triggers_count": 0,
                 "open_positions_count": 0,
-                "pending_triggers_count": 1,
-                "active_triggers": [
-                    {"id": 96, "ticker": "BESI.AS", "trigger_type": "LIMIT_PULLBACK", "target_price": 175.88, "allocation_eur": 100.0}
-                ],
-                "positions": []
+                "active_triggers": [],
+                "positions": [],
             }
 
     @staticmethod
@@ -176,7 +191,10 @@ class ColdStartEngine:
 
         # 1. Triggers
         triggers = portfolio_state.get("active_triggers", [])
-        if triggers:
+        available = portfolio_state.get("available", True)
+        if not available:
+            lines.append("• **Portfolio & Triggers**: status unavailable (broker could not be queried); do not assume any armed triggers.")
+        elif triggers:
             lines.append("• **Active Order Triggers Armed**:")
             for t in triggers:
                 lines.append(
@@ -197,11 +215,15 @@ class ColdStartEngine:
                 if trades:
                     lines.append("• **Recent Executed Trades**:")
                     for tr in trades:
-                        fee_str = f", Fee: €{tr.fee_eur:.2f}" if getattr(tr, "fee_eur", None) else ""
-                        pnl_str = f", PnL: €{tr.realized_pnl_eur:+.2f} ({tr.realized_pnl_pct:+.2f}%)" if tr.realized_pnl_eur is not None else ""
+                        details = []
+                        if tr.realized_pnl_eur is not None:
+                            pct_str = f" ({tr.realized_pnl_pct:+.2f}%)" if tr.realized_pnl_pct is not None else ""
+                            details.append(f"PnL: €{tr.realized_pnl_eur:+.2f}{pct_str}")
+                        if getattr(tr, "fee_eur", None):
+                            details.append(f"Fee: €{tr.fee_eur:.2f}")
+                        detail_str = f" ({', '.join(details)})" if details else ""
                         lines.append(
-                            f"  - {tr.order_type} {tr.shares}x {tr.ticker} @ {tr.price_native} {tr.currency} "
-                            f"(Status: {tr.status}{pnl_str}{fee_str})"
+                            f"  - {tr.order_type} {tr.shares}x {tr.ticker} @ {tr.price_native} {tr.currency}{detail_str}"
                         )
 
                 lesson_res = await session.execute(select(TradeLesson).order_by(desc(TradeLesson.created_at)).limit(2))
@@ -209,16 +231,17 @@ class ColdStartEngine:
                 if lessons:
                     lines.append("• **Recent Trade Post-Mortems & Lessons**:")
                     for les in lessons:
-                        lines.append(f"  - [{les.ticker} {les.outcome}]: {les.actionable_rule}")
+                        lines.append(f"  - [{les.ticker} {les.outcome}]: {les.lesson}")
         except Exception as e:
             logger.debug(f"Could not load trade history from database: {e}")
 
         # 3. Capital & Slot Consolidation Note
-        lines.append(
-            f"• **Capital Optimization**: Account balance is €{portfolio_state.get('total_equity_eur', 0):.2f}. "
-            f"Dynamic slot consolidation is active to avoid micro-trade commission erosion under IBKR tiered pricing "
-            f"(orders consolidated to €100 min on Euronext/Xetra, €35 min on US)."
-        )
+        if available:
+            lines.append(
+                f"• **Capital Optimization**: Account balance is €{portfolio_state.get('total_equity_eur', 0):.2f}. "
+                f"Dynamic slot consolidation is active to avoid micro-trade commission erosion under IBKR tiered pricing "
+                f"(orders consolidated to €100 min on Euronext/Xetra, €35 min on US)."
+            )
 
         return "\n".join(lines)
 

@@ -24,6 +24,10 @@ EU_EXCHANGE_SUFFIXES = (
     ".L",   # London Stock Exchange (UK)
     ".VI",  # Vienna (Austria)
     ".SW",  # SIX Swiss Exchange (Switzerland)
+    ".ST",  # Nasdaq Stockholm (Sweden)
+    ".HE",  # Nasdaq Helsinki (Finland)
+    ".CO",  # Nasdaq Copenhagen (Denmark)
+    ".OL",  # Oslo Bors (Norway)
 )
 
 def is_european_ticker(ticker: str, currency: Optional[str] = None) -> bool:
