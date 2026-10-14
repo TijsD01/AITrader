@@ -27,11 +27,14 @@ class AssetExtractor:
         team_id: str = "trading-team",
         agent_id: str = "committee",
         sync_to_store: bool = True,
-        use_llm: bool = False
+        use_llm: bool = False,
+        metadata: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Extracts L1 facts, L2 updates, L3 wisdom, and candidate skills
         from raw conversation, trade log, or deliberation text.
+        `metadata` (ticker / action / consensus_score, as passed by the committee)
+        takes precedence over regex guessing for the committee verdict.
         """
         extracted_atoms: List[L1Atom] = []
         extracted_skills: List[SkillAsset] = []
@@ -103,12 +106,26 @@ class AssetExtractor:
             extracted_atoms.append(atom)
 
         # 3. Extract Committee Consensus / Action Verdicts
-        action_match = re.search(r'\b(STRONG_BUY|BUY|HOLD|SELL)\b', text)
-        score_match = re.search(r'(?:consensus|score|conviction).*?(\d{2,3})', text, re.IGNORECASE)
-        if action_match and known_stocks:
-            ticker = list(known_stocks)[0]
-            verdict = action_match.group(1)
+        metadata = metadata or {}
+        # Only the assistant's own lines can carry a verdict, never quoted "User:" lines
+        verdict_text = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("User:"))
+        action_match = re.search(r'\b(STRONG_BUY|BUY|HOLD|SELL)\b', verdict_text)
+        score_match = re.search(r'(?:consensus|score|conviction).*?(\d{2,3})', verdict_text, re.IGNORECASE)
+
+        ticker = metadata.get("ticker") if isinstance(metadata.get("ticker"), str) else None
+        verdict = metadata.get("action") if metadata.get("action") in ("STRONG_BUY", "BUY", "HOLD", "SELL") else None
+        score = metadata.get("consensus_score")
+        if ticker is None or verdict is None:
+            # Regex fallback: first known ticker in order of appearance
+            ordered = [t for t in ticker_matches if t in known_stocks and t in verdict_text]
+            if ticker is None and ordered:
+                ticker = ordered[0]
+            if verdict is None and action_match:
+                verdict = action_match.group(1)
+        if score is None:
             score = score_match.group(1) if score_match else "75"
+
+        if ticker and verdict:
             atom = L1Atom(
                 atom_id=f"atom_verdict_{int(now*1000)}",
                 team_id=team_id,
@@ -134,7 +151,7 @@ class AssetExtractor:
 
         # 4. Extract Reusable Skills (if playbook steps detected)
         if "pullback" in text.lower() and ("limit" in text.lower() or "rsi" in text.lower()):
-            skill_id = f"skill-pullback-{int(now)}"
+            skill_id = "skill-pullback-extracted"  # fixed id so repeated extractions upsert
             extracted_skills.append(SkillAsset(
                 skill_id=skill_id,
                 name="Dynamically Extracted Pullback Entry",
@@ -201,16 +218,22 @@ class AssetExtractor:
 
             if l3_wisdom_notes:
                 current_l3 = await memory_store.get_core_profile(team_id=team_id, agent_id=agent_id)
-                new_wisdom = current_l3.get("cumulative_wisdom", "") + "\n" + "\n".join(f"• {w}" for w in l3_wisdom_notes)
-                updated_profile = L3CoreProfile(
-                    team_id=team_id,
-                    agent_id=agent_id,
-                    persona_name=current_l3.get("persona_name", "Hedge Fund PM & Committee"),
-                    core_profile=current_l3.get("core_profile", ""),
-                    cumulative_wisdom=new_wisdom.strip(),
-                    risk_rules=current_l3.get("risk_rules", [])
-                )
-                await memory_store.update_core_profile(updated_profile)
+                existing_wisdom = current_l3.get("cumulative_wisdom", "")
+                fresh_notes: List[str] = []
+                for w in l3_wisdom_notes:
+                    if w not in existing_wisdom and w not in fresh_notes:
+                        fresh_notes.append(w)
+                if fresh_notes:
+                    new_wisdom = existing_wisdom + "\n" + "\n".join(f"• {w}" for w in fresh_notes)
+                    updated_profile = L3CoreProfile(
+                        team_id=team_id,
+                        agent_id=agent_id,
+                        persona_name=current_l3.get("persona_name", "Hedge Fund PM & Committee"),
+                        core_profile=current_l3.get("core_profile", ""),
+                        cumulative_wisdom=new_wisdom.strip(),
+                        risk_rules=current_l3.get("risk_rules", [])
+                    )
+                    await memory_store.update_core_profile(updated_profile)
 
             for sk in extracted_skills:
                 await memory_store.add_skill(sk)

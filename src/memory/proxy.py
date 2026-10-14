@@ -16,6 +16,24 @@ logger = logging.getLogger(__name__)
 
 proxy_router = APIRouter(tags=["MemoryProxy"])
 
+
+def _content_to_text(content: Any) -> str:
+    """Normalises message/system content (str, or a list of {"type": "text"} blocks) to plain text."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for b in content:
+            if isinstance(b, str):
+                parts.append(b)
+            elif isinstance(b, dict) and b.get("type", "text") == "text":
+                parts.append(str(b.get("text", "")))
+        return " ".join(p for p in parts if p)
+    return str(content)
+
+
 @proxy_router.post("/v1/chat/completions")
 async def openai_chat_completions_proxy(request: Request):
     """
@@ -34,7 +52,7 @@ async def openai_chat_completions_proxy(request: Request):
     last_user_msg = ""
     for m in reversed(messages):
         if m.get("role") == "user":
-            last_user_msg = m.get("content", "")
+            last_user_msg = _content_to_text(m.get("content", ""))
             break
 
     cold_start = await cold_start_engine.generate_cold_start_loadout(
@@ -48,12 +66,12 @@ async def openai_chat_completions_proxy(request: Request):
     new_messages = []
     for m in messages:
         if m.get("role") == "system" and not system_injected:
-            orig = m.get("content", "")
+            orig = _content_to_text(m.get("content", ""))
             augmented = f"{cold_start.full_prompt_context}\n\n{orig}"
             new_messages.append({"role": "system", "content": augmented})
             system_injected = True
         else:
-            new_messages.append(m)
+            new_messages.append({**m, "content": _content_to_text(m.get("content", ""))})
 
     if not system_injected:
         new_messages.insert(0, {"role": "system", "content": cold_start.full_prompt_context})
@@ -105,7 +123,7 @@ async def anthropic_messages_proxy(request: Request):
     """
     body = await request.json()
     messages: List[Dict[str, Any]] = body.get("messages", [])
-    system_prompt = body.get("system", "")
+    system_prompt = _content_to_text(body.get("system", ""))
     model = body.get("model", "claude-3-7-sonnet-latest")
     team_id = request.headers.get("x-tdai-team-id", "trading-team")
     agent_id = request.headers.get("x-tdai-agent-id", "committee")
@@ -115,13 +133,13 @@ async def anthropic_messages_proxy(request: Request):
     last_user_msg = ""
     for m in reversed(messages):
         if m.get("role") == "user":
-            last_user_msg = m.get("content", "")
+            last_user_msg = _content_to_text(m.get("content", ""))
             break
 
     cold_start = await cold_start_engine.generate_cold_start_loadout(
         team_id=team_id,
         agent_id=agent_id,
-        query=last_user_msg[:200] if isinstance(last_user_msg, str) else ""
+        query=last_user_msg[:200]
     )
 
     # 2. Augment System Prompt
@@ -130,11 +148,7 @@ async def anthropic_messages_proxy(request: Request):
     # 3. Format OpenAI-compatible messages for internal router
     converted_msgs = [{"role": "system", "content": augmented_system}]
     for m in messages:
-        c = m.get("content")
-        if isinstance(c, list):
-            # Extract text blocks
-            c = " ".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
-        converted_msgs.append({"role": m.get("role", "user"), "content": c or ""})
+        converted_msgs.append({"role": m.get("role", "user"), "content": _content_to_text(m.get("content"))})
 
     response_content = await _call_upstream_llm(converted_msgs, model=model)
 
@@ -179,9 +193,9 @@ async def _call_upstream_llm(messages: List[Dict[str, Any]], model: str) -> str:
     user_text = ""
     for m in messages:
         if m["role"] == "system":
-            system_text += m["content"] + "\n"
+            system_text += _content_to_text(m.get("content")) + "\n"
         elif m["role"] == "user":
-            user_text += m["content"] + "\n"
+            user_text += _content_to_text(m.get("content")) + "\n"
 
     # Try existing LLMClient if configured with external API
     if llm_client.has_active_key() and settings.LLM_PROVIDER.lower() in ["gemini", "openai"]:
