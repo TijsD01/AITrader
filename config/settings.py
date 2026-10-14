@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     WEB_USERNAME: str = "admin"
     WEB_PASSWORD: Optional[str] = None
     WEB_ALLOW_PRIVATE_NETWORK_ONLY: bool = True
+    # Extra networks treated as local (comma-separated CIDRs). Default: Tailscale (IPv4 CGNAT range + IPv6 ULA).
+    WEB_TRUSTED_NETWORKS: str = "100.64.0.0/10,fd7a:115c:a1e0::/48"
     CORS_ALLOW_ORIGINS: str = ""            # Comma-separated extra origins allowed cross-site (empty = same-origin only)
     DATA_DIR: Path = BASE_DIR / "data"
 

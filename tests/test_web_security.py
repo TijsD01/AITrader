@@ -35,6 +35,15 @@ def test_lan_client_allowed_public_client_blocked():
     assert TestClient(_app(), client=("8.8.8.8", 5000)).get("/api/ping").status_code == 403
 
 
+def test_tailscale_clients_allowed_by_default(monkeypatch):
+    monkeypatch.setattr(settings, "WEB_TRUSTED_NETWORKS", "100.64.0.0/10,fd7a:115c:a1e0::/48")
+    assert TestClient(_app(), client=("100.101.5.7", 5000)).get("/api/ping").status_code == 200
+    assert TestClient(_app(), client=("fd7a:115c:a1e0::1", 5000)).get("/api/ping").status_code == 200
+    assert TestClient(_app(), client=("::ffff:100.101.5.7", 5000)).get("/api/ping").status_code == 200
+    monkeypatch.setattr(settings, "WEB_TRUSTED_NETWORKS", "")
+    assert TestClient(_app(), client=("100.101.5.7", 5000)).get("/api/ping").status_code == 403
+
+
 def test_cross_origin_write_blocked_same_origin_allowed():
     c = TestClient(_app(), client=("192.168.1.20", 5000), base_url="http://192.168.1.10:8000")
     assert c.post("/api/killswitch", headers={"Origin": "http://evil.example"}).status_code == 403
