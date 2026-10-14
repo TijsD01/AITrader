@@ -307,7 +307,7 @@ function switchTab(tabId) {
   if (tabId === 'advice') { loadRecommendations(); loadMarketReview(); loadWeeklyReviewComparison(); }
   if (tabId === 'screener') loadScreener();
   if (tabId === 'triggers') loadTriggers();
-  if (tabId === 'history') { loadTrades(); loadLearningInsights(); }
+  if (tabId === 'history') { loadTrades(); loadLearningInsights(); loadCashFlows(); }
   if (tabId === 'shadow') loadShadow();
   if (tabId === 'memory') loadMemoryHub();
   if (tabId === 'settings') { loadSettings(); loadBrokerStatus(); }
@@ -374,7 +374,9 @@ async function loadPortfolio() {
     const pnlVal = positions.reduce((s, p) => s + (p.unrealized_pnl_eur || 0), 0);
     const equityVal = positions.reduce((s, p) => s + (p.current_value_eur || 0), 0);
     const totalVal = (summary.cash_eur || 0) + equityVal;
-    const rawReturn = summary.initial_capital_eur ? (((totalVal / summary.initial_capital_eur) - 1.0) * 100) : (summary.total_return_pct ?? 0);
+    // Measure against everything put in (start value plus deposits), so a deposit is not shown as gain
+    const investedCap = Number(summary.invested_capital_eur ?? summary.initial_capital_eur) || 0;
+    const rawReturn = investedCap > 0 ? (((totalVal / investedCap) - 1.0) * 100) : (summary.total_return_pct ?? 0);
     const totalReturnPct = Number.isFinite(rawReturn) ? rawReturn : 0;
 
     const isLive = (summary.trading_mode || '').toUpperCase() === 'LIVE';
@@ -451,13 +453,16 @@ async function loadPortfolio() {
     pnlElem.className = `kpi-value ${pnlVal > 0 ? 'ui-gain' : pnlVal < 0 ? 'ui-loss' : ''}`;
 
     const up = totalReturnPct >= 0;
-    const initialCap = Number(summary.initial_capital_eur) || 0;
-    const absReturn = initialCap ? totalVal - initialCap : null;
+    const absReturn = investedCap ? totalVal - investedCap : null;
+    const netDeposits = Number(summary.net_deposits_eur) || 0;
     returnElem.innerHTML = `<i class="fa-solid fa-arrow-${up ? 'up' : 'down'}-long text-xs" aria-hidden="true"></i>`
       + (absReturn !== null ? `<span class="ui-num">${signedEur(absReturn)}</span>` : '')
       + `<span class="ui-num">${up ? '+' : ''}${totalReturnPct.toFixed(2)}%</span>`
-      + `<span class="text-slate-500 font-medium">all time</span>`;
-    returnElem.className = `flex items-center gap-2 text-sm font-semibold ${up ? 'ui-gain' : 'ui-loss'}`;
+      + `<span class="text-slate-500 font-medium">all time</span>`
+      + (Math.abs(netDeposits) >= 0.01
+        ? `<span class="text-slate-500 font-medium ui-num" title="Deposits minus withdrawals, not counted as gain">· excl. ${eur(netDeposits)} deposits</span>`
+        : '');
+    returnElem.className = `flex flex-wrap items-center gap-x-2 gap-y-0.5 text-sm font-semibold ${up ? 'ui-gain' : 'ui-loss'}`;
 
     document.getElementById('metricPosCount').textContent = `${positions.length} open position${positions.length === 1 ? '' : 's'}`;
     const posCount = document.getElementById('positionsCount');
@@ -807,6 +812,70 @@ function inspectReport(idx) {
 }
 
 // 6. Trade History
+// Deposits and withdrawals on the live account
+async function loadCashFlows() {
+  const list = document.getElementById('cashFlowList');
+  if (!list) return;
+  try {
+    const res = await fetch('/api/cash-flows');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const flows = data.flows || [];
+    const netEl = document.getElementById('cashFlowNet');
+    if (netEl) netEl.textContent = flows.length ? `net ${eur(data.net_deposits_eur)}` : '';
+    if (!flows.length) {
+      list.innerHTML = '<div class="ui-card ui-card-pad text-[13px] ui-muted">No deposits or withdrawals recorded.</div>';
+      return;
+    }
+    list.innerHTML = flows.map(f => {
+      const isIn = Number(f.amount_eur) >= 0;
+      return `
+        <div class="ui-card ui-card-pad flex items-center justify-between gap-3">
+          <div class="min-w-0">
+            <div class="ui-num font-semibold ${isIn ? 'ui-gain' : 'ui-loss'}">${isIn ? 'Deposit' : 'Withdrawal'} ${esc(signedEur(f.amount_eur))}</div>
+            <div class="text-xs ui-faint ui-num">${esc(f.timestamp)} · ${f.source === 'manual' ? 'added by you' : 'detected'}</div>
+          </div>
+          <button type="button" onclick="removeCashFlow(${Number(f.id)})" class="ui-btn ui-btn-quiet ui-icon-btn shrink-0" aria-label="Remove" title="Remove"><i class="fa-solid fa-trash-can"></i></button>
+        </div>`;
+    }).join('');
+  } catch (e) {
+    console.error('Error loading deposits', e);
+  }
+}
+
+async function addCashFlow(event) {
+  event.preventDefault();
+  const input = document.getElementById('cashFlowAmount');
+  const amount = Number(input.value);
+  if (!amount) { showToast('Enter an amount, negative for a withdrawal.', true); return; }
+  const label = amount > 0 ? `deposit of ${eur(amount)}` : `withdrawal of ${eur(-amount)}`;
+  if (!confirm(`Record a ${label}? It will no longer count as gain or loss.`)) return;
+  try {
+    const res = await fetch('/api/cash-flows', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ amount_eur: amount })
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || `HTTP ${res.status}`);
+    input.value = '';
+    showToast('Recorded.');
+    loadCashFlows(); loadPortfolio();
+  } catch (e) {
+    showToast(`Could not record it: ${e.message}`, true);
+  }
+}
+
+async function removeCashFlow(id) {
+  if (!confirm('Remove this entry? The amount will count as gain or loss again.')) return;
+  try {
+    const res = await fetch(`/api/cash-flows/${id}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    showToast('Removed.');
+    loadCashFlows(); loadPortfolio();
+  } catch (e) {
+    showToast(`Could not remove it: ${e.message}`, true);
+  }
+}
+
 async function loadTrades() {
   try {
     const res = await fetch('/api/trades');

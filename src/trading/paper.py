@@ -71,6 +71,7 @@ class PaperBroker(BaseBroker):
             unrealized_pnl = sum(round(p.unrealized_pnl_eur, 2) for p in positions)
             initial_cap = settings.INITIAL_PAPER_CAPITAL
             total_return_pct = round(((total_val / initial_cap) - 1.0) * 100, 2)
+            total_gain = round(total_val - initial_cap, 2)
 
             return {
                 "trading_mode": "PAPER",
@@ -90,6 +91,9 @@ class PaperBroker(BaseBroker):
                 "open_positions_count": len(positions),
                 "pending_triggers_count": len(pending_triggers),
                 "initial_capital_eur": initial_cap,
+                "net_deposits_eur": 0.0,
+                "invested_capital_eur": initial_cap,
+                "total_gain_eur": total_gain,
             }
 
     async def get_positions(self) -> List[Dict[str, Any]]:

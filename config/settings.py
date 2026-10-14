@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     MAX_CAPITAL_USAGE_PCT: float = 100.0    # 10% to 100%: % of deposited account cash allowed to be traded
     MAX_DEPLOYABLE_CAPITAL_EUR: Optional[float] = None  # Optional hard EUR cap on deployable capital
     MAX_POSITIONS: int = 8
+    # A broker cash change of at least this much that no bot trade explains counts as a deposit or
+    # withdrawal, so it does not show up as portfolio gain. Smaller changes (dividends, interest) stay gain.
+    CASH_FLOW_MIN_EUR: float = 100.0
 
     @field_validator("MAX_DEPLOYABLE_CAPITAL_EUR", mode="before")
     @classmethod
