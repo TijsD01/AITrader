@@ -3,6 +3,8 @@ import datetime
 import html
 import logging
 import re
+import math
+import time
 from typing import Optional, Dict, Any, List, Union
 import httpx
 from config.settings import settings
@@ -537,7 +539,8 @@ class TelegramAssistant:
             msg = callback_query.get("message")
             raw_text = callback_query.get("data", "")
         else:
-            msg = update.get("message") or update.get("edited_message")
+            # Edited messages are deliberately ignored so editing "/buy NVDA 500" cannot re-trigger an order.
+            msg = update.get("message")
             raw_text = msg.get("text", "") if msg else ""
 
         if not msg or not raw_text:
@@ -548,14 +551,30 @@ class TelegramAssistant:
         if not chat or "id" not in chat:
             return
         chat_id = chat["id"]
-        # If no chat_id was configured before, adopt the first user who messages
-        if not self.chat_id:
-            self.chat_id = str(chat_id)
+
+        # Authorisation: only the configured owner chat may issue commands.
+        configured_chat = str(settings.TELEGRAM_CHAT_ID or "").strip()
+        if not configured_chat:
+            logger.warning(
+                f"Ignoring Telegram update from chat id {chat_id}: TELEGRAM_CHAT_ID is not configured."
+            )
+            return
+        if str(chat_id) != configured_chat:
+            return
+
+        # Drop stale/replayed messages (e.g. queued while the bot was down).
+        msg_date = msg.get("date")
+        if not callback_query and isinstance(msg_date, (int, float)) and time.time() - msg_date > 120:
+            logger.info(f"Ignoring stale Telegram message (age {int(time.time() - msg_date)}s).")
+            return
 
         parts = text.split()
         if not parts:
             return
         raw_cmd = parts[0].lower().split('@')[0]
+        # Commands must start with "/" so plain words like "stop" or "halt" never execute anything.
+        if not raw_cmd.startswith('/'):
+            return
         command = raw_cmd.lstrip('/')
 
         if command in ("start", "help", "", "commands", "menu", "hi", "hello"):
@@ -638,7 +657,10 @@ class TelegramAssistant:
                     try:
                         explicit_amount = float(parts[2].replace(",", ".").lstrip("$€£"))
                     except ValueError:
-                        pass
+                        explicit_amount = None
+                    if explicit_amount is None or not math.isfinite(explicit_amount) or explicit_amount <= 0:
+                        await self._reply_chat(chat_id, "⚠️ Invalid amount. Usage: <code>/buy TICKER [AMOUNT_EUR]</code> (amount must be a number greater than 0, e.g. <code>/buy ASML.AS 500</code>)")
+                        return
 
                 from src.trading.risk import check_market_hours
                 is_open, open_msg = check_market_hours(target_ticker)
@@ -820,7 +842,10 @@ class TelegramAssistant:
                     try:
                         explicit_price = float(parts[2].replace(",", ".").lstrip("$€£"))
                     except ValueError:
-                        pass
+                        explicit_price = None
+                    if explicit_price is None or not math.isfinite(explicit_price) or explicit_price <= 0:
+                        await self._reply_chat(chat_id, "⚠️ Invalid price. Usage: <code>/trigger TICKER [TARGET_PRICE]</code> (price must be a number greater than 0, e.g. <code>/trigger ASML.AS 750</code>)")
+                        return
 
                 await self._reply_chat(chat_id, f"⏳ Analyzing <b>{target_ticker}</b> to determine optimal AI entry trigger level...")
                 
