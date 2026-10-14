@@ -543,6 +543,8 @@ class TelegramAssistant:
             ai_rationale=report.get("trigger_rationale", report.get("summary", ""))
         )
         res.update(plan)
+        # Show the allocation the broker actually stored, not the planned one
+        res["alloc_eur"] = res.get("allocation_eur", plan["alloc_eur"])
         return res
 
     async def _handle_update(self, update: Dict[str, Any]):
