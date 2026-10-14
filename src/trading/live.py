@@ -1044,15 +1044,12 @@ class LiveBroker(BaseBroker):
             quote_cache = {}
             for t in triggers:
                 curr_price = ib_prices.get(t.ticker)
-                if not curr_price:
-                    is_open, _ = check_market_hours(t.ticker)
-                    if not is_open:
-                        curr_price = t.current_price_at_creation
-                    else:
-                        if t.ticker not in quote_cache:
-                            quote_cache[t.ticker] = await asyncio.to_thread(market_data_provider.get_stock_data, t.ticker)
-                        latest_data = quote_cache[t.ticker]
-                        curr_price = latest_data["price"] if latest_data else t.current_price_at_creation
+                if not curr_price and t.status == "PENDING":
+                    # Last known quote, also while the market is closed: the price at creation is stale
+                    if t.ticker not in quote_cache:
+                        quote_cache[t.ticker] = await asyncio.to_thread(market_data_provider.get_stock_data, t.ticker)
+                    latest_data = quote_cache[t.ticker]
+                    curr_price = latest_data["price"] if latest_data else None
 
                 curr_price = curr_price or t.current_price_at_creation or t.target_price
                 dist_pct = round(((t.target_price / curr_price) - 1.0) * 100, 2) if curr_price > 0 else 0.0

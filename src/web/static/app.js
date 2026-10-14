@@ -1583,10 +1583,16 @@ async function loadTriggers() {
           const distVal = hasNum(t.distance_pct)
             ? Number(t.distance_pct)
             : (currPrice > 0 ? Math.round(((Number(t.target_price) / currPrice) - 1.0) * 10000) / 100 : 0);
-          const distAbs = Math.abs(distVal);
+          // A pullback buys at or below the limit, a breakout at or above it
+          const isBreakout = t.trigger_type === 'BREAKOUT_BUY';
+          const reached = isBreakout ? currPrice >= Number(t.target_price) : currPrice <= Number(t.target_price);
+          const distAbs = reached ? 0 : Math.abs(distVal);
           // Near the limit reads as accent; more than 5% away as warn
           const isFar = distAbs > 5;
-          const distCls = isFar ? 'ui-badge-warn' : 'ui-badge-accent';
+          const distCls = reached ? 'ui-badge-gain' : (isFar ? 'ui-badge-warn' : 'ui-badge-accent');
+          const distLabel = reached
+            ? 'Limit reached'
+            : `${distAbs.toFixed(1)}% ${isBreakout ? 'rise' : 'drop'} to go`;
           // Bar is full at the limit and empty at 10% or more away
           const closeness = Math.max(0, Math.min(100, Math.round(100 - distAbs * 10)));
           const barColor = isFar ? 'var(--warn)' : 'var(--accent)';
@@ -1602,10 +1608,10 @@ async function loadTriggers() {
                   <div class="text-base font-bold truncate" style="color:var(--text)">${esc(t.ticker)}</div>
                   <div class="text-[13px] ui-muted truncate">${esc(subParts.join(' · '))}${t.name ? ` · ${esc(t.name)}` : ''}</div>
                 </div>
-                <span class="ui-badge ${distCls} shrink-0">${esc(distAbs.toFixed(1))}% away</span>
+                <span class="ui-badge ${distCls} shrink-0">${esc(distLabel)}</span>
               </div>
 
-              <div class="ui-track" role="img" aria-label="${esc(distAbs.toFixed(1))}% from the limit price"><span style="width:${closeness}%;background:${barColor}"></span></div>
+              <div class="ui-track" role="img" aria-label="${esc(distLabel)}"><span style="width:${closeness}%;background:${barColor}"></span></div>
 
               <div class="flex items-baseline justify-between gap-3 text-[13px]">
                 <span><span class="ui-faint">Now</span> <span class="ui-num" style="color:var(--text)">${esc(num(currPrice))}</span></span>
