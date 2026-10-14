@@ -219,6 +219,30 @@ def validate_buy_order(
 
     return True, "Approved"
 
+VALID_TRIGGER_TYPES = ("LIMIT_PULLBACK", "BREAKOUT_BUY")
+
+def validate_trigger_levels(
+    trigger_type: str,
+    target_price: float,
+    current_price: float,
+    stop_loss: Optional[float],
+    take_profit: Optional[float]
+) -> Optional[str]:
+    """Returns an error message when a trigger's type or price levels are inconsistent, else None."""
+    if trigger_type not in VALID_TRIGGER_TYPES:
+        return f"Unknown trigger type '{trigger_type}' (expected LIMIT_PULLBACK or BREAKOUT_BUY)."
+    if not target_price or target_price <= 0:
+        return f"Trigger target price ({target_price}) must be positive."
+    if trigger_type == "LIMIT_PULLBACK" and target_price >= current_price:
+        return f"Trigger overlap error: LIMIT_PULLBACK target price ({target_price}) must be below current price ({current_price})."
+    if trigger_type == "BREAKOUT_BUY" and target_price <= current_price:
+        return f"Trigger overlap error: BREAKOUT_BUY target price ({target_price}) must be above current price ({current_price})."
+    if stop_loss is not None and stop_loss >= target_price:
+        return f"Trigger overlap error: Stop Loss ({stop_loss}) must be below target price ({target_price})."
+    if take_profit is not None and take_profit <= target_price:
+        return f"Trigger overlap error: Take Profit ({take_profit}) must be above target price ({target_price})."
+    return None
+
 def evaluate_trigger_condition(
     trigger_type: str,
     target_price: float,
