@@ -19,6 +19,7 @@ from sqlalchemy import select, desc
 from src.db.session import AsyncSessionLocal
 from src.db.models import AnalysisReport, MarketDigest, Position, OrderTrigger, SystemConfig
 from src.data.review_tracker import review_tracker
+from src.trading.risk import check_market_regime
 
 logger = logging.getLogger(__name__)
 
@@ -276,8 +277,12 @@ class TradingScheduler:
                         # Automatically arm trigger for approved buy setups scoring >= 80
                         curr_summary = await paper_broker.get_portfolio_summary()
                         available_cash = curr_summary.get("available_cash_eur", 0.0)
+                        regime_ok, regime_msg = await asyncio.to_thread(check_market_regime, ticker, data.get("currency"))
 
-                        if available_cash < 20.0:
+                        if not regime_ok:
+                            logger.info(f"Skipping trigger for {ticker}: {regime_msg}")
+                            report["status_type"] = "REGIME_FILTER"
+                        elif available_cash < 20.0:
                             logger.info(f"Skipping trigger for {ticker}: insufficient available cash (€{available_cash:.2f}).")
                             report["status_type"] = "INSUFFICIENT_CASH"
                         else:
@@ -513,6 +518,10 @@ class TradingScheduler:
                     report = await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
                     armed = False
                     if self._should_arm_trigger(report, trigger_min_score):
+                        regime_ok, regime_msg = await asyncio.to_thread(check_market_regime, tk, data.get("currency"))
+                        if not regime_ok:
+                            logger.info(f"Opportunity Scanner skipped {tk}: {regime_msg}")
+                            continue
                         alloc = calculate_position_allocation(
                             available_cash=avail,
                             current_positions_count=len(open_tickers),

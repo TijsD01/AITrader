@@ -2,10 +2,39 @@ import asyncio
 import re
 import logging
 from typing import Dict, Any, List
+from config.settings import settings
 from src.agents.base import llm_client, merge_llm_report
 from src.data.news import news_service
 
 logger = logging.getLogger(__name__)
+
+_NAME_SUFFIXES = {
+    "inc", "corp", "corporation", "co", "company", "ltd", "plc", "nv", "sa", "se", "ag", "spa",
+    "holding", "holdings", "group", "the", "&", "and", "class", "a", "b",
+}
+
+def anonymize_text(text: str, ticker: str, name: str = "") -> str:
+    """
+    Replaces the company's name and ticker with "the company" (Glasserman & Lin 2023): an LLM that
+    recognises a well-known name lets its prior view of that company colour the headline's sentiment.
+    """
+    if not text:
+        return text
+    terms = set()
+    base = (ticker or "").split(".")[0].strip()
+    if len(base) >= 2:
+        terms.add(base)
+    if name and name.upper() != (ticker or "").upper():
+        terms.add(name.strip())
+        words = [w.strip(",.()") for w in name.split()]
+        core = [w for w in words if w and w.lower().replace(".", "") not in _NAME_SUFFIXES]
+        if core:
+            terms.add(" ".join(core))
+            if len(core[0]) >= 4:
+                terms.add(core[0])
+    for term in sorted(terms, key=len, reverse=True):
+        text = re.sub(rf"(?<!\w){re.escape(term)}(?:'s)?(?!\w)", "the company", text, flags=re.IGNORECASE)
+    return text
 
 class SentimentAnalystAgent:
     name: str = "Market Sentiment & News Analyst"
@@ -30,11 +59,17 @@ class SentimentAnalystAgent:
             "Evaluate recent headlines, media buzz, earnings sentiment, and upcoming corporate catalysts."
         )
 
+        company_line = f"Ticker: {ticker} ({stock_data.get('name', ticker)})"
+        prompt_headlines = headlines_text
+        if settings.SENTIMENT_ANONYMIZE:
+            company_line = "Company: anonymized (judge the news itself, not what you know about the company)"
+            prompt_headlines = anonymize_text(headlines_text, ticker, stock_data.get("name", ""))
+
         user_prompt = f"""
-Ticker: {ticker} ({stock_data.get('name', ticker)})
+{company_line}
 Sector: {stock_data.get('sector')}
 Recent Headlines:
-{headlines_text}
+{prompt_headlines}
 
 Return JSON with exactly these keys:
 {{

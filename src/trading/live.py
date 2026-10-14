@@ -10,7 +10,7 @@ from src.db.models import Position, Trade, PortfolioSnapshot, SystemConfig, Orde
 from src.db.session import AsyncSessionLocal
 from src.data.currency import currency_service
 from src.data.market import market_data_provider
-from src.trading.risk import risk_guardrail, calculate_position_allocation, get_effective_deployable_cash, allocate_pending_triggers, evaluate_trigger_condition, is_trigger_expired, validate_trigger_levels
+from src.trading.risk import risk_guardrail, calculate_position_allocation, get_effective_deployable_cash, allocate_pending_triggers, evaluate_trigger_condition, is_trigger_expired, validate_trigger_levels, apply_risk_budget, compute_trailing_stop, check_market_regime
 from src.data.market_hours import check_market_hours
 from src.trading.base import BaseBroker
 
@@ -475,6 +475,10 @@ class LiveBroker(BaseBroker):
                 )
                 if calc_alloc > 0:
                     allocation_eur = calc_alloc
+
+            # Automated buys risk the same share of the portfolio at their stop
+            if not is_manual:
+                allocation_eur = apply_risk_budget(allocation_eur, price_native, stop_loss_native, total_eur)
 
             # 7. Validate risk guardrails (including broker fee viability)
             valid, msg = risk_guardrail.validate_buy_order(
@@ -1091,6 +1095,11 @@ class LiveBroker(BaseBroker):
                     continue
 
                 if condition_met:
+                    # Market regime filter: the trigger stays armed (and expires as usual) while the index is in a downtrend
+                    regime_ok, regime_msg = await asyncio.to_thread(check_market_regime, t.ticker, t.currency)
+                    if not regime_ok:
+                        logger.info(f"Live trigger #{t.id} for {t.ticker} held back: {regime_msg}")
+                        continue
                     trade_res = await self.execute_buy(
                         ticker=t.ticker,
                         name=t.name or t.ticker,
@@ -1175,13 +1184,22 @@ class LiveBroker(BaseBroker):
                         p.current_price_eur = currency_service.to_eur(curr_price, p.currency)
                         if curr_price > (p.highest_price_native or 0.0):
                             p.highest_price_native = curr_price
-                            # Dynamic Trailing Stop (same as paper): past breakeven_trigger_pct, ratchet the stop to breakeven + 1%.
+                            # Trailing stop (same as paper): past breakeven_trigger_pct the stop moves to breakeven + 1%,
+                            # then trails by N x ATR. This is the bot's own stop; the broker's bracket stop keeps its level.
                             # Positions without a stop are left alone: those are holdings synced from the broker, not bot trades.
-                            if p.stop_loss_native and p.entry_price_native and p.stop_loss_native < p.entry_price_native:
+                            if p.stop_loss_native and p.entry_price_native:
                                 gain_pct = (curr_price / p.entry_price_native) - 1.0
                                 if gain_pct >= breakeven_trigger_pct:
-                                    p.stop_loss_native = round(p.entry_price_native * 1.01, 2)  # Secure breakeven + 1%
-                                    logger.info(f"Live trailing stop ratcheted to breakeven for {p.ticker} at {p.stop_loss_native} (+{gain_pct*100:.1f}%)")
+                                    atr = None
+                                    if settings.TRAILING_STOP_ATR_MULT > 0:
+                                        atr_data = await asyncio.to_thread(market_data_provider.get_stock_data, p.ticker)
+                                        atr = atr_data.get("technicals", {}).get("atr14") if atr_data else None
+                                    new_stop = compute_trailing_stop(
+                                        p.entry_price_native, p.stop_loss_native, p.highest_price_native, atr, breakeven_trigger_pct
+                                    )
+                                    if new_stop is not None and new_stop != p.stop_loss_native:
+                                        p.stop_loss_native = new_stop
+                                        logger.info(f"Live trailing stop raised for {p.ticker} to {new_stop} (+{gain_pct*100:.1f}%)")
                         curr_val_eur = p.current_price_eur * p.shares
                         p.unrealized_pnl_eur = round(curr_val_eur - p.cost_basis_eur, 2)
                         p.unrealized_pnl_pct = round(((p.current_price_eur / p.entry_price_eur) - 1.0) * 100, 2)
