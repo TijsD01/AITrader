@@ -5,7 +5,7 @@ import time
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func
 
 from config.settings import settings
 from src.db.models import OrderTrigger, PortfolioSnapshot, Position, Trade
@@ -91,6 +91,8 @@ async def test_alert_dashboard_and_buy_agree_and_leftover_cash_moves_on(two_slot
     await init_db()
     first, second = _unique("SLOTA"), _unique("SLOTB")
     async with AsyncSessionLocal() as session:
+        # Snapshots this test writes are removed again, so later tests see their own cash
+        last_snapshot_id = (await session.execute(select(func.max(PortfolioSnapshot.id)))).scalar() or 0
         await session.execute(delete(OrderTrigger).where(OrderTrigger.status == "PENDING", OrderTrigger.is_live == False))
         open_count = len((await session.execute(
             select(Position).where(Position.status == "OPEN", Position.is_live == False)
@@ -145,4 +147,18 @@ async def test_alert_dashboard_and_buy_agree_and_leftover_cash_moves_on(two_slot
             await session.execute(delete(OrderTrigger).where(OrderTrigger.ticker.in_([first, second])))
             await session.execute(delete(Position).where(Position.ticker.in_([first, second])))
             await session.execute(delete(Trade).where(Trade.ticker.in_([first, second])))
+            await session.execute(delete(PortfolioSnapshot).where(PortfolioSnapshot.id > last_snapshot_id))
             await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_manual_trigger_gate_checks_the_share_after_the_risk_cap(two_slots):
+    from src.trading.trigger_gate import evaluate_manual_trigger
+    report = {"action": "BUY", "consensus_score": 90, "risk": {"approved": True}}
+    stock = {"ticker": "GATECAP", "price": 205.0, "currency": "EUR", "name": "Gate Cap"}
+    with patch("src.trading.trigger_gate.check_market_regime", return_value=(True, "")):
+        # €250 fits one €200 share with a 4% stop, but not with a 50% stop (budget scaled to €20)
+        ok = await evaluate_manual_trigger("GATECAP", stock, report, 200.0, 250.0, 80, stop_loss=192.0, portfolio_value_eur=500.0)
+        capped = await evaluate_manual_trigger("GATECAP", stock, report, 200.0, 250.0, 80, stop_loss=100.0, portfolio_value_eur=500.0)
+    assert ok.allowed
+    assert not capped.allowed and capped.code == "SHARE_TOO_EXPENSIVE" and "20.00" in capped.message

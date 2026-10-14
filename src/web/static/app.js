@@ -1745,40 +1745,184 @@ async function loadTriggers() {
 
 const ARM_BTN_HTML = `<i class="fa-solid fa-crosshairs"></i> Arm`;
 
-async function armTriggerFromInput() {
-  const input = document.getElementById('triggerTickerInput');
-  const ticker = input.value.trim().toUpperCase();
-  if (!ticker) {
-    showToast('Please enter a stock ticker.', true);
-    return;
+// Same shape the server accepts (src/trading/trigger_gate.normalize_ticker):
+// no ^ indices, =X currencies or spaces. Returns null when unusable.
+const TRIGGER_TICKER_RE = /^[A-Z0-9][A-Z0-9.\-]{0,14}$/;
+function normalizeTriggerTicker(raw) {
+  const t = String(raw || '').trim().toUpperCase().replace(/^\$+/, '');
+  return TRIGGER_TICKER_RE.test(t) ? t : null;
+}
+
+// Inline "why was this not armed" line under the ticker input
+function clearTriggerFeedback() {
+  const el = document.getElementById('triggerArmFeedback');
+  if (el) el.innerHTML = '';
+}
+
+// info: { title, message, tone: 'danger' | 'warn', armed, action, score, minScore, summary }
+function showTriggerFeedback(info) {
+  const el = document.getElementById('triggerArmFeedback');
+  if (!el) return;
+  const tone = info.tone === 'warn' ? 'warn' : 'danger';
+  const badges = [];
+  badges.push(`<span class="ui-badge ${tone === 'warn' ? 'ui-badge-warn' : 'ui-badge-loss'}"><i class="fa-solid ${info.armed ? 'fa-triangle-exclamation' : 'fa-ban'}"></i> ${esc(info.title || 'Not armed')}</span>`);
+  if (info.action) badges.push(`<span class="ui-badge">${esc(triggerVerdictLabel(info.action))}</span>`);
+  if (hasNum(info.score)) {
+    badges.push(`<span class="ui-badge ui-num">Score ${esc(info.score)}${hasNum(info.minScore) ? ` / min ${esc(info.minScore)}` : ''}</span>`);
   }
+  const summary = info.summary ? String(info.summary).slice(0, 400) : '';
+  el.innerHTML = `
+    <div class="ui-notice ui-notice-${tone}">
+      <div class="flex flex-wrap items-center gap-2">${badges.join('')}</div>
+      <p class="mt-1.5" style="color:var(--text)">${esc(info.message)}</p>
+      ${summary ? `<p class="mt-1.5 text-xs ui-faint">Committee: ${esc(summary)}</p>` : ''}
+    </div>`;
+}
 
-  if (!confirmArmTrigger(ticker)) return;
+function triggerVerdictLabel(action) {
+  return String(action || '').replace(/_/g, ' ').toUpperCase();
+}
 
-  const btn = document.getElementById('armTriggerBtn');
-  btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Arming`;
-  btn.disabled = true;
+// Turns any failed /api/triggers/from-ai answer into one flat object.
+// `detail` can be a string (old FastAPI errors, 401s), an object from the
+// trigger gate ({code, message, overridable, action, ...}), a list of pydantic
+// validation errors, or missing entirely (non-JSON body from a proxy/crash).
+function parseTriggerFailure(status, data, raw) {
+  const info = { code: '', message: '', overridable: false, action: '', score: null, minScore: null, summary: '' };
+  const detail = data && typeof data === 'object' ? data.detail : undefined;
+  if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
+    info.code = detail.code ? String(detail.code) : '';
+    info.message = typeof detail.message === 'string' ? detail.message : '';
+    info.overridable = detail.overridable === true;
+    info.action = detail.action ? String(detail.action) : '';
+    info.score = hasNum(detail.consensus_score) ? Number(detail.consensus_score) : null;
+    info.minScore = hasNum(detail.trigger_min_score) ? Number(detail.trigger_min_score) : null;
+    info.summary = typeof detail.summary === 'string' ? detail.summary : '';
+  } else if (Array.isArray(detail)) {
+    const msgs = detail.map(d => (d && typeof d.msg === 'string') ? d.msg : '').filter(Boolean);
+    if (msgs.length) info.message = `Invalid request: ${msgs.join('; ')}`;
+  } else if (typeof detail === 'string') {
+    info.message = detail;
+  }
+  if (!info.message && data && typeof data.message === 'string') info.message = data.message;
+  if (!info.message) {
+    if (!data && raw) console.warn('Non-JSON response while arming a trigger:', status, String(raw).slice(0, 200));
+    info.message = status >= 500
+      ? `The server could not process this request (HTTP ${status}). Try again in a moment.`
+      : `Failed to arm trigger (HTTP ${status}).`;
+  }
+  return info;
+}
+
+async function postArmTrigger(ticker, force) {
+  const res = await fetch('/api/triggers/from-ai', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ticker: ticker, force: !!force })
+  });
+  const raw = await res.text();
+  let data = null;
+  try { data = raw ? JSON.parse(raw) : null; } catch (e) { data = null; }
+  if (res.ok && data && data.success) return { ok: true, status: res.status, data };
+  return { ok: false, status: res.status, error: parseTriggerFailure(res.status, data, raw) };
+}
+
+// "Arm anyway?" text for a soft block (verdict is not a buy, or score too low)
+function overrideConfirmText(ticker, err) {
+  const facts = [];
+  if (err.action) facts.push(`verdict ${triggerVerdictLabel(err.action)}`);
+  if (hasNum(err.score)) facts.push(hasNum(err.minScore) ? `score ${err.score}, minimum ${err.minScore}` : `score ${err.score}`);
+  const head = facts.length ? `${ticker}: ${facts.join(', ')}.` : `${ticker} did not pass the committee check.`;
+  return `${head}\n\n${err.message}\n\nArm anyway?`;
+}
+
+let triggerArmBusy = false;
+
+// Shared by the Triggers tab input and the Trigger buttons on advice cards.
+// Resolves true when a trigger was armed.
+async function armTriggerFlow(rawTicker, { button = null, announce = false } = {}) {
+  clearTriggerFeedback();
+  const typed = String(rawTicker || '').trim();
+  if (!typed) {
+    const message = 'Please enter a stock ticker.';
+    showTriggerFeedback({ title: 'Not armed', tone: 'danger', message });
+    showToast(message, true);
+    return false;
+  }
+  const ticker = normalizeTriggerTicker(typed);
+  if (!ticker) {
+    const message = `"${typed.slice(0, 20)}" is not a tradable stock ticker. Use a plain symbol such as NVDA or ASML.AS (no ^ indices, =X currencies or spaces).`;
+    showTriggerFeedback({ title: 'Not armed', tone: 'danger', message });
+    showToast(message, true);
+    return false;
+  }
+  if (triggerArmBusy) {
+    showToast('Already arming a trigger, please wait.', 'info');
+    return false;
+  }
+  if (!confirmArmTrigger(ticker)) return false;
+
+  triggerArmBusy = true;
+  if (button) {
+    button.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Arming`;
+    button.disabled = true;
+  }
+  if (announce) showToast(`Analysing ${ticker} and arming an entry trigger...`, 'info');
 
   try {
-    const res = await fetch('/api/triggers/from-ai', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ticker: ticker })
-    });
-    const data = await res.json();
-    if (res.ok && data.success) {
-      showToast(`Trigger armed for ${ticker}.`);
-      input.value = '';
-      loadTriggers();
-    } else {
-      showToast(data.detail || data.message || 'Failed to arm trigger.', true);
+    let out = await postArmTrigger(ticker, false);
+    // Soft block (HOLD verdict, low score): the user may override it explicitly
+    if (!out.ok && out.status === 422 && out.error.overridable) {
+      const err = out.error;
+      if (!confirm(overrideConfirmText(ticker, err))) {
+        showTriggerFeedback({ title: 'Not armed', tone: 'warn', message: err.message, action: err.action, score: err.score, minScore: err.minScore, summary: err.summary });
+        showToast(`${ticker} was not armed.`, 'info');
+        return false;
+      }
+      out = await postArmTrigger(ticker, true);
     }
+
+    if (out.ok) {
+      const data = out.data;
+      const gate = (data.gate && typeof data.gate === 'object') ? data.gate : null;
+      const at = hasNum(data.target_price) ? ` at ${data.target_price}` : '';
+      if (gate && gate.code === 'OK_FORCED') {
+        const msg = (typeof gate.message === 'string' && gate.message) ? gate.message : `Armed ${ticker} against the committee verdict.`;
+        showTriggerFeedback({
+          title: 'Armed anyway', tone: 'warn', armed: true, message: msg,
+          action: gate.action, score: hasNum(gate.consensus_score) ? Number(gate.consensus_score) : null,
+          minScore: hasNum(gate.trigger_min_score) ? Number(gate.trigger_min_score) : null
+        });
+        showToast(`Trigger armed for ${ticker}${at}, against the committee verdict.`);
+      } else {
+        showToast(`Trigger armed for ${ticker}${at}.`);
+      }
+      loadTriggers();
+      return true;
+    }
+
+    const err = out.error;
+    showTriggerFeedback({ title: 'Not armed', tone: 'danger', message: err.message, action: err.action, score: err.score, minScore: err.minScore, summary: err.summary });
+    showToast(`${ticker}: ${err.message}`, true);
+    return false;
   } catch (e) {
-    showToast('Error arming trigger.', true);
+    const message = 'Could not reach the server. Check the connection and try again.';
+    showTriggerFeedback({ title: 'Not armed', tone: 'danger', message });
+    showToast(message, true);
+    return false;
   } finally {
-    btn.innerHTML = ARM_BTN_HTML;
-    btn.disabled = false;
+    triggerArmBusy = false;
+    if (button) {
+      button.innerHTML = ARM_BTN_HTML;
+      button.disabled = false;
+    }
   }
+}
+
+async function armTriggerFromInput() {
+  const input = document.getElementById('triggerTickerInput');
+  const armed = await armTriggerFlow(input.value, { button: document.getElementById('armTriggerBtn') });
+  if (armed) input.value = '';
 }
 
 // Arming reserves cash and lets the bot buy on its own later, so ask first
@@ -1787,24 +1931,7 @@ function confirmArmTrigger(ticker) {
 }
 
 async function armAITrigger(ticker) {
-  if (!confirmArmTrigger(ticker)) return;
-  showToast(`Analysing ${ticker} and arming an entry trigger...`);
-  try {
-    const res = await fetch('/api/triggers/from-ai', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ticker: ticker })
-    });
-    const data = await res.json();
-    if (res.ok && data.success) {
-      showToast(`Trigger armed for ${ticker} at ${data.target_price}.`);
-      loadTriggers();
-    } else {
-      showToast(data.detail || data.message || 'Failed to arm trigger.', true);
-    }
-  } catch (e) {
-    showToast('Error arming trigger.', true);
-  }
+  await armTriggerFlow(ticker, { announce: true });
 }
 
 async function cancelTrigger(triggerId, ticker = '') {
