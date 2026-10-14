@@ -2301,6 +2301,10 @@ function shadowParamChips(p) {
   else if (p.reward_risk) chips.push(`Target ${esc(num(p.reward_risk, 1))}R`);
   if (p.trailing_stop_pct) chips.push(`Trail ${esc(num(p.trailing_stop_pct * 100, 0))}%`);
   chips.push(`Breakeven at +${esc(num(p.effective_breakeven_pct * 100, 1))}%`);
+  if (p.effective_trailing_atr_mult) chips.push(`Trail ${esc(num(p.effective_trailing_atr_mult, 1))}&times; ATR`);
+  if (p.effective_risk_per_trade_pct) chips.push(`Risk ${esc(num(p.effective_risk_per_trade_pct, 1))}% per trade`);
+  chips.push(p.effective_regime_filter ? 'Regime filter on' : 'No regime filter');
+  if (p.whole_shares) chips.push('Whole shares');
   chips.push(`Max ${esc(p.effective_max_positions)} positions`);
   if (p.max_hold_days) chips.push(`Exit after ${esc(p.max_hold_days)}d`);
   if (p.accept_hold) chips.push('Also HOLD verdicts');
@@ -2312,9 +2316,19 @@ function shadowParamChips(p) {
 function shadowFrozenNote(p) {
   const f = p.frozen_main_params || {};
   const c = p.current_main_params || {};
-  const changed = ['trigger_min_score', 'breakeven_pct', 'max_positions'].some(k => f[k] !== undefined && c[k] !== undefined && f[k] !== c[k]);
-  if (!changed) return '';
-  return `<p class="text-xs mt-1" style="color:var(--warn)"><i class="fa-solid fa-snowflake mr-1"></i>Main bot values frozen at start (score ${esc(f.trigger_min_score)}, breakeven +${esc(num((f.breakeven_pct || 0) * 100, 1))}%, max ${esc(f.max_positions)}). Main now: score ${esc(c.trigger_min_score)}, breakeven +${esc(num((c.breakeven_pct || 0) * 100, 1))}%, max ${esc(c.max_positions)}. Reset to adopt them.</p>`;
+  const LABELS = {
+    trigger_min_score: v => `score ${v}`,
+    breakeven_pct: v => `breakeven +${num((v || 0) * 100, 1)}%`,
+    max_positions: v => `max ${v} positions`,
+    risk_per_trade_pct: v => `risk ${num(v || 0, 1)}%`,
+    trailing_atr_mult: v => `trail ${num(v || 0, 1)}x ATR`,
+    regime_filter: v => (v ? 'regime filter on' : 'regime filter off'),
+  };
+  const diffs = Object.keys(LABELS).filter(k => f[k] !== undefined && c[k] !== undefined && f[k] !== c[k]);
+  if (!diffs.length) return '';
+  const then = diffs.map(k => LABELS[k](f[k])).join(', ');
+  const now = diffs.map(k => LABELS[k](c[k])).join(', ');
+  return `<p class="text-xs mt-1" style="color:var(--warn)"><i class="fa-solid fa-snowflake mr-1"></i>Uses the main bot's values from its start (${esc(then)}). Main now: ${esc(now)}. Reset to adopt them.</p>`;
 }
 
 function shadowCompareRow(label, mainHtml, shadowHtml) {

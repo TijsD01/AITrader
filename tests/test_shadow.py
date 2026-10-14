@@ -132,8 +132,8 @@ async def test_trigger_fill_trailing_stop_and_exit(shadows):
     prices["SHD.AS"] = 97.0
     filled = await shadow_portfolios.check_triggers()
     assert len(filled) == 1 and filled[0]["price_native"] == 97.0
-    # Max 5 positions: a fifth of the 10k capital
-    assert 1900 < filled[0]["cost_eur"] <= 2000
+    # A fifth of the 10k (max 5 positions), capped so the 91.25 stop loses 1% (~€1,687), in whole shares
+    assert filled[0]["shares"] == 17.0
 
     # Price runs up: the stop trails 6% under the high
     prices["SHD.AS"] = 110.0
@@ -286,3 +286,75 @@ async def test_learner_changes_to_the_main_bot_do_not_move_a_running_shadow(shad
     await shadow_portfolios.reset("aggressive")
     assert await shadow_portfolios.follow_report(_report("SHJ.AS", score=75), _data("SHJ.AS")) == []
     await _set_config("TRIGGER_MIN_SCORE", "80")
+
+
+@pytest.mark.asyncio
+async def test_whole_shares_atr_trail_and_regime_filter(shadows, monkeypatch):
+    """Shadows follow the main bot's newer rules unless a strategy overrides them."""
+    from src.db.models import ShadowAccount
+    enable, reset_all = shadows
+    prices = enable(["baseline", "tight"])
+    monkeypatch.setattr(settings, "SHADOW_CUSTOM_STRATEGIES",
+                        '{"tight": {"base": "baseline", "regime_filter": true, "trailing_atr_mult": 1.0}}')
+    monkeypatch.setattr(settings, "WHOLE_SHARES_ONLY", True)
+    monkeypatch.setattr(settings, "RISK_PER_TRADE_PCT", 0.5)
+    monkeypatch.setattr(settings, "TRAILING_STOP_ATR_MULT", 2.5)
+    monkeypatch.setattr(settings, "REGIME_FILTER_ENABLED", False)
+    await reset_all()
+
+    # The index is in a downtrend: only "tight" (own regime filter) holds back
+    monkeypatch.setattr(shadow_module.market_data_provider, "get_index_regime",
+                        lambda index, days: {"above_sma": False}, raising=False)
+    prices["SHK.AS"] = 100.0
+    await shadow_portfolios.follow_report(_report("SHK.AS"), _data("SHK.AS"))
+    prices["SHK.AS"] = 94.0
+    filled = await shadow_portfolios.check_triggers()
+    assert [f["strategy"] for f in filled] == ["baseline"]
+    # €1,250 slot, capped at 0.5% risk: 10000 x 0.005 / (4 / 94) = €1,175 -> 12 whole shares
+    assert filled[0]["shares"] == 12.0
+
+    # Past breakeven the stop trails at high - 2.5 x ATR (main bot's value)
+    monkeypatch.setattr(shadow_module.market_data_provider, "get_stock_data",
+                        lambda t: {"price": prices[t], "technicals": {"atr14": 2.0}})
+    prices["SHK.AS"] = 104.0
+    await shadow_portfolios.check_exits()
+    async with AsyncSessionLocal() as session:
+        pos = (await session.execute(select(ShadowPosition).where(
+            ShadowPosition.strategy == "baseline", ShadowPosition.ticker == "SHK.AS"))).scalars().one()
+        assert pos.stop_loss_native == 99.0
+
+        # Started on the main values of that moment
+        acc = await session.get(ShadowAccount, "baseline")
+        assert acc.frozen_params["risk_per_trade_pct"] == 0.5
+        assert acc.frozen_params["regime_filter"] is False
+
+    # One share costing more than the slot: the entry is dropped, as in the main bot
+    prices["SHL.AS"] = 5000.0
+    await shadow_portfolios.follow_report(_report("SHL.AS", entry=4900.0, sl=4700.0, tp=5500.0), _data("SHL.AS", 5000.0))
+    prices["SHL.AS"] = 4890.0
+    await shadow_portfolios.check_triggers()
+    async with AsyncSessionLocal() as session:
+        trig = (await session.execute(select(ShadowTrigger).where(
+            ShadowTrigger.strategy == "baseline", ShadowTrigger.ticker == "SHL.AS"))).scalars().one()
+        assert trig.status == "CANCELLED"
+
+
+@pytest.mark.asyncio
+async def test_older_shadow_freezes_new_main_parameters_on_first_use(shadows, monkeypatch):
+    from src.db.models import ShadowAccount
+    enable, reset_all = shadows
+    enable(["baseline"])
+    await reset_all()
+    await shadow_portfolios.record_snapshots()
+    async with AsyncSessionLocal() as session:
+        acc = await session.get(ShadowAccount, "baseline")
+        acc.frozen_params = {"trigger_min_score": 80, "breakeven_pct": 0.025, "max_positions": 8}
+        await session.commit()
+
+    monkeypatch.setattr(settings, "RISK_PER_TRADE_PCT", 0.7)
+    await shadow_portfolios.check_exits()
+    monkeypatch.setattr(settings, "RISK_PER_TRADE_PCT", 0.3)
+    async with AsyncSessionLocal() as session:
+        acc = await session.get(ShadowAccount, "baseline")
+        assert acc.frozen_params["risk_per_trade_pct"] == 0.7
+        assert acc.frozen_params["trigger_min_score"] == 80
