@@ -5,7 +5,7 @@ DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." >/dev/null 2>&1 && pwd )"
 cd "$DIR"
 
 PORT="${MEMORY_PORT:-8420}"
-HOST="${MEMORY_HOST:-0.0.0.0}"
+HOST="${MEMORY_HOST:-127.0.0.1}"
 
 echo "=================================================================="
 echo " [*] Starting TencentDB Agent Memory Hub & Proxy"

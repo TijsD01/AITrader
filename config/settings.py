@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     HOST: str = "0.0.0.0"
     PORT: int = 8000
+    # Web security: with WEB_PASSWORD set, every request needs HTTP Basic auth (browser prompts once).
+    # Without it, only clients on the local/private network (LAN, localhost) are allowed.
+    WEB_USERNAME: str = "admin"
+    WEB_PASSWORD: Optional[str] = None
+    WEB_ALLOW_PRIVATE_NETWORK_ONLY: bool = True
+    CORS_ALLOW_ORIGINS: str = ""            # Comma-separated extra origins allowed cross-site (empty = same-origin only)
     DATA_DIR: Path = BASE_DIR / "data"
 
     # Database
