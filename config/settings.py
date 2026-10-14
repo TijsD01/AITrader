@@ -99,6 +99,10 @@ class Settings(BaseSettings):
     REGIME_INDEX_EU: str = "^STOXX50E"      # Index that sets the regime for European tickers
     REGIME_INDEX_US: str = "^GSPC"          # Index that sets the regime for US tickers
     RISK_PER_TRADE_PCT: float = 0.5         # Automated buys lose at most this % of portfolio value at the stop (0 = off)
+    # What the risk cap measures against: "slot" = a trade with the default stop (DEFAULT_STOP_LOSS_PCT) keeps its full
+    # slot and a wider stop gets proportionally less (equals 0.5% of the portfolio at 8 slots); "portfolio" = at most
+    # RISK_PER_TRADE_PCT of the portfolio at the stop, also with fewer slots; "off" = no cap
+    RISK_BUDGET_BASE: str = "slot"
     TRAILING_STOP_ATR_MULT: float = 2.5     # Past the breakeven step, trail the stop at highest price minus N x ATR (0 = off)
     SENTIMENT_ANONYMIZE: bool = True        # Hide company name and ticker from the news-sentiment prompt
     SENTIMENT_VETO_SCORE: float = -0.4      # News sentiment at or below this blocks a buy; positive news adds nothing

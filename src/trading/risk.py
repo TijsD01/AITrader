@@ -137,6 +137,54 @@ def allocate_pending_triggers(
         remaining = round(remaining - alloc, 2)
     return allocations
 
+def new_entry_allocation(
+    usable_cash: float,
+    reserved_eur: float,
+    current_positions_count: int,
+    ticker: Optional[str] = None,
+    currency: Optional[str] = None,
+    requested_alloc: Optional[float] = None,
+    max_positions: Optional[int] = None
+) -> float:
+    """
+    Budget for a new trigger or buy: the per-slot amount allocate_pending_triggers gives every pending
+    trigger (usable cash spread over the free position slots), limited to the cash that pending triggers
+    have not reserved. Spreading only the unreserved cash over the free slots would shrink the budget
+    for every trigger already pending, while the dynamic re-allocation hands it the full slot again.
+    """
+    free_cash = round(max(0.0, usable_cash - max(0.0, reserved_eur or 0.0)), 2)
+    if requested_alloc is not None and requested_alloc > 0:
+        return round(min(free_cash, requested_alloc), 2)
+    slot = calculate_position_allocation(
+        available_cash=usable_cash,
+        current_positions_count=current_positions_count,
+        full_budget_utilization=settings.FULL_BUDGET_UTILIZATION,
+        max_positions=max_positions,
+        ticker=ticker,
+        currency=currency
+    )
+    return round(min(slot, free_cash), 2)
+
+def entry_allocation_from_summary(
+    summary: Dict[str, Any],
+    ticker: Optional[str] = None,
+    currency: Optional[str] = None,
+    requested_alloc: Optional[float] = None
+) -> float:
+    """new_entry_allocation for a broker's get_portfolio_summary() result."""
+    reserved = summary.get("reserved_triggers_eur", 0.0) or 0.0
+    usable = summary.get("usable_capital_eur")
+    if usable is None:
+        usable = (summary.get("available_cash_eur", 0.0) or 0.0) + reserved
+    return new_entry_allocation(
+        usable_cash=usable,
+        reserved_eur=reserved,
+        current_positions_count=summary.get("open_positions_count", 0) or 0,
+        ticker=ticker,
+        currency=currency,
+        requested_alloc=requested_alloc
+    )
+
 def validate_buy_order(
     ticker: str,
     current_positions: list,
@@ -322,6 +370,84 @@ def apply_risk_budget(
         return allocation_eur
     cap = portfolio_value_eur * (pct / 100.0) / stop_distance
     return round(min(allocation_eur, cap), 2)
+
+def risk_capped_allocation(
+    allocation_eur: float,
+    price_native: Optional[float],
+    stop_loss_native: Optional[float],
+    portfolio_value_eur: float
+) -> float:
+    """
+    The main bot's risk cap on an automated buy, measured as RISK_BUDGET_BASE says:
+    "slot" keeps the full slot for a stop up to DEFAULT_STOP_LOSS_PCT away and scales a wider stop down,
+    so every trade risks the same share of its slot; "portfolio" applies RISK_PER_TRADE_PCT of the
+    portfolio (apply_risk_budget); "off" (or RISK_PER_TRADE_PCT = 0) leaves the allocation as is.
+    """
+    base = (settings.RISK_BUDGET_BASE or "slot").strip().lower()
+    if base == "off" or not settings.RISK_PER_TRADE_PCT or settings.RISK_PER_TRADE_PCT <= 0:
+        return allocation_eur
+    if base == "portfolio":
+        return apply_risk_budget(allocation_eur, price_native, stop_loss_native, portfolio_value_eur)
+    if not price_native or price_native <= 0 or not stop_loss_native:
+        return allocation_eur
+    stop_distance = (price_native - stop_loss_native) / price_native
+    normal_stop = settings.DEFAULT_STOP_LOSS_PCT
+    if stop_distance <= 0 or not normal_stop or normal_stop <= 0 or stop_distance <= normal_stop:
+        return allocation_eur
+    return round(allocation_eur * normal_stop / stop_distance, 2)
+
+def plan_buy(
+    allocation_eur: float,
+    price_native: float,
+    currency: str,
+    stop_loss_native: Optional[float],
+    portfolio_value_eur: float,
+    max_eur: Optional[float] = None,
+    automated: bool = True
+) -> Dict[str, Any]:
+    """
+    What a buy of allocation_eur turns into at price_native: the risk cap (automated buys only),
+    then whole shares when WHOLE_SHARES_ONLY is on. Execution and the trigger alerts and dashboard
+    use this same sequence, so they show the same budget and share count.
+    """
+    from src.data.currency import currency_service
+    budget = risk_capped_allocation(allocation_eur, price_native, stop_loss_native, portfolio_value_eur) if automated else allocation_eur
+    price_eur = currency_service.to_eur(price_native, currency) if price_native else 0.0
+    if not budget or budget <= 0 or price_eur <= 0:
+        shares = 0.0
+    elif settings.WHOLE_SHARES_ONLY:
+        shares = float(whole_share_count(budget, price_eur, max_eur=max(max_eur, budget) if max_eur is not None else None))
+    else:
+        shares = round(budget / price_eur, 4)
+    return {
+        "budget_eur": round(budget, 2),
+        "risk_capped": budget < allocation_eur - 0.005,
+        "shares": shares,
+        "price_eur": round(price_eur, 4),
+        "cost_eur": round(shares * price_eur, 2),
+    }
+
+def plan_pending_triggers(
+    triggers: List[Any],
+    usable_cash: float,
+    portfolio_value_eur: float,
+    allocations: Optional[Dict[int, float]] = None
+) -> Dict[int, Dict[str, Any]]:
+    """
+    plan_buy for every pending trigger at its limit price, using allocations (from allocate_pending_triggers)
+    or else each trigger's stored allocation. Like execution, each buy may round up into cash that the other
+    pending triggers have not reserved. Returns {trigger_id: plan with its allocation_eur}.
+    """
+    allocs = {t.id: max(0.0, (allocations or {}).get(t.id, t.allocation_eur) or 0.0) for t in triggers}
+    reserved = sum(allocs.values())
+    plans: Dict[int, Dict[str, Any]] = {}
+    for t in triggers:
+        alloc = allocs[t.id]
+        available = max(0.0, usable_cash - (reserved - alloc))
+        plan = plan_buy(alloc, t.target_price, t.currency, t.stop_loss, portfolio_value_eur, max_eur=available)
+        plan["allocation_eur"] = round(alloc, 2)
+        plans[t.id] = plan
+    return plans
 
 def compute_trailing_stop(
     entry_price: Optional[float],

@@ -10,7 +10,7 @@ from src.db.models import Position, Trade, PortfolioSnapshot, SystemConfig, Orde
 from src.db.session import AsyncSessionLocal
 from src.data.currency import currency_service
 from src.data.market import market_data_provider
-from src.trading.risk import risk_guardrail, get_effective_deployable_cash, calculate_position_allocation, allocate_pending_triggers, evaluate_trigger_condition, is_trigger_expired, validate_trigger_levels, apply_risk_budget, compute_trailing_stop, check_market_regime, whole_share_count
+from src.trading.risk import risk_guardrail, get_effective_deployable_cash, allocate_pending_triggers, evaluate_trigger_condition, is_trigger_expired, validate_trigger_levels, compute_trailing_stop, check_market_regime, whole_share_count, new_entry_allocation, risk_capped_allocation, plan_pending_triggers
 from src.data.market_hours import check_market_hours
 from src.trading.base import BaseBroker
 
@@ -174,9 +174,9 @@ class PaperBroker(BaseBroker):
             other_committed = sum(t.allocation_eur for t in pending_triggers)
             available_cash = max(0.0, usable_cash - other_committed)
 
-            # Automated buys risk the same share of the portfolio at their stop
+            # Automated buys risk the same share of their slot (or portfolio, per RISK_BUDGET_BASE) at their stop
             if not is_manual:
-                allocation_eur = apply_risk_budget(allocation_eur, price_native, stop_loss_native, total_eur)
+                allocation_eur = risk_capped_allocation(allocation_eur, price_native, stop_loss_native, total_eur)
 
             # Validate risk guardrails
             valid, msg = risk_guardrail.validate_buy_order(
@@ -622,17 +622,11 @@ class PaperBroker(BaseBroker):
                     "message": f"Cannot arm trigger: insufficient available cash (€{available_cash:.2f} available after €{pending_alloc:.2f} reserved for other triggers, required €{allocation_eur:.2f})."
                 }
 
-            # Apply full budget utilization if no explicit allocation was provided
+            # Without an explicit allocation, take the slot the dynamic re-allocation would give it
             if allocation_eur is None or allocation_eur <= 0:
                 pos_count_res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == False))
                 current_open = len(pos_count_res.scalars().all())
-                calc_alloc = calculate_position_allocation(
-                    available_cash=available_cash,
-                    current_positions_count=current_open,
-                    full_budget_utilization=settings.FULL_BUDGET_UTILIZATION,
-                    ticker=ticker,
-                    currency=currency
-                )
+                calc_alloc = new_entry_allocation(usable_cash, pending_alloc, current_open, ticker=ticker, currency=currency)
                 if calc_alloc > 0:
                     allocation_eur = calc_alloc
 
@@ -707,7 +701,7 @@ class PaperBroker(BaseBroker):
                 pass
 
             logger.info(f"Created {trigger_type} trigger for {ticker} at {target_price} {currency} (ID: {trigger.id})")
-            return {
+            result = {
                 "success": True,
                 "trigger_id": trigger.id,
                 "ticker": trigger.ticker,
@@ -715,9 +709,48 @@ class PaperBroker(BaseBroker):
                 "trigger_type": trigger.trigger_type,
                 "target_price": trigger.target_price,
                 "current_price": trigger.current_price_at_creation,
+                "stop_loss": trigger.stop_loss,
+                "take_profit": trigger.take_profit,
                 "allocation_eur": trigger.allocation_eur,
                 "message": f"AI Trigger armed for {trigger.ticker}: {trigger.trigger_type} @ {trigger.target_price} {trigger.currency}."
             }
+
+        # Report the allocation the dashboard and the buy will use (after the dynamic re-allocation), not the amount asked for
+        result.update(await self.get_trigger_plan(result["trigger_id"]))
+        return result
+
+    async def _pending_trigger_plans(self, session) -> Dict[int, Dict[str, Any]]:
+        """Planned budget and share count per pending paper trigger, sized like execute_buy at the limit price."""
+        trig_res = await session.execute(select(OrderTrigger).where(OrderTrigger.status == "PENDING", OrderTrigger.is_live == False))
+        pending = trig_res.scalars().all()
+        if not pending:
+            return {}
+        pos_res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == False))
+        positions = pos_res.scalars().all()
+        snap_res = await session.execute(
+            select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == False).order_by(desc(PortfolioSnapshot.timestamp))
+        )
+        snapshot = snap_res.scalars().first()
+        cash_eur = snapshot.cash_eur if snapshot else settings.INITIAL_PAPER_CAPITAL
+        usable_cash, _ = get_effective_deployable_cash(cash_eur)
+        portfolio_value = cash_eur + sum(p.current_price_eur * p.shares for p in positions)
+        # Same ranking adjust_triggers_dynamically applies before the dashboard shows or a trigger fires
+        allocations = allocate_pending_triggers(usable_cash, len(positions), pending)
+        return plan_pending_triggers(pending, usable_cash, portfolio_value, allocations)
+
+    async def get_trigger_plan(self, trigger_id: int) -> Dict[str, Any]:
+        """Allocation and planned buy of one pending trigger, as the dashboard shows it."""
+        async with AsyncSessionLocal() as session:
+            plan = (await self._pending_trigger_plans(session)).get(trigger_id)
+        if not plan:
+            return {}
+        return {
+            "allocation_eur": plan["allocation_eur"],
+            "planned_shares": plan["shares"],
+            "planned_cost_eur": plan["cost_eur"],
+            "planned_budget_eur": plan["budget_eur"],
+            "risk_capped": plan["risk_capped"],
+        }
 
     async def cancel_price_trigger(self, trigger_id: int) -> Dict[str, Any]:
         """Cancels a pending order trigger."""
@@ -786,6 +819,7 @@ class PaperBroker(BaseBroker):
                 query = query.where(OrderTrigger.status == status.upper())
             res = await session.execute(query)
             triggers = res.scalars().all()
+            plans = await self._pending_trigger_plans(session)
 
             results = []
             quote_cache = {}
@@ -815,6 +849,9 @@ class PaperBroker(BaseBroker):
                     "stop_loss": round(t.stop_loss, 2) if t.stop_loss else None,
                     "take_profit": round(t.take_profit, 2) if t.take_profit else None,
                     "allocation_eur": round(t.allocation_eur, 2),
+                    "planned_shares": plans[t.id]["shares"] if t.id in plans else None,
+                    "planned_cost_eur": plans[t.id]["cost_eur"] if t.id in plans else None,
+                    "risk_capped": plans[t.id]["risk_capped"] if t.id in plans else False,
                     "consensus_score": t.consensus_score,
                     "ai_rationale": t.ai_rationale,
                     "status": t.status,

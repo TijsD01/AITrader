@@ -11,7 +11,7 @@ from config.settings import settings
 from src.data.market import market_data_provider
 from src.agents.committee import investment_committee
 from src.trading.broker import active_broker as paper_broker, get_active_broker, active_broker, live_broker
-from src.trading.risk import calculate_position_allocation
+from src.trading.risk import calculate_position_allocation, entry_allocation_from_summary
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +99,17 @@ class TelegramAssistant:
         )
         await self.send_message(msg)
 
+    @staticmethod
+    def _planned_buy_line(trigger_info: Dict[str, Any]) -> str:
+        """Shares the trigger will buy at its limit price (same sizing as the dashboard and the order)."""
+        shares = trigger_info.get("planned_shares")
+        if shares is None:
+            return ""
+        if shares <= 0:
+            return "<b>Planned Buy:</b> budget below one share (skipped when hit)\n"
+        capped = " after risk cap" if trigger_info.get("risk_capped") else ""
+        return f"<b>Planned Buy:</b> ≈ {shares:g} shares (≈ €{trigger_info.get('planned_cost_eur', 0.0):,.2f}{capped})\n"
+
     async def notify_trigger_armed(self, trigger_info: Dict[str, Any]):
         """Broadcasts an alert when an AI limit price trigger has been armed."""
         ticker = trigger_info.get("ticker")
@@ -115,6 +126,7 @@ class TelegramAssistant:
             f"<b>Order Type:</b> {trigger_type}\n"
             f"<b>Target Trigger Price:</b> {target_pr} {curr} ({dist:+.1f}% from current {curr_pr})\n"
             f"<b>Planned Allocation:</b> €{alloc:,.2f}\n"
+            f"{self._planned_buy_line(trigger_info)}"
             f"<b>Trigger ID:</b> #{trigger_info.get('trigger_id')}\n\n"
             f"⏳ <i>When price reaches {target_pr} {curr} during open market hours, the order will execute automatically.</i>"
         )
@@ -692,13 +704,7 @@ class TelegramAssistant:
 
                 report = await investment_committee.evaluate_ticker(data, summary.get("total_value_eur", 10000.0))
                 risk_cfg = report.get("risk", {})
-                raw_size_pct = risk_cfg.get("recommended_size_pct", settings.POSITION_SIZE_PCT)
-                alloc_eur = calculate_position_allocation(
-                    available_cash=available_cash,
-                    requested_alloc=explicit_amount,
-                    recommended_size_pct=raw_size_pct,
-                    full_budget_utilization=settings.FULL_BUDGET_UTILIZATION
-                )
+                alloc_eur = entry_allocation_from_summary(summary, target_ticker, data.get("currency"), requested_alloc=explicit_amount)
 
                 sl = risk_cfg.get("stop_loss_price")
                 tp = risk_cfg.get("take_profit_price")
@@ -822,10 +828,11 @@ class TelegramAssistant:
                         dist_sign = "+" if dist > 0 else ""
                         rationale = t.get("ai_rationale") or ""
                         rationale_str = f"\n  • <i>{html.escape(rationale[:100])}...</i>" if rationale else ""
+                        planned = f" (≈ {t['planned_shares']:g} sh)" if t.get("planned_shares") else ""
                         lines.append(
                             f"{type_icon} <b>#{t['id']} {t['ticker']}</b> ({t.get('trigger_type', 'LIMIT')})\n"
                             f"  • Target: <b>{t.get('target_price')} {t.get('currency')}</b> (Now: {t.get('current_price')} | {dist_sign}{dist:.1f}%)\n"
-                            f"  • Alloc: €{t.get('allocation_eur', 0.0):,.2f} | SL: {t.get('stop_loss')} | TP: {t.get('take_profit')}"
+                            f"  • Alloc: €{t.get('allocation_eur', 0.0):,.2f}{planned} | SL: {t.get('stop_loss')} | TP: {t.get('take_profit')}"
                             f"{rationale_str}"
                         )
                     reply = f"🎯 <b>ACTIVE AI PRICE TRIGGERS ({len(pending)}):</b>\n\n" + "\n\n".join(lines)
