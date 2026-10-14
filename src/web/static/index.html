@@ -666,372 +666,280 @@
       </div>
     </section>
 
-    <!-- TAB 7: TENCENTDB AGENT MEMORY HUB -->
+    <!-- TAB 7: MEMORY -->
     <section id="tab-memory" class="tab-content hidden space-y-6">
-      <!-- Memory Hub Header -->
-      <div class="bg-cardBg border border-borderCol rounded-xl p-4 sm:p-6 relative overflow-hidden shadow-sm">
-        <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
-          <div>
-            <div class="flex items-center gap-2 flex-wrap">
-              <span class="px-2.5 py-0.5 rounded-full text-xs font-bold bg-purple-500/10 text-purple-400 border border-purple-500/20">
-                <i class="fa-solid fa-server mr-1"></i>TencentDB Agent Memory v2.0
-              </span>
-              <span class="px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                <i class="fa-solid fa-circle-dot animate-pulse mr-1"></i>Active & Reactive
-              </span>
-            </div>
-            <h2 class="text-lg sm:text-2xl font-bold text-white mt-2 flex items-center gap-2">
-              <i class="fa-solid fa-brain text-purple-400"></i>AI Agent Memory Server & Knowledge Hub
-            </h2>
-            <p class="text-xs sm:text-sm text-slate-400 mt-1">
-              Turns sessions, trades, and code into four reusable memory assets (Chat Memory L0–L3, Skills, LLM-Wiki, Code-Graph).
-            </p>
-          </div>
-          <div class="flex flex-wrap items-center gap-2">
-            <button onclick="refreshMemoryHub()" class="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold flex items-center gap-2 border border-slate-700 active:scale-95 transition-all cursor-pointer">
-              <i class="fa-solid fa-rotate"></i> Refresh Memory
-            </button>
-            <button onclick="openExtractModal()" class="px-3.5 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-xs font-semibold flex items-center gap-2 shadow-md active:scale-95 transition-all cursor-pointer">
-              <i class="fa-solid fa-wand-magic-sparkles"></i> Extract Assets
-            </button>
-          </div>
+      <div class="ui-page-head">
+        <div>
+          <h2 class="ui-page-title">Memory</h2>
+          <p class="ui-page-sub">What the agents remember between sessions and trades.</p>
+        </div>
+        <div class="grid grid-cols-2 gap-2 w-full sm:w-auto sm:flex">
+          <button onclick="refreshMemoryHub()" class="ui-btn">
+            <i class="fa-solid fa-rotate"></i> Refresh
+          </button>
+          <button onclick="openExtractModal()" class="ui-btn ui-btn-primary">
+            <i class="fa-solid fa-wand-magic-sparkles"></i> Extract
+          </button>
         </div>
       </div>
 
-      <!-- Instant Cold-Start Situation Report ("What Had Happened") -->
-      <div class="bg-cardBg border border-borderCol rounded-xl p-4 sm:p-6 shadow-sm">
-        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-1 border-b border-borderCol pb-3 mb-4">
-          <div class="flex items-center gap-2">
-            <i class="fa-solid fa-bolt-lightning text-amber-400"></i>
-            <h3 class="font-bold text-white text-sm sm:text-base">Instant Cold-Start Situation Report ("What Had Happened")</h3>
-          </div>
-          <span class="text-xs text-slate-400">Auto-Injected on Agent Startup</span>
+      <!-- Cold-start recap -->
+      <div class="space-y-3">
+        <div class="flex items-baseline justify-between gap-3 px-1">
+          <h3 class="ui-section-title">Recap</h3>
+          <span class="text-xs ui-faint">Loaded when agents start</span>
         </div>
-        <div id="memoryColdStartText" class="bg-slate-950 p-3 sm:p-4 rounded-xl border border-slate-800 text-xs sm:text-sm text-slate-300 font-mono whitespace-pre-wrap break-words leading-relaxed max-h-80 overflow-y-auto">
-          Loading instant situation report...
-        </div>
+        <div id="memoryColdStartText" class="ui-card ui-card-pad mem-recap">Loading recap...</div>
       </div>
 
-      <!-- Four Reusable Memory Assets Grid -->
-      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
-        <!-- Asset 1: L1 Atomic Memory & Constraints -->
-        <div class="bg-cardBg border border-borderCol rounded-xl p-4 sm:p-6 shadow-sm flex flex-col">
-          <div class="flex items-center justify-between border-b border-borderCol pb-3 mb-3">
-            <div class="flex items-center gap-2">
-              <i class="fa-solid fa-atom text-cyan-400"></i>
-              <h3 class="font-bold text-white text-sm sm:text-base">L1 Atomic Memory (Facts, Constraints)</h3>
-            </div>
-            <span id="atomsCountBadge" class="text-xs px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-300 border border-cyan-500/20 font-bold">0 Atoms</span>
-          </div>
-          <div id="atomsListContainer" class="space-y-2.5 overflow-y-auto max-h-72 pr-1 flex-1">
-            <div class="text-xs text-slate-500 italic">No atoms loaded yet.</div>
+      <!-- Memory assets -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div class="space-y-3 min-w-0">
+          <h3 class="ui-section-title px-1">Facts <span id="atomsCountBadge" class="ui-count ui-num">0</span></h3>
+          <div id="atomsListContainer" class="ui-list mem-list">
+            <div class="mem-empty">No facts loaded yet.</div>
           </div>
         </div>
 
-        <!-- Asset 2: Skills Library -->
-        <div class="bg-cardBg border border-borderCol rounded-xl p-4 sm:p-6 shadow-sm flex flex-col">
-          <div class="flex items-center justify-between border-b border-borderCol pb-3 mb-3">
-            <div class="flex items-center gap-2">
-              <i class="fa-solid fa-book-bookmark text-emerald-400"></i>
-              <h3 class="font-bold text-white text-sm sm:text-base">Skill Playbooks (Distilled Workflows)</h3>
-            </div>
-            <span id="skillsCountBadge" class="text-xs px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 font-bold">0 Skills</span>
-          </div>
-          <div id="skillsListContainer" class="space-y-2.5 overflow-y-auto max-h-72 pr-1 flex-1">
-            <div class="text-xs text-slate-500 italic">No skills loaded yet.</div>
+        <div class="space-y-3 min-w-0">
+          <h3 class="ui-section-title px-1">Skills <span id="skillsCountBadge" class="ui-count ui-num">0</span></h3>
+          <div id="skillsListContainer" class="ui-list mem-list">
+            <div class="mem-empty">No skills loaded yet.</div>
           </div>
         </div>
 
-        <!-- Asset 3: LLM-Wiki Knowledge -->
-        <div class="bg-cardBg border border-borderCol rounded-xl p-4 sm:p-6 shadow-sm flex flex-col">
-          <div class="flex items-center justify-between border-b border-borderCol pb-3 mb-3">
-            <div class="flex items-center gap-2">
-              <i class="fa-solid fa-book-open text-blue-400"></i>
-              <h3 class="font-bold text-white text-sm sm:text-base">LLM-Wiki (Structured Knowledge Articles)</h3>
-            </div>
-            <span id="wikiCountBadge" class="text-xs px-2 py-0.5 rounded bg-blue-500/10 text-blue-300 border border-blue-500/20 font-bold">0 Pages</span>
-          </div>
-          <div id="wikiListContainer" class="space-y-2.5 overflow-y-auto max-h-72 pr-1 flex-1">
-            <div class="text-xs text-slate-500 italic">No wiki pages loaded yet.</div>
+        <div class="space-y-3 min-w-0">
+          <h3 class="ui-section-title px-1">Wiki <span id="wikiCountBadge" class="ui-count ui-num">0</span></h3>
+          <div id="wikiListContainer" class="ui-list mem-list">
+            <div class="mem-empty">No wiki pages loaded yet.</div>
           </div>
         </div>
 
-        <!-- Asset 4: L3 Core Persona & Code-Graph -->
-        <div class="bg-cardBg border border-borderCol rounded-xl p-4 sm:p-6 shadow-sm flex flex-col">
-          <div class="flex items-center justify-between border-b border-borderCol pb-3 mb-3">
-            <div class="flex items-center gap-2">
-              <i class="fa-solid fa-diagram-project text-purple-400"></i>
-              <h3 class="font-bold text-white text-sm sm:text-base">L3 Core Profile & Code-Graph Nodes</h3>
-            </div>
-            <span id="codegraphCountBadge" class="text-xs px-2 py-0.5 rounded bg-purple-500/10 text-purple-300 border border-purple-500/20 font-bold">Code-Graph</span>
-          </div>
-          <div id="coreAndGraphContainer" class="space-y-2.5 overflow-y-auto max-h-72 pr-1 flex-1">
-            <div class="text-xs text-slate-500 italic">Loading core profile and graph...</div>
+        <div class="space-y-3 min-w-0">
+          <h3 class="ui-section-title px-1">Profile &amp; code <span id="codegraphCountBadge" class="ui-count ui-num"></span></h3>
+          <div id="coreAndGraphContainer" class="ui-list mem-list">
+            <div class="mem-empty">Loading profile...</div>
           </div>
         </div>
       </div>
     </section>
 
-    <!-- TAB 8: SETTINGS & RISK -->
+    <!-- TAB 8: SETTINGS -->
     <section id="tab-settings" class="tab-content hidden space-y-6 max-w-2xl mx-auto">
-      <div class="bg-cardBg border border-borderCol rounded-xl p-4 sm:p-5 shadow-sm space-y-5">
-        <h2 class="text-base font-bold text-white flex items-center gap-2 border-b border-borderCol pb-3">
-          <i class="fa-solid fa-sliders text-emerald-400"></i> Trading & Risk Settings
-        </h2>
-
-        <!-- Trading Mode (Paper vs Live) -->
-        <div class="flex items-center justify-between gap-3 border-b border-borderCol/60 pb-4">
-          <div>
-            <label for="settingTradingMode" class="text-sm font-semibold text-white">Execution Mode</label>
-            <p class="text-xs text-slate-400">Switch dynamically between Paper Simulation and Live Broker execution.</p>
-          </div>
-          <select id="settingTradingMode" onchange="onTradingModeChange(this)" class="bg-slate-800 border border-slate-700 text-white text-xs rounded-lg px-3 py-2 shrink-0 focus:outline-none focus:border-emerald-500 font-medium">
-            <option value="PAPER">Paper Trading</option>
-            <option value="LIVE">Live Trading (IBKR)</option>
-          </select>
+      <div class="ui-page-head">
+        <div>
+          <h2 class="ui-page-title">Settings</h2>
+          <p class="ui-page-sub">Trading rules, broker connection and integrations.</p>
         </div>
+      </div>
 
-        <!-- Auto-Buy Toggle -->
-        <div class="flex items-center justify-between gap-3">
-          <div>
-            <label for="settingAutoBuy" class="text-sm font-semibold text-white">Automated Buying</label>
-            <p class="text-xs text-slate-400">Allow agent committee to automatically place buy orders on high conviction signals.</p>
-          </div>
-          <span class="check-wrap"><input type="checkbox" id="settingAutoBuy" onchange="onAutoBuyChange(this)" class="w-6 h-6 accent-emerald-500 rounded cursor-pointer"></span>
-        </div>
-
-        <!-- Consensus Score Threshold -->
-        <div class="space-y-2">
-          <div class="flex justify-between gap-3 text-sm">
-            <label for="settingMinScore" class="font-semibold text-white">Minimum Consensus Score for Auto-Buy</label>
-            <span id="consensusScoreLabel" class="text-emerald-400 font-bold">70 / 100</span>
-          </div>
-          <input type="range" id="settingMinScore" min="50" max="95" value="70" oninput="document.getElementById('consensusScoreLabel').innerText = this.value + ' / 100'" onchange="saveSettings()" class="w-full accent-emerald-500 cursor-pointer">
-        </div>
-
-        <!-- Position Sizing % -->
-        <div class="space-y-2">
-          <div class="flex justify-between gap-3 text-sm">
-            <label for="settingPosSize" class="font-semibold text-white">Default Position Sizing (% of Equity)</label>
-            <span id="posSizeLabel" class="text-cyan-400 font-bold">8.0%</span>
-          </div>
-          <input type="range" id="settingPosSize" min="1" max="100" step="0.5" value="8.0" oninput="document.getElementById('posSizeLabel').innerText = this.value + '%'" onchange="saveSettings()" class="w-full accent-cyan-500 cursor-pointer">
-          <div class="flex justify-between text-[11px] text-slate-500">
-            <span>1% (Conservative)</span>
-            <span>25%</span>
-            <span>50%</span>
-            <span>100% (Full Budget)</span>
-          </div>
-        </div>
-
-        <!-- Maximum Open Positions -->
-        <div class="space-y-2">
-          <div class="flex justify-between gap-3 text-sm">
-            <label for="settingMaxPositions" class="font-semibold text-white">Maximum Open Positions</label>
-            <span id="maxPositionsLabel" class="text-indigo-400 font-bold">8 slots</span>
-          </div>
-          <input type="range" id="settingMaxPositions" min="1" max="25" step="1" value="8" oninput="document.getElementById('maxPositionsLabel').innerText = this.value + ' slots'" onchange="saveSettings()" class="w-full accent-indigo-500 cursor-pointer">
-          <div class="flex justify-between text-[11px] text-slate-500">
-            <span>1 slot (Concentrated)</span>
-            <span>5 slots</span>
-            <span>10 slots</span>
-            <span>15 slots</span>
-            <span>25 slots (Diversified)</span>
-          </div>
-        </div>
-
-        <!-- Capital Usage & Protected Cash Reserve Controls -->
-        <div class="border-t border-borderCol/60 pt-4 space-y-4">
-          <div class="flex items-center justify-between">
-            <div>
-              <label class="text-sm font-semibold text-white flex items-center gap-2">
-                <i class="fa-solid fa-piggy-bank text-amber-400"></i> Account Capital Usage Limit
-              </label>
-              <p class="text-xs text-slate-400">Configure what amount of the money inserted into the account can get used by the bot.</p>
+      <!-- Trading -->
+      <div class="space-y-2">
+        <h3 class="ui-eyebrow px-1">Trading</h3>
+        <div class="ui-list">
+          <div class="set-row">
+            <div class="min-w-0">
+              <label for="settingTradingMode" class="set-label">Mode</label>
+              <span class="set-help">Paper simulates orders. Live trades real money.</span>
             </div>
-            <span id="capitalUsagePctLabel" class="text-emerald-400 font-bold text-sm">100%</span>
+            <select id="settingTradingMode" onchange="onTradingModeChange(this)" class="ui-input set-select shrink-0">
+              <option value="PAPER">Paper</option>
+              <option value="LIVE">Live (IBKR)</option>
+            </select>
           </div>
 
-          <!-- Percentage Slider -->
-          <div class="space-y-1.5">
+          <div class="set-row">
+            <div class="min-w-0">
+              <label for="settingAutoBuy" class="set-label">Automated buying</label>
+              <span class="set-help">Let the committee buy on high-conviction signals.</span>
+            </div>
+            <span class="check-wrap set-toggle">
+              <input type="checkbox" id="settingAutoBuy" onchange="onAutoBuyChange(this)">
+              <span class="ui-switch" aria-hidden="true"></span>
+            </span>
+          </div>
+
+          <div class="set-row">
+            <div class="min-w-0">
+              <label for="settingMarketHours" class="set-label">Strict market hours</label>
+              <span class="set-help">No paper trades while EU and US markets are closed.</span>
+            </div>
+            <span class="check-wrap set-toggle">
+              <input type="checkbox" id="settingMarketHours" onchange="saveSettings()">
+              <span class="ui-switch" aria-hidden="true"></span>
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Risk -->
+      <div class="space-y-2">
+        <h3 class="ui-eyebrow px-1">Risk</h3>
+        <div class="ui-list">
+          <div class="set-row-stack">
+            <div class="set-head">
+              <label for="settingMinScore" class="set-label">Minimum score to auto-buy</label>
+              <span id="consensusScoreLabel" class="set-value ui-num">70 / 100</span>
+            </div>
+            <span class="set-help">Committee consensus needed before a buy is placed.</span>
+            <input type="range" id="settingMinScore" min="50" max="95" value="70" oninput="document.getElementById('consensusScoreLabel').innerText = this.value + ' / 100'" onchange="saveSettings()" class="set-range">
+            <div class="set-ticks"><span>50</span><span>95</span></div>
+          </div>
+
+          <div class="set-row-stack">
+            <div class="set-head">
+              <label for="settingPosSize" class="set-label">Position size</label>
+              <span id="posSizeLabel" class="set-value ui-num">8.0%</span>
+            </div>
+            <span class="set-help">Share of equity put into each new position.</span>
+            <input type="range" id="settingPosSize" min="1" max="100" step="0.5" value="8.0" oninput="document.getElementById('posSizeLabel').innerText = this.value + '%'" onchange="saveSettings()" class="set-range">
+            <div class="set-ticks"><span>1%</span><span>50%</span><span>100%</span></div>
+          </div>
+
+          <div class="set-row-stack">
+            <div class="set-head">
+              <label for="settingMaxPositions" class="set-label">Max open positions</label>
+              <span id="maxPositionsLabel" class="set-value ui-num">8 slots</span>
+            </div>
+            <span class="set-help">Fewer is concentrated, more is diversified.</span>
+            <input type="range" id="settingMaxPositions" min="1" max="25" step="1" value="8" oninput="document.getElementById('maxPositionsLabel').innerText = this.value + ' slots'" onchange="saveSettings()" class="set-range">
+            <div class="set-ticks"><span>1</span><span>25</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Capital -->
+      <div class="space-y-2">
+        <h3 class="ui-eyebrow px-1">Capital</h3>
+        <div class="ui-list">
+          <div class="set-row-stack">
+            <div class="set-head">
+              <label for="settingCapitalUsagePct" class="set-label">Capital the bot may use</label>
+              <span id="capitalUsagePctLabel" class="set-value ui-num">100%</span>
+            </div>
+            <span class="set-help">The rest of the account stays as a protected reserve.</span>
             <input type="range" id="settingCapitalUsagePct" min="10" max="100" step="5" value="100"
                    oninput="updateCapitalUsageDisplay(this.value)" onchange="saveSettings()"
-                   class="w-full accent-emerald-500 cursor-pointer">
-            <div class="flex justify-between text-[11px] text-slate-500">
-              <span>10% (High Reserve)</span>
-              <span>50% (Half Reserved)</span>
-              <span>100% (Full Account)</span>
+                   class="set-range">
+            <div class="set-ticks"><span>10%</span><span>50%</span><span>100%</span></div>
+          </div>
+
+          <div class="set-row-stack">
+            <label for="settingMaxDeployableEur" class="set-label">Spending cap</label>
+            <span class="set-help">Optional euro limit. Leave blank to use only the percentage.</span>
+            <div class="relative mt-3">
+              <span class="absolute inset-y-0 left-0 flex items-center ui-faint ui-num" style="padding-left: 14px;" aria-hidden="true">€</span>
+              <input type="number" id="settingMaxDeployableEur" inputmode="decimal" autocomplete="off" placeholder="No cap" min="0" step="50"
+                     oninput="recalcCapitalPreview()" onchange="saveSettings()"
+                     class="ui-input ui-num" style="padding-left: 32px;">
             </div>
           </div>
 
-          <!-- Optional Absolute Cap (EUR) and Real-time Live Calculation Box -->
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-            <div class="space-y-1">
-              <label for="settingMaxDeployableEur" class="text-xs font-semibold text-slate-300">Max Deployable Cap (€ EUR, Optional)</label>
-              <div class="relative">
-                <span class="absolute inset-y-0 left-0 pl-3 flex items-center text-slate-400 text-xs">€</span>
-                <input type="number" id="settingMaxDeployableEur" inputmode="decimal" autocomplete="off" placeholder="No cap (use % limit)" min="0" step="50"
-                       oninput="recalcCapitalPreview()" onchange="saveSettings()"
-                       class="w-full bg-slate-800 border border-slate-700 text-white text-xs rounded-lg pl-7 pr-3 py-2 focus:outline-none focus:border-emerald-500 font-mono">
-              </div>
-              <p class="text-[11px] text-slate-500">Leave blank or 0 to only use the percentage limit.</p>
-            </div>
-
-            <!-- Real-time Live Calculation Box -->
-            <div class="p-3 rounded-lg bg-slate-900/80 border border-borderCol/80 text-xs space-y-1.5">
-              <div class="text-[11px] font-semibold text-slate-400 flex items-center justify-between">
-                <span>Account Capital Breakdown</span>
-                <span id="previewAccountTotal" class="text-slate-300 font-mono">€--</span>
-              </div>
-              <div class="flex justify-between items-center text-xs">
-                <span class="text-emerald-400 flex items-center gap-1">
-                  <i class="fa-solid fa-check text-[10px]"></i> Allowed for Bot:
-                </span>
-                <strong id="previewDeployableCash" class="text-emerald-400 font-mono">€--</strong>
-              </div>
-              <div class="flex justify-between items-center text-xs">
-                <span class="text-amber-400 flex items-center gap-1">
-                  <i class="fa-solid fa-shield-halved text-[10px]"></i> Protected Reserve:
-                </span>
-                <strong id="previewProtectedReserve" class="text-amber-400 font-mono">€--</strong>
-              </div>
-            </div>
+          <div class="set-row-stack space-y-2">
+            <div class="kv"><span>Account cash</span><span id="previewAccountTotal">€--</span></div>
+            <div class="kv"><span>Bot can use</span><span id="previewDeployableCash" class="ui-gain">€--</span></div>
+            <div class="kv"><span>Protected reserve</span><span id="previewProtectedReserve">€--</span></div>
           </div>
         </div>
+      </div>
 
-        <!-- Strict Market Hours Toggle -->
-        <div class="flex items-center justify-between gap-3 border-t border-borderCol/60 pt-4">
-          <div>
-            <label for="settingMarketHours" class="text-sm font-semibold text-white">Strict Market Hours</label>
-            <p class="text-xs text-slate-400">No trades can be executed in paper mode when European or US markets are closed (or on weekends).</p>
+      <div class="sm:flex sm:justify-end">
+        <button onclick="saveSettings()" id="saveSettingsBtn" class="ui-btn ui-btn-primary w-full sm:w-auto">
+          <i class="fa-solid fa-floppy-disk"></i>
+          <span>Save settings</span>
+        </button>
+      </div>
+
+      <!-- Broker -->
+      <div class="space-y-2">
+        <h3 class="ui-eyebrow px-1">Broker</h3>
+        <div class="ui-list">
+          <div class="set-row">
+            <span class="set-label">Broker</span>
+            <span id="diagBrokerName" class="text-sm text-right">Checking...</span>
           </div>
-          <span class="check-wrap"><input type="checkbox" id="settingMarketHours" onchange="saveSettings()" class="w-6 h-6 accent-emerald-500 rounded cursor-pointer"></span>
+          <div class="set-row">
+            <span class="set-label">Status</span>
+            <span id="diagBrokerStatus" class="text-sm flex items-center gap-2 text-right">
+              <span id="diagStatusDot" class="w-2 h-2 rounded-full bg-slate-500"></span>
+              <span id="diagStatusText" class="ui-muted">Checking...</span>
+            </span>
+          </div>
+          <div class="set-row">
+            <span class="set-label">Endpoint</span>
+            <span id="diagBrokerEndpoint" class="text-sm ui-num ui-muted text-right break-all">--</span>
+          </div>
+          <div class="set-row">
+            <span class="set-label">Latency</span>
+            <span id="diagBrokerLatency" class="text-sm ui-num ui-muted text-right">-- ms</span>
+          </div>
+          <div id="diagBrokerMessageContainer" class="set-row-stack">
+            <span class="ui-label block mb-1">Last message</span>
+            <div id="diagBrokerMessage" class="text-slate-300 font-mono text-[11px] leading-relaxed break-words">Checking connection status...</div>
+          </div>
+          <div class="set-row-stack grid grid-cols-2 gap-2">
+            <button onclick="pingBrokerStatus(true)" id="settingsPingBtn" class="ui-btn">
+              <i class="fa-solid fa-wifi" id="settingsPingIcon"></i>
+              <span>Ping</span>
+            </button>
+            <button onclick="reconnectBroker()" id="settingsReconnectBtn" class="ui-btn">
+              <i class="fa-solid fa-bolt" id="settingsReconnectIcon"></i>
+              <span>Reconnect</span>
+            </button>
+          </div>
         </div>
+      </div>
 
-        <!-- Explicit Save Settings Button -->
-        <div class="border-t border-borderCol/60 pt-4 flex justify-end">
-          <button onclick="saveSettings()" id="saveSettingsBtn" class="w-full sm:w-auto flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-sm transition-all active:scale-95 cursor-pointer">
+      <!-- IBKR gateway -->
+      <div class="space-y-2">
+        <h3 class="ui-eyebrow px-1">IBKR gateway</h3>
+        <div class="ui-card ui-card-pad space-y-4">
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div class="col-span-2 space-y-1.5">
+              <label for="settingIbkrHost" class="ui-label block">Host</label>
+              <input type="text" id="settingIbkrHost" inputmode="url" autocapitalize="none" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="172.17.0.2" class="ui-input ui-num">
+            </div>
+            <div class="space-y-1.5">
+              <label for="settingIbkrPort" class="ui-label block">Port</label>
+              <input type="number" id="settingIbkrPort" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="4003" class="ui-input ui-num">
+            </div>
+            <div class="space-y-1.5">
+              <label for="settingIbkrClientId" class="ui-label block">Client ID</label>
+              <input type="number" id="settingIbkrClientId" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="1" class="ui-input ui-num">
+            </div>
+            <div class="col-span-2 sm:col-span-4 space-y-1.5">
+              <label for="settingIbkrAccountId" class="ui-label block">Account ID <span class="ui-faint">(optional)</span></label>
+              <input type="text" id="settingIbkrAccountId" inputmode="text" autocapitalize="characters" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="Auto-detect" class="ui-input ui-num">
+            </div>
+          </div>
+          <p class="text-xs ui-faint">Saved to .env and the database.</p>
+          <button onclick="saveBrokerConfig()" id="saveBrokerConfigBtn" class="ui-btn w-full sm:w-auto">
             <i class="fa-solid fa-floppy-disk"></i>
-            <span>Save All Settings</span>
+            <span>Save broker</span>
           </button>
         </div>
       </div>
 
-      <!-- Broker Connection Diagnostics -->
-      <div class="bg-cardBg border border-borderCol rounded-xl p-4 sm:p-5 shadow-sm space-y-4">
-        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-borderCol pb-3">
-          <h2 class="text-base font-bold text-white flex items-center gap-2">
-            <i class="fa-solid fa-server text-indigo-400"></i> Broker Connection Diagnostics
-          </h2>
-          <div class="grid grid-cols-2 sm:flex items-center gap-2">
-            <button onclick="pingBrokerStatus(true)" id="settingsPingBtn" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold shadow-sm transition-all active:scale-95 cursor-pointer">
-              <i class="fa-solid fa-wifi" id="settingsPingIcon"></i>
-              <span>Ping</span>
-            </button>
-            <button onclick="reconnectBroker()" id="settingsReconnectBtn" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-sm transition-all active:scale-95 cursor-pointer">
-              <i class="fa-solid fa-bolt" id="settingsReconnectIcon"></i>
-              <span>Reconnect Broker</span>
-            </button>
+      <!-- Integrations -->
+      <div class="space-y-2">
+        <h3 class="ui-eyebrow px-1">Integrations</h3>
+        <div class="ui-list">
+          <div class="set-row">
+            <div class="min-w-0">
+              <span class="set-label"><i class="fa-brands fa-telegram ui-faint mr-1.5"></i>Telegram</span>
+              <span class="set-help">Trade alerts and market open/close messages.</span>
+            </div>
+            <span id="telegramStatusBadge" class="ui-badge shrink-0">Not set up</span>
+          </div>
+          <div class="set-row">
+            <div class="min-w-0">
+              <span class="set-label"><i class="fa-solid fa-microchip ui-faint mr-1.5"></i>AI engine</span>
+              <span class="set-help">Runs the agent committee's reasoning.</span>
+            </div>
+            <span id="aiEngineStatusBadge" class="ui-badge shrink-0">Checking...</span>
           </div>
         </div>
-
-        <div class="grid grid-cols-2 gap-3 text-xs">
-          <div class="p-3 rounded-lg bg-slate-900/60 border border-slate-800">
-            <div class="text-slate-400">Active Broker</div>
-            <div id="diagBrokerName" class="font-bold text-white text-sm mt-1">Checking...</div>
-          </div>
-          <div class="p-3 rounded-lg bg-slate-900/60 border border-slate-800">
-            <div class="text-slate-400">Connection Status</div>
-            <div id="diagBrokerStatus" class="font-bold text-slate-300 text-sm mt-1 flex items-center gap-1.5">
-              <span id="diagStatusDot" class="w-2 h-2 rounded-full bg-slate-500"></span>
-              <span id="diagStatusText">Checking...</span>
-            </div>
-          </div>
-          <div class="p-3 rounded-lg bg-slate-900/60 border border-slate-800">
-            <div class="text-slate-400">Endpoint / Host</div>
-            <div id="diagBrokerEndpoint" class="font-bold text-slate-300 text-sm mt-1 font-mono">--</div>
-          </div>
-          <div class="p-3 rounded-lg bg-slate-900/60 border border-slate-800">
-            <div class="text-slate-400">API Latency</div>
-            <div id="diagBrokerLatency" class="font-bold text-slate-300 text-sm mt-1">-- ms</div>
-          </div>
-        </div>
-
-        <div id="diagBrokerMessageContainer" class="p-3 rounded-lg bg-slate-900/80 border border-slate-800 text-xs">
-          <div class="text-slate-400 text-[11px] mb-1">Diagnostic Log & Notes:</div>
-          <div id="diagBrokerMessage" class="text-slate-300 font-mono text-[11px] leading-relaxed break-words">Checking connection status...</div>
-        </div>
-
-        <!-- IBKR Gateway Connection Configuration -->
-        <div class="border-t border-borderCol/60 pt-4 space-y-3">
-          <div class="flex items-center justify-between">
-            <label class="text-xs font-semibold text-white flex items-center gap-1.5">
-              <i class="fa-solid fa-network-wired text-indigo-400"></i> IBKR Gateway Host & Port Configuration
-            </label>
-            <span class="text-[11px] text-slate-400">Auto-persisted to .env & database</span>
-          </div>
-          <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
-            <div class="col-span-2 space-y-1">
-              <label for="settingIbkrHost" class="text-slate-400 text-[11px]">Gateway Host IP</label>
-              <input type="text" id="settingIbkrHost" inputmode="url" autocapitalize="none" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="172.17.0.2" class="w-full bg-slate-800 border border-slate-700 text-white text-xs rounded-lg px-3 py-2 font-mono focus:outline-none focus:border-indigo-500">
-            </div>
-            <div class="space-y-1">
-              <label for="settingIbkrPort" class="text-slate-400 text-[11px]">Port (Bridge)</label>
-              <input type="number" id="settingIbkrPort" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="4003" class="w-full bg-slate-800 border border-slate-700 text-white text-xs rounded-lg px-3 py-2 font-mono focus:outline-none focus:border-indigo-500">
-            </div>
-            <div class="space-y-1">
-              <label for="settingIbkrClientId" class="text-slate-400 text-[11px]">Client ID</label>
-              <input type="number" id="settingIbkrClientId" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="1" class="w-full bg-slate-800 border border-slate-700 text-white text-xs rounded-lg px-3 py-2 font-mono focus:outline-none focus:border-indigo-500">
-            </div>
-          </div>
-          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs pt-1">
-            <div class="sm:col-span-2 space-y-1">
-              <label for="settingIbkrAccountId" class="text-slate-400 text-[11px]">Account ID (Optional, e.g. DU1234567)</label>
-              <input type="text" id="settingIbkrAccountId" inputmode="text" autocapitalize="characters" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="Leave blank to auto-detect" class="w-full bg-slate-800 border border-slate-700 text-white text-xs rounded-lg px-3 py-2 font-mono focus:outline-none focus:border-indigo-500">
-            </div>
-            <div class="flex items-end">
-              <button onclick="saveBrokerConfig()" id="saveBrokerConfigBtn" class="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-white text-xs font-semibold shadow-sm transition-all active:scale-95 cursor-pointer">
-                <i class="fa-solid fa-floppy-disk text-indigo-400"></i>
-                <span>Save Broker Config</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Telegram & Integrations Status -->
-      <div class="bg-cardBg border border-borderCol rounded-xl p-4 sm:p-5 shadow-sm space-y-4">
-        <h2 class="text-base font-bold text-white flex items-center gap-2 border-b border-borderCol pb-3">
-          <i class="fa-brands fa-telegram text-sky-400"></i> Telegram & AI Engine Status
-        </h2>
-
-        <div class="space-y-3 text-xs sm:text-sm">
-          <div class="flex flex-wrap items-center justify-between gap-2 p-3 rounded-lg bg-slate-900/60 border border-borderCol">
-            <div class="flex items-center gap-2">
-              <i class="fa-brands fa-telegram text-sky-400 text-lg"></i>
-              <div>
-                <div class="font-semibold text-white">Telegram Assistant Bot</div>
-                <div class="text-xs text-slate-400">Instant trade alerts & market open/close broadcasts</div>
-              </div>
-            </div>
-            <span id="telegramStatusBadge" class="px-2 py-0.5 rounded text-xs font-bold bg-slate-800 text-slate-400">Not Configured</span>
-          </div>
-
-          <div class="flex flex-wrap items-center justify-between gap-2 p-3 rounded-lg bg-slate-900/60 border border-borderCol">
-            <div class="flex items-center gap-2">
-              <i class="fa-solid fa-microchip text-purple-400 text-lg"></i>
-              <div>
-                <div class="font-semibold text-white">AI LLM Committee Engine</div>
-                <div class="text-xs text-slate-400">Google Gemini / OpenAI multi-agent reasoning</div>
-              </div>
-            </div>
-            <span id="aiEngineStatusBadge" class="px-2 py-0.5 rounded text-xs font-bold bg-emerald-500/20 text-emerald-400">Active (Deterministic & LLM Ready)</span>
-          </div>
-        </div>
-
-        <div class="text-xs text-slate-400 bg-slate-900/40 p-3 rounded-lg border border-slate-800">
-          💡 <em>To configure your Telegram token or Gemini/OpenAI API key, update the <code>.env</code> file in your project folder. The system will automatically detect them upon restart.</em>
-        </div>
+        <p class="text-xs ui-faint px-1">Telegram tokens and API keys live in the <code>.env</code> file and are picked up on restart.</p>
       </div>
     </section>
 
@@ -1039,8 +947,8 @@
   </main>
 
   <!-- Toast Notification element -->
-  <div id="toast" role="status" aria-live="polite" class="fixed left-3 right-3 sm:left-auto sm:right-4 z-50 sm:max-w-md transform transition-all duration-300 translate-y-[-100px] opacity-0 pointer-events-none bg-slate-800 text-white border border-borderCol px-3.5 py-2 sm:px-4 sm:py-2.5 rounded-xl shadow-xl text-xs sm:text-sm flex items-center gap-2" style="top: calc(env(safe-area-inset-top) + 64px);">
-    <i id="toastIcon" class="fa-solid fa-circle-check text-emerald-400"></i>
+  <div id="toast" role="status" aria-live="polite" class="fixed left-4 right-4 sm:left-auto sm:right-4 z-50 sm:max-w-md transform transition-all duration-300 translate-y-[-100px] opacity-0 pointer-events-none bg-slate-800 text-slate-100 border border-slate-700 px-4 py-3 rounded-2xl shadow-2xl text-sm font-medium flex items-center gap-2.5" style="top: calc(env(safe-area-inset-top) + 64px);">
+    <i id="toastIcon" class="fa-solid fa-circle-check ui-gain"></i>
     <span id="toastMsg">Action executed.</span>
   </div>
 
