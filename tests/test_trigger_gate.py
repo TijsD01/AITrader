@@ -304,7 +304,7 @@ async def test_one_share_must_fit_the_allocation(monkeypatch):
 async def test_share_price_is_converted_to_euro(monkeypatch):
     monkeypatch.setattr(settings, "WHOLE_SHARES_ONLY", True)
     with patch("src.trading.trigger_gate.check_market_regime", return_value=(True, "")), \
-         patch("src.trading.trigger_gate.currency_service.to_eur", return_value=2000.0) as to_eur:
+         patch("src.data.currency.currency_service.to_eur", return_value=2000.0) as to_eur:
         res = await evaluate_manual_trigger("GATEX", _stock("GATEX", currency="USD"), _report(), 2160.0, 1000.0, 80)
     to_eur.assert_called_once_with(2160.0, "USD")
     assert not res.allowed and res.code == "SHARE_TOO_EXPENSIVE"

@@ -9,7 +9,7 @@ from config.settings import settings, update_env_file
 from src.db.session import AsyncSessionLocal
 from src.db.models import Position, Trade, PortfolioSnapshot, AnalysisReport, WatchlistItem, SystemConfig, MarketDigest, TradeLesson
 from src.trading.broker import active_broker as paper_broker, get_active_broker, active_broker, live_broker, check_broker_status
-from src.trading.risk import calculate_position_allocation, derive_trigger_levels
+from src.trading.risk import derive_trigger_levels, entry_allocation_from_summary
 from src.trading.trigger_gate import (
     TriggerGateResult, normalize_ticker, invalid_ticker_result, precheck_manual_trigger,
     get_trigger_min_score, evaluate_manual_trigger
@@ -210,22 +210,13 @@ async def get_screener_candidates(market: str = "ALL"):
 
 # 5. Trading Actions
 def _calculate_safe_allocation(
-    available_cash: float,
+    summary: Dict[str, Any],
     requested_alloc: Optional[float],
-    risk_rep: Dict[str, Any],
-    current_positions_count: int = 0,
     ticker: Optional[str] = None,
     currency: Optional[str] = None
 ) -> float:
-    return calculate_position_allocation(
-        available_cash=available_cash,
-        current_positions_count=current_positions_count,
-        requested_alloc=requested_alloc,
-        recommended_size_pct=risk_rep.get("recommended_size_pct"),
-        full_budget_utilization=settings.FULL_BUDGET_UTILIZATION,
-        ticker=ticker,
-        currency=currency
-    )
+    # The slot every pending trigger gets, so this matches the dashboard and the order
+    return entry_allocation_from_summary(summary, ticker, currency, requested_alloc=requested_alloc)
 
 @router.post("/api/trade/buy")
 async def manual_buy(req: BuyRequest):
@@ -247,10 +238,8 @@ async def manual_buy(req: BuyRequest):
 
     report = await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
     alloc_eur = _calculate_safe_allocation(
-        available_cash,
+        summary,
         req.allocation_eur,
-        report["risk"],
-        summary.get("open_positions_count", 0),
         ticker=ticker,
         currency=data.get("currency")
     )
@@ -324,10 +313,8 @@ async def create_trigger(req: CreateTriggerRequest):
     target_price = req.target_price or report.get("entry_trigger_price", data["price"])
     trigger_type = req.trigger_type or report.get("trigger_type", "LIMIT_PULLBACK")
     alloc_eur = _calculate_safe_allocation(
-        available_cash,
+        summary,
         req.allocation_eur,
-        report["risk"],
-        summary.get("open_positions_count", 0),
         ticker=ticker,
         currency=data.get("currency")
     )
@@ -336,7 +323,8 @@ async def create_trigger(req: CreateTriggerRequest):
     rationale = req.ai_rationale or report.get("trigger_rationale", report["summary"])
 
     gate = await evaluate_manual_trigger(
-        ticker, data, report, target_price, alloc_eur, await get_trigger_min_score(), force=req.force
+        ticker, data, report, target_price, alloc_eur, await get_trigger_min_score(), force=req.force,
+        stop_loss=sl, portfolio_value_eur=summary.get("total_value_eur", 0.0)
     )
     if not gate.allowed:
         raise _trigger_blocked_error(gate, report)
@@ -367,17 +355,16 @@ async def create_trigger_from_ai(req: CreateTriggerFromAIRequest):
 
     trigger_type, trigger_price, sl, tp = derive_trigger_levels(report, data["price"])
     alloc_eur = _calculate_safe_allocation(
-        available_cash,
+        summary,
         req.allocation_eur,
-        report["risk"],
-        summary.get("open_positions_count", 0),
         ticker=ticker,
         currency=data.get("currency")
     )
     rationale = report.get("trigger_rationale", report["summary"])
 
     gate = await evaluate_manual_trigger(
-        ticker, data, report, trigger_price, alloc_eur, await get_trigger_min_score(), force=req.force
+        ticker, data, report, trigger_price, alloc_eur, await get_trigger_min_score(), force=req.force,
+        stop_loss=sl, portfolio_value_eur=summary.get("total_value_eur", 0.0)
     )
     if not gate.allowed:
         raise _trigger_blocked_error(gate, report)

@@ -15,8 +15,7 @@ from sqlalchemy import select
 from config.settings import settings
 from src.db.session import AsyncSessionLocal
 from src.db.models import Position, OrderTrigger, SystemConfig
-from src.data.currency import currency_service
-from src.trading.risk import check_market_regime, whole_share_count
+from src.trading.risk import check_market_regime, plan_buy
 
 logger = logging.getLogger(__name__)
 
@@ -123,8 +122,11 @@ def evaluate_trigger_verdict(report: Dict[str, Any], trigger_min_score: int, for
     return block
 
 
-async def _hard_block(ticker: str, data: Dict[str, Any], trigger_price: float, allocation_eur: float, verdict: TriggerGateResult) -> Optional[TriggerGateResult]:
-    """Rules 5-6: the market regime filter and the one-share check. Never overridable."""
+async def _hard_block(
+    ticker: str, data: Dict[str, Any], trigger_price: float, allocation_eur: float, verdict: TriggerGateResult,
+    stop_loss: Optional[float] = None, portfolio_value_eur: float = 0.0
+) -> Optional[TriggerGateResult]:
+    """Rules 5-6: the market regime filter and the one-share check (after the risk cap). Never overridable."""
     def blocked(code: str, message: str) -> TriggerGateResult:
         return TriggerGateResult(False, code, message, False, verdict.action, verdict.consensus_score, verdict.trigger_min_score)
 
@@ -134,11 +136,12 @@ async def _hard_block(ticker: str, data: Dict[str, Any], trigger_price: float, a
         return blocked("MARKET_REGIME", regime_msg)
 
     if settings.WHOLE_SHARES_ONLY and trigger_price and trigger_price > 0:
-        price_eur = await asyncio.to_thread(currency_service.to_eur, trigger_price, currency)
-        if whole_share_count(allocation_eur, price_eur) < 1:
+        # Sized like the buy itself: risk cap, then whole shares
+        plan = await asyncio.to_thread(plan_buy, allocation_eur, trigger_price, currency, stop_loss, portfolio_value_eur)
+        if plan["shares"] < 1:
             return blocked(
                 "SHARE_TOO_EXPENSIVE",
-                f"One share of {ticker} costs about €{price_eur:.2f}, more than the €{allocation_eur:.2f} available for this trade."
+                f"One share of {ticker} costs about €{plan['price_eur']:.2f}, more than the €{plan['budget_eur']:.2f} available for this trade."
             )
     return None
 
@@ -150,7 +153,9 @@ async def evaluate_manual_trigger(
     trigger_price: float,
     allocation_eur: float,
     trigger_min_score: int,
-    force: bool = False
+    force: bool = False,
+    stop_loss: Optional[float] = None,
+    portfolio_value_eur: float = 0.0
 ) -> TriggerGateResult:
     """
     Rules 1-6 for a manually armed trigger: the verdict rules (evaluate_trigger_verdict), then the market
@@ -160,7 +165,7 @@ async def evaluate_manual_trigger(
     verdict = evaluate_trigger_verdict(report, trigger_min_score, force=force)
     if not verdict.allowed and not verdict.overridable:
         return verdict
-    hard = await _hard_block(ticker, data, trigger_price, allocation_eur, verdict)
+    hard = await _hard_block(ticker, data, trigger_price, allocation_eur, verdict, stop_loss, portfolio_value_eur)
     return hard or verdict
 
 

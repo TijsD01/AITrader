@@ -129,6 +129,7 @@ async def test_paper_trigger_waits_while_the_regime_filter_blocks():
 async def test_paper_trigger_buy_is_capped_by_the_risk_budget(monkeypatch):
     await init_db()
     monkeypatch.setattr(settings, "RISK_PER_TRADE_PCT", 0.5)
+    monkeypatch.setattr(settings, "RISK_BUDGET_BASE", "portfolio")
     ticker = _unique("RISKCAP")
     async with AsyncSessionLocal() as session:
         trigger = OrderTrigger(

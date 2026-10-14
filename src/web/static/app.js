@@ -1667,6 +1667,14 @@ async function loadTriggers() {
           const barColor = isFar ? 'var(--warn)' : 'var(--accent)';
 
           const allocEur = Number(t.allocation_eur) || 0;
+          // Shares the buy would get at the limit price (same sizing as the order and the Telegram alert)
+          let plannedLine = '';
+          if (allocEur > 0 && hasNum(t.planned_shares)) {
+            const plannedShares = Number(t.planned_shares);
+            plannedLine = plannedShares > 0
+              ? `<div class="ui-faint text-xs">≈ <span class="ui-num">${esc(String(plannedShares))}</span> share${plannedShares === 1 ? '' : 's'} · <span class="ui-num">${esc(eur(t.planned_cost_eur))}</span>${t.risk_capped ? ' · risk-capped' : ''}</div>`
+              : `<div class="text-xs" style="color:var(--warn)">Budget below 1 share</div>`;
+          }
           const subParts = [triggerTypeLabel(t.trigger_type)];
           if (hasNum(t.consensus_score)) subParts.push(`score ${Number(t.consensus_score)}`);
 
@@ -1697,7 +1705,7 @@ async function loadTriggers() {
               <div class="flex items-center justify-between gap-3 pt-3 border-t border-borderCol">
                 <div class="min-w-0 text-[13px] leading-snug">
                   ${allocEur > 0
-                    ? `<div class="ui-num font-semibold" style="color:var(--text)">${esc(eur(allocEur))}</div>`
+                    ? `<div class="ui-num font-semibold" style="color:var(--text)">${esc(eur(allocEur))}</div>${plannedLine}`
                     : `<span class="ui-badge ui-badge-warn" title="Higher-scored triggers hold the available cash or position slots. This trigger is funded automatically when cash or a slot frees up."><i class="fa-solid fa-hourglass-half"></i> Unfunded</span>`}
                   <div class="ui-faint text-xs truncate">Armed <span class="ui-num">${esc(t.created_at)}</span></div>
                 </div>

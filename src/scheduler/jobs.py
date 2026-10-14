@@ -12,15 +12,14 @@ from src.screener.scanner import market_scanner
 from src.data.market import market_data_provider
 from src.agents.committee import investment_committee
 from src.trading.broker import active_broker as paper_broker, get_active_broker, active_broker
-from src.trading.risk import calculate_position_allocation, derive_trigger_levels
+from src.trading.risk import derive_trigger_levels, entry_allocation_from_summary, plan_buy
 from src.trading.shadow import shadow_portfolios
 from src.telegram.bot import telegram_bot
 from sqlalchemy import select, desc
 from src.db.session import AsyncSessionLocal
 from src.db.models import AnalysisReport, MarketDigest, Position, OrderTrigger, SystemConfig
 from src.data.review_tracker import review_tracker
-from src.trading.risk import check_market_regime, whole_share_count
-from src.data.currency import currency_service
+from src.trading.risk import check_market_regime
 from src.trading.trigger_gate import evaluate_trigger_verdict
 
 logger = logging.getLogger(__name__)
@@ -41,12 +40,14 @@ class TradingScheduler:
         return evaluate_trigger_verdict(report, trigger_min_score).allowed
 
     @staticmethod
-    def _fits_whole_share(allocation_eur: float, price_native: float, currency: str) -> bool:
-        """False when whole-share sizing is on and not even one share fits the allocation."""
+    def _fits_whole_share(
+        allocation_eur: float, price_native: float, currency: str,
+        stop_loss_native: Optional[float] = None, portfolio_value_eur: float = 0.0, max_eur: Optional[float] = None
+    ) -> bool:
+        """False when whole-share sizing is on and not even one share fits the allocation after the risk cap."""
         if not settings.WHOLE_SHARES_ONLY:
             return True
-        price_eur = currency_service.to_eur(price_native, currency)
-        return whole_share_count(allocation_eur, price_eur) >= 1
+        return plan_buy(allocation_eur, price_native, currency, stop_loss_native, portfolio_value_eur, max_eur=max_eur)["shares"] >= 1
 
     async def _scheduled_market_session(self, market: str, session: str):
         """Safeguard for scheduled cron jobs: only run on weekdays."""
@@ -292,17 +293,17 @@ class TradingScheduler:
                             logger.info(f"Skipping trigger for {ticker}: insufficient available cash (€{available_cash:.2f}).")
                             report["status_type"] = "INSUFFICIENT_CASH"
                         else:
-                            alloc_eur = calculate_position_allocation(
-                                available_cash=available_cash,
-                                current_positions_count=len(open_tickers),
-                                recommended_size_pct=report["risk"].get("recommended_size_pct"),
-                                full_budget_utilization=settings.FULL_BUDGET_UTILIZATION
-                            )
+                            # Same slot the dashboard shows once the trigger is pending
+                            alloc_eur = entry_allocation_from_summary(curr_summary, ticker, data["currency"])
 
                             trigger_type, trigger_price, sl, tp = derive_trigger_levels(report, data["price"])
 
-                            if not self._fits_whole_share(alloc_eur, trigger_price, data["currency"]):
-                                logger.info(f"Skipping trigger for {ticker}: one share costs more than the €{alloc_eur:.2f} allocation.")
+                            if alloc_eur < 20.0:
+                                logger.info(f"Skipping trigger for {ticker}: no free position slot or unreserved cash left.")
+                                report["status_type"] = "INSUFFICIENT_CASH"
+                            elif not self._fits_whole_share(alloc_eur, trigger_price, data["currency"], sl,
+                                                            curr_summary.get("total_value_eur", 0.0), available_cash):
+                                logger.info(f"Skipping trigger for {ticker}: one share costs more than the €{alloc_eur:.2f} allocation after the risk cap.")
                                 report["status_type"] = "SHARE_TOO_EXPENSIVE"
                             else:
                                 trig_res = await paper_broker.create_price_trigger(
@@ -529,19 +530,17 @@ class TradingScheduler:
                     armed = False
                     if self._should_arm_trigger(report, trigger_min_score):
                         regime_ok, regime_msg = await asyncio.to_thread(check_market_regime, tk, data.get("currency"))
-                        alloc = calculate_position_allocation(
-                            available_cash=avail,
-                            current_positions_count=len(open_tickers),
-                            recommended_size_pct=report["risk"].get("recommended_size_pct"),
-                            full_budget_utilization=settings.FULL_BUDGET_UTILIZATION
-                        )
+                        alloc = entry_allocation_from_summary(summary, tk, data["currency"])
                         t_type, t_price, sl, tp = derive_trigger_levels(report, data["price"])
 
                         # Skip arming, but still let the shadow portfolios see the verdict below
                         if not regime_ok:
                             logger.info(f"Opportunity Scanner skipped {tk}: {regime_msg}")
-                        elif not self._fits_whole_share(alloc, t_price, data["currency"]):
-                            logger.info(f"Opportunity Scanner skipped {tk}: one share costs more than the €{alloc:.2f} allocation.")
+                        elif alloc < 20.0:
+                            logger.info(f"Opportunity Scanner skipped {tk}: no free position slot or unreserved cash left.")
+                        elif not self._fits_whole_share(alloc, t_price, data["currency"], sl,
+                                                        summary.get("total_value_eur", 0.0), avail):
+                            logger.info(f"Opportunity Scanner skipped {tk}: one share costs more than the €{alloc:.2f} allocation after the risk cap.")
                         else:
                             trig_res = await paper_broker.create_price_trigger(
                                 ticker=tk,

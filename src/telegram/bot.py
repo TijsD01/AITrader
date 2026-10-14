@@ -11,7 +11,7 @@ from config.settings import settings
 from src.data.market import market_data_provider
 from src.agents.committee import investment_committee
 from src.trading.broker import active_broker as paper_broker, get_active_broker, active_broker, live_broker
-from src.trading.risk import calculate_position_allocation, derive_trigger_levels
+from src.trading.risk import derive_trigger_levels, entry_allocation_from_summary
 from src.trading.trigger_gate import (
     normalize_ticker, invalid_ticker_result, precheck_manual_trigger, evaluate_trigger_verdict,
     evaluate_manual_trigger, get_trigger_min_score
@@ -103,6 +103,17 @@ class TelegramAssistant:
         )
         await self.send_message(msg)
 
+    @staticmethod
+    def _planned_buy_line(trigger_info: Dict[str, Any]) -> str:
+        """Shares the trigger will buy at its limit price (same sizing as the dashboard and the order)."""
+        shares = trigger_info.get("planned_shares")
+        if shares is None:
+            return ""
+        if shares <= 0:
+            return "<b>Planned Buy:</b> budget below one share (skipped when hit)\n"
+        capped = " after risk cap" if trigger_info.get("risk_capped") else ""
+        return f"<b>Planned Buy:</b> ≈ {shares:g} shares (≈ €{trigger_info.get('planned_cost_eur', 0.0):,.2f}{capped})\n"
+
     async def notify_trigger_armed(self, trigger_info: Dict[str, Any]):
         """Broadcasts an alert when an AI limit price trigger has been armed."""
         ticker = trigger_info.get("ticker")
@@ -119,6 +130,7 @@ class TelegramAssistant:
             f"<b>Order Type:</b> {trigger_type}\n"
             f"<b>Target Trigger Price:</b> {target_pr} {curr} ({dist:+.1f}% from current {curr_pr})\n"
             f"<b>Planned Allocation:</b> €{alloc:,.2f}\n"
+            f"{self._planned_buy_line(trigger_info)}"
             f"<b>Trigger ID:</b> #{trigger_info.get('trigger_id')}\n\n"
             f"⏳ <i>When price reaches {target_pr} {curr} during open market hours, the order will execute automatically.</i>"
         )
@@ -502,7 +514,8 @@ class TelegramAssistant:
             self._polling_task.cancel()
 
     def _plan_trigger(
-        self, data: Dict[str, Any], report: Dict[str, Any], available_cash: float, explicit_price: Optional[float] = None
+        self, data: Dict[str, Any], report: Dict[str, Any], available_cash: float, explicit_price: Optional[float] = None,
+        summary: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         The levels and euro allocation an armed trigger would use, without arming anything, so the trigger gate
@@ -515,19 +528,18 @@ class TelegramAssistant:
             levels_report["trigger_type"] = "LIMIT_PULLBACK" if explicit_price < cur_pr else "BREAKOUT_BUY"
         trigger_type, trigger_price, sl, tp = derive_trigger_levels(levels_report, cur_pr)
 
-        alloc = calculate_position_allocation(
-            available_cash=available_cash,
-            recommended_size_pct=levels_report["risk"].get("recommended_size_pct"),
-            full_budget_utilization=settings.FULL_BUDGET_UTILIZATION
-        )
+        # The slot the dashboard shows once the trigger is pending (needs the portfolio summary for reserved cash and open slots)
+        summary = summary or {"usable_capital_eur": available_cash, "reserved_triggers_eur": 0.0, "open_positions_count": 0}
+        alloc = entry_allocation_from_summary(summary, data.get("ticker"), data.get("currency"))
         return {"target_price": trigger_price, "trigger_type": trigger_type, "stop_loss": sl, "take_profit": tp, "alloc_eur": alloc}
 
     async def _arm_trigger_from_report(
         self, ticker: str, data: Dict[str, Any], report: Dict[str, Any], available_cash: float,
-        explicit_price: Optional[float] = None, plan: Optional[Dict[str, Any]] = None
+        explicit_price: Optional[float] = None, plan: Optional[Dict[str, Any]] = None,
+        summary: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Arms the trigger for a committee report. Pass the plan from _plan_trigger when the gate already used it."""
-        plan = plan or self._plan_trigger(data, report, available_cash, explicit_price)
+        plan = plan or self._plan_trigger(data, report, available_cash, explicit_price, summary=summary)
 
         res = await paper_broker.create_price_trigger(
             ticker=ticker,
@@ -702,13 +714,7 @@ class TelegramAssistant:
 
                 report = await investment_committee.evaluate_ticker(data, summary.get("total_value_eur", 10000.0))
                 risk_cfg = report.get("risk", {})
-                raw_size_pct = risk_cfg.get("recommended_size_pct", settings.POSITION_SIZE_PCT)
-                alloc_eur = calculate_position_allocation(
-                    available_cash=available_cash,
-                    requested_alloc=explicit_amount,
-                    recommended_size_pct=raw_size_pct,
-                    full_budget_utilization=settings.FULL_BUDGET_UTILIZATION
-                )
+                alloc_eur = entry_allocation_from_summary(summary, target_ticker, data.get("currency"), requested_alloc=explicit_amount)
 
                 sl = risk_cfg.get("stop_loss_price")
                 tp = risk_cfg.get("take_profit_price")
@@ -832,10 +838,11 @@ class TelegramAssistant:
                         dist_sign = "+" if dist > 0 else ""
                         rationale = t.get("ai_rationale") or ""
                         rationale_str = f"\n  • <i>{html.escape(rationale[:100])}...</i>" if rationale else ""
+                        planned = f" (≈ {t['planned_shares']:g} sh)" if t.get("planned_shares") else ""
                         lines.append(
                             f"{type_icon} <b>#{t['id']} {t['ticker']}</b> ({t.get('trigger_type', 'LIMIT')})\n"
                             f"  • Target: <b>{t.get('target_price')} {t.get('currency')}</b> (Now: {t.get('current_price')} | {dist_sign}{dist:.1f}%)\n"
-                            f"  • Alloc: €{t.get('allocation_eur', 0.0):,.2f} | SL: {t.get('stop_loss')} | TP: {t.get('take_profit')}"
+                            f"  • Alloc: €{t.get('allocation_eur', 0.0):,.2f}{planned} | SL: {t.get('stop_loss')} | TP: {t.get('take_profit')}"
                             f"{rationale_str}"
                         )
                     reply = f"🎯 <b>ACTIVE AI PRICE TRIGGERS ({len(pending)}):</b>\n\n" + "\n\n".join(lines)
@@ -886,9 +893,10 @@ class TelegramAssistant:
                     return
 
                 report = await investment_committee.evaluate_ticker(data, summary.get("total_value_eur", 10000.0))
-                plan = self._plan_trigger(data, report, available_cash, explicit_price)
+                plan = self._plan_trigger(data, report, available_cash, explicit_price, summary=summary)
                 gate = await evaluate_manual_trigger(
-                    target_ticker, data, report, plan["target_price"], plan["alloc_eur"], await get_trigger_min_score(), force=force
+                    target_ticker, data, report, plan["target_price"], plan["alloc_eur"], await get_trigger_min_score(), force=force,
+                    stop_loss=plan["stop_loss"], portfolio_value_eur=summary.get("total_value_eur", 0.0)
                 )
                 if not gate.allowed:
                     reply = f"🛑 <b>TRIGGER NOT ARMED:</b> {target_ticker}\n\n{html.escape(gate.message)}"
@@ -994,9 +1002,10 @@ class TelegramAssistant:
                         blocked = invalid_ticker_result(target_ticker)
                     plan = None
                     if not blocked:
-                        plan = self._plan_trigger(data, report, available_cash)
+                        plan = self._plan_trigger(data, report, available_cash, summary=summary)
                         gate = await evaluate_manual_trigger(
-                            target_ticker, data, report, plan["target_price"], plan["alloc_eur"], trigger_min_score
+                            target_ticker, data, report, plan["target_price"], plan["alloc_eur"], trigger_min_score,
+                            stop_loss=plan["stop_loss"], portfolio_value_eur=summary.get("total_value_eur", 0.0)
                         )
                         blocked = None if gate.allowed else gate
 
