@@ -1,6 +1,8 @@
+import asyncio
 import logging
 import math
 import re
+import time
 from typing import Dict, Any, Optional
 from config.settings import settings
 from src.agents.base import llm_client
@@ -86,10 +88,12 @@ class InvestmentCommittee:
         except Exception:
             pass
 
-        # 2. Run Specialist Agents in parallel or sequence
-        tech_rep = await TechnicalAnalystAgent.analyze(stock_data)
-        fund_rep = await FundamentalAnalystAgent.analyze(stock_data)
-        sent_rep = await SentimentAnalystAgent.analyze(stock_data)
+        # 2. Run the independent specialists in parallel; risk needs tech and fund
+        tech_rep, fund_rep, sent_rep = await asyncio.gather(
+            TechnicalAnalystAgent.analyze(stock_data),
+            FundamentalAnalystAgent.analyze(stock_data),
+            SentimentAnalystAgent.analyze(stock_data),
+        )
         risk_rep = await RiskManagerAgent.evaluate_risk(stock_data, tech_rep, fund_rep, portfolio_equity_eur)
         sentiment_veto = InvestmentCommittee._sentiment_veto(sent_rep)
 
@@ -140,128 +144,98 @@ Synthesize the debate and return JSON with:
   "debate_transcript": string formatted multi-turn debate between Technical, Fundamental, Sentiment, and Risk agents concluding with PM decision
 }}
 """
+        parsed = None
         if llm_client.has_active_key():
             res = await llm_client.generate_json(system_prompt, user_prompt)
             parsed = InvestmentCommittee._parse_llm_verdict(res)
-            if parsed is not None:
-                res_action, res_score = parsed
-                # Risk Officer veto: downgrade and cap the score, since triggers are armed on score alone
-                if not risk_rep.get("approved", True):
-                    if res_action in ("BUY", "STRONG_BUY"):
-                        res_action = "HOLD"
-                    res_score = min(res_score, 55)
-                # Negative-news veto: downgrade a buy to HOLD (the score cap below then applies)
-                if sentiment_veto and res_action in ("BUY", "STRONG_BUY"):
-                    res_action = "HOLD"
-                # A non-buy verdict must not carry a buy-level score either
-                if res_action in ("HOLD", "SELL"):
-                    res_score = min(res_score, 55)
-                
-                # Asynchronously log decision to TencentDB Agent Memory L0 and trigger asset extraction
-                try:
-                    import asyncio
-                    from src.memory.client import agent_memory_client
-                    import time
-                    asyncio.create_task(agent_memory_client.log_interaction(
-                        session_id=f"committee_{ticker}_{int(time.time())}",
-                        role="assistant",
-                        content=f"Deliberation on {ticker} ({res_action}, Score {res_score}/100):\n{res.get('debate_transcript', '')}\n\nVerdict: {res.get('verdict_summary', '')}",
-                        metadata={"ticker": ticker, "action": res_action, "consensus_score": res_score, "price": price},
-                        trigger_extraction=True
-                    ))
-                except Exception:
-                    pass
-
-                return {
-                    "ticker": ticker,
-                    "name": stock_data.get("name"),
-                    "currency": curr,
-                    "price": price,
-                    "action": res_action,
-                    "consensus_score": res_score,
-                    "score_source": "llm",  # Portfolio Manager LLM judgement
-                    "summary": res.get("verdict_summary", ""),
-                    "debate_transcript": res.get("debate_transcript", ""),
-                    "entry_trigger_price": risk_rep.get("entry_trigger_price", price),
-                    "trigger_type": risk_rep.get("trigger_type", "LIMIT_PULLBACK"),
-                    "trigger_rationale": risk_rep.get("trigger_rationale", ""),
-                    "technical": tech_rep,
-                    "fundamental": fund_rep,
-                    "sentiment": sent_rep,
-                    "risk": risk_rep,
-                }
-
-        # Structured Synthetic Debate Generator Fallback with Dynamic Weights
-        tech_score = tech_rep["confidence"] if tech_rep["bias"] == "BULLISH" else (30 if tech_rep["bias"] == "BEARISH" else 50)
-        fund_score = fund_rep["confidence"] if fund_rep["valuation"] in ("UNDERVALUED", "FAIR") else 35
-        # Sentiment can only pull the score down: positive news is not a buy reason
-        sent_score = int(50 + (min(0.0, sent_rep["score"]) * 40))
-        
-        # Weighted score with dynamically adapted weights
-        final_score = int((tech_score * tech_w) + (fund_score * fund_w) + (sent_score * sent_w) + (75 * risk_w))
-        final_score = min(98, max(20, final_score))
-
-        buy_threshold = max(65, min_buy_score)
-        strong_buy_threshold = max(80, buy_threshold + 10)
-
-        if final_score >= strong_buy_threshold:
-            action = "STRONG_BUY"
-        elif final_score >= buy_threshold:
-            action = "BUY"
-        elif final_score >= 45:
-            action = "HOLD"
-        else:
-            action = "SELL"
-
-        # Risk Officer Veto Power (e.g. excessive fee drag or unviable trade economics)
-        risk_veto = not risk_rep.get("approved", True)
-        if risk_veto and action in ("BUY", "STRONG_BUY"):
-            action = "HOLD"
-            final_score = min(final_score, 55)
-        news_veto = sentiment_veto and action in ("BUY", "STRONG_BUY")
-        if news_veto:
-            action = "HOLD"
-            final_score = min(final_score, 55)
 
         trigger_pr = risk_rep.get("entry_trigger_price", price)
         trig_type = risk_rep.get("trigger_type", "LIMIT_PULLBACK")
 
-        risk_officer_line = (
-            f"\"Risk parameters allow this setup. {risk_rep['risk_summary']}\""
-            if not risk_veto
-            else f"\"VETO: Setup rejected due to risk / fee constraints. {risk_rep['risk_summary']}\""
-        )
+        if parsed is not None:
+            action, final_score = parsed
+            # Risk Officer veto: downgrade and cap the score, since triggers are armed on score alone
+            if not risk_rep.get("approved", True):
+                if action in ("BUY", "STRONG_BUY"):
+                    action = "HOLD"
+                final_score = min(final_score, 55)
+            # Negative-news veto: downgrade a buy to HOLD (the score cap below then applies)
+            if sentiment_veto and action in ("BUY", "STRONG_BUY"):
+                action = "HOLD"
+            # A non-buy verdict must not carry a buy-level score either
+            if action in ("HOLD", "SELL"):
+                final_score = min(final_score, 55)
+            summary = res.get("verdict_summary", "")
+            transcript = res.get("debate_transcript", "")
+            score_source = "llm"  # Portfolio Manager LLM judgement
+        else:
+            # Structured Synthetic Debate Generator Fallback with Dynamic Weights
+            tech_score = tech_rep["confidence"] if tech_rep["bias"] == "BULLISH" else (30 if tech_rep["bias"] == "BEARISH" else 50)
+            fund_score = fund_rep["confidence"] if fund_rep["valuation"] in ("UNDERVALUED", "FAIR") else 35
+            # Sentiment can only pull the score down: positive news is not a buy reason
+            sent_score = int(50 + (min(0.0, sent_rep["score"]) * 40))
 
-        transcript = (
-            f"**[Technical Analyst]**: \"We are seeing a {tech_rep['bias']} posture with {tech_rep['confidence']}% conviction. "
-            f"{tech_rep['analysis_summary']}\"\n\n"
-            f"**[Fundamental Analyst]**: \"From a balance sheet perspective, valuation is {fund_rep['valuation']} and solvency is {fund_rep['health']}. "
-            f"{fund_rep['analysis_summary']}\"\n\n"
-            f"**[Sentiment Analyst]**: \"News sentiment registers as {sent_rep['mood']}. {sent_rep['sentiment_summary']}\"\n\n"
-            f"**[Risk Officer]**: {risk_officer_line}\n\n"
-            f"**[Portfolio Manager]**: \"Committee consensus reached: **{action}** with score {final_score}/100. "
-            f"{'Trade downgraded to HOLD due to Risk Officer veto. ' if risk_veto else ''}"
-            f"AI Trigger armed: {trig_type} at {trigger_pr} with Stop-Loss at {risk_rep['stop_loss_price']} and Take-Profit at {risk_rep['take_profit_price']}.\""
-        )
+            # Weighted score with dynamically adapted weights
+            final_score = int((tech_score * tech_w) + (fund_score * fund_w) + (sent_score * sent_w) + (75 * risk_w))
+            final_score = min(98, max(20, final_score))
 
-        summary = (
-            f"Committee assigns **{action}** (Score {final_score}/100) for {ticker}. "
-            f"{'Vetoed to HOLD by Risk Officer. ' if risk_veto else ''}"
-            f"{'Vetoed to HOLD on negative news. ' if news_veto else ''}"
-            f"AI Trigger: {trig_type} @ {trigger_pr}. Technical: {tech_rep['bias']}; "
-            f"Fundamental: {fund_rep['valuation']}; Sentiment: {sent_rep['mood']}. "
-            f"Target R:R is {risk_rep['risk_reward_ratio']}:1."
-        )
+            buy_threshold = max(65, min_buy_score)
+            strong_buy_threshold = max(80, buy_threshold + 10)
+
+            if final_score >= strong_buy_threshold:
+                action = "STRONG_BUY"
+            elif final_score >= buy_threshold:
+                action = "BUY"
+            elif final_score >= 45:
+                action = "HOLD"
+            else:
+                action = "SELL"
+
+            # Risk Officer Veto Power (e.g. excessive fee drag or unviable trade economics)
+            risk_veto = not risk_rep.get("approved", True)
+            if risk_veto and action in ("BUY", "STRONG_BUY"):
+                action = "HOLD"
+                final_score = min(final_score, 55)
+            news_veto = sentiment_veto and action in ("BUY", "STRONG_BUY")
+            if news_veto:
+                action = "HOLD"
+                final_score = min(final_score, 55)
+
+            risk_officer_line = (
+                f"\"Risk parameters allow this setup. {risk_rep['risk_summary']}\""
+                if not risk_veto
+                else f"\"VETO: Setup rejected due to risk / fee constraints. {risk_rep['risk_summary']}\""
+            )
+
+            transcript = (
+                f"**[Technical Analyst]**: \"We are seeing a {tech_rep['bias']} posture with {tech_rep['confidence']}% conviction. "
+                f"{tech_rep['analysis_summary']}\"\n\n"
+                f"**[Fundamental Analyst]**: \"From a balance sheet perspective, valuation is {fund_rep['valuation']} and solvency is {fund_rep['health']}. "
+                f"{fund_rep['analysis_summary']}\"\n\n"
+                f"**[Sentiment Analyst]**: \"News sentiment registers as {sent_rep['mood']}. {sent_rep['sentiment_summary']}\"\n\n"
+                f"**[Risk Officer]**: {risk_officer_line}\n\n"
+                f"**[Portfolio Manager]**: \"Committee consensus reached: **{action}** with score {final_score}/100. "
+                f"{'Trade downgraded to HOLD due to Risk Officer veto. ' if risk_veto else ''}"
+                f"AI Trigger armed: {trig_type} at {trigger_pr} with Stop-Loss at {risk_rep['stop_loss_price']} and Take-Profit at {risk_rep['take_profit_price']}.\""
+            )
+
+            summary = (
+                f"Committee assigns **{action}** (Score {final_score}/100) for {ticker}. "
+                f"{'Vetoed to HOLD by Risk Officer. ' if risk_veto else ''}"
+                f"{'Vetoed to HOLD on negative news. ' if news_veto else ''}"
+                f"AI Trigger: {trig_type} @ {trigger_pr}. Technical: {tech_rep['bias']}; "
+                f"Fundamental: {fund_rep['valuation']}; Sentiment: {sent_rep['mood']}. "
+                f"Target R:R is {risk_rep['risk_reward_ratio']}:1."
+            )
+            score_source = "rules"  # weighted formula (LLM unavailable or invalid)
 
         # Asynchronously log decision to TencentDB Agent Memory L0 and trigger asset extraction
         try:
-            import asyncio
             from src.memory.client import agent_memory_client
-            import time
             asyncio.create_task(agent_memory_client.log_interaction(
                 session_id=f"committee_{ticker}_{int(time.time())}",
                 role="assistant",
-                content=f"Deliberation on {ticker} ({action}, Score {final_score}/100):\n{transcript}\n\nSummary: {summary}",
+                content=f"Deliberation on {ticker} ({action}, Score {final_score}/100):\n{transcript}\n\nVerdict: {summary}",
                 metadata={"ticker": ticker, "action": action, "consensus_score": final_score, "price": price},
                 trigger_extraction=True
             ))
@@ -275,7 +249,7 @@ Synthesize the debate and return JSON with:
             "price": price,
             "action": action,
             "consensus_score": final_score,
-            "score_source": "rules",  # weighted formula (LLM unavailable or invalid)
+            "score_source": score_source,
             "summary": summary,
             "debate_transcript": transcript,
             "entry_trigger_price": trigger_pr,

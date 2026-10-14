@@ -120,18 +120,25 @@ class LLMClient:
 
         proc = None
         try:
-            proc = await asyncio.create_subprocess_exec(
-                agy_bin,
-                "--disable-slash-commands",
-                "--print",
-                prompt,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=90.0)
+            # shortcut: retries a crash of the spawned child before exec (rc<0), not the root Python/glibc spawn bug; upgrade when the crash is fixed at the source
+            for attempt in range(3):
+                proc = await asyncio.create_subprocess_exec(
+                    agy_bin,
+                    "--disable-slash-commands",
+                    "--print",
+                    prompt,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=90.0)
 
-            if proc.returncode != 0:
+                if proc.returncode == 0:
+                    break
                 err_msg = stderr.decode(errors="replace")
+                if proc.returncode < 0 and attempt < 2:
+                    logger.warning(f"Antigravity CLI killed by signal {-proc.returncode} (attempt {attempt + 1}/3), retrying: {err_msg}")
+                    await asyncio.sleep(1.0)
+                    continue
                 logger.error(f"Antigravity CLI returned exit code {proc.returncode}: {err_msg}")
                 return None
 

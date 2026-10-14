@@ -251,7 +251,7 @@ class TradingScheduler:
                     summary = await paper_broker.get_portfolio_summary()
                     report = await asyncio.wait_for(
                         investment_committee.evaluate_ticker(data, summary["total_value_eur"]),
-                        timeout=45.0
+                        timeout=300.0  # 3 sequential agy LLM calls x 90s worst case
                     )
 
                     # Persist AnalysisReport

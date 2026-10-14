@@ -23,6 +23,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)  # httpx logs URLs incl. Telegram bot token
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
