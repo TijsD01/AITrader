@@ -117,7 +117,8 @@ class MarketDataProvider:
                 "sector": info.get("sector", "General"),
                 "industry": info.get("industry", "General"),
                 "country": info.get("country", ""),
-                
+                "quote_type": info.get("quoteType"),  # EQUITY, ETF, INDEX, CURRENCY, ...
+
                 # Technical Profile
                 "technicals": {
                     "price": round(current_price, 2),

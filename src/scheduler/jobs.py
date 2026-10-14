@@ -21,6 +21,7 @@ from src.db.models import AnalysisReport, MarketDigest, Position, OrderTrigger, 
 from src.data.review_tracker import review_tracker
 from src.trading.risk import check_market_regime, whole_share_count
 from src.data.currency import currency_service
+from src.trading.trigger_gate import evaluate_trigger_verdict
 
 logger = logging.getLogger(__name__)
 
@@ -37,11 +38,7 @@ class TradingScheduler:
         The verdict matters on its own: when the learner raises MIN_CONSENSUS_SCORE above TRIGGER_MIN_SCORE,
         a score can clear the trigger threshold while the committee still says HOLD.
         """
-        return (
-            report["consensus_score"] >= trigger_min_score
-            and report.get("action") in ("BUY", "STRONG_BUY")
-            and report["risk"].get("approved", True)
-        )
+        return evaluate_trigger_verdict(report, trigger_min_score).allowed
 
     @staticmethod
     def _fits_whole_share(allocation_eur: float, price_native: float, currency: str) -> bool:

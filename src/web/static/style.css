@@ -96,6 +96,16 @@ button:active { transform: scale(0.98); }
   border: 1px solid var(--line);
   border-radius: var(--radius);
 }
+/* Inline result note under a form (used for the "not armed" reason) */
+.ui-notice {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-inset);
+  font-size: 13px; line-height: 1.45; color: var(--text-2);
+}
+.ui-notice-danger { background: var(--danger-surface); border-color: var(--danger-line); }
+.ui-notice-warn { background: var(--warn-soft); border-color: rgba(245, 180, 84, 0.35); }
 
 /* Page heading for each tab */
 .ui-page-head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px; }
