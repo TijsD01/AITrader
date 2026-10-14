@@ -790,15 +790,14 @@ class PaperBroker(BaseBroker):
             results = []
             quote_cache = {}
             for t in triggers:
-                is_open, _ = check_market_hours(t.ticker)
-                if not is_open:
-                    curr_price = t.current_price_at_creation
-                else:
+                curr_price = None
+                if t.status == "PENDING":
+                    # Last known quote, also while the market is closed: the price at creation is stale
                     if t.ticker not in quote_cache:
                         quote_cache[t.ticker] = await asyncio.to_thread(market_data_provider.get_stock_data, t.ticker)
                     latest_data = quote_cache[t.ticker]
-                    curr_price = (latest_data["price"] if latest_data else t.current_price_at_creation) or t.target_price
-                
+                    curr_price = latest_data["price"] if latest_data else None
+
                 curr_price = curr_price or t.current_price_at_creation or t.target_price
                 # Distance % to trigger: ((target_price / curr_price) - 1) * 100
                 dist_pct = round(((t.target_price / curr_price) - 1.0) * 100, 2) if (curr_price and curr_price > 0) else 0.0

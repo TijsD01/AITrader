@@ -488,3 +488,23 @@ def test_market_data_fetches_enough_history_for_a_200_day_sma():
 
     assert periods == ["1y"]
     assert data["technicals"]["sma200"] == round(float(closes[-200:].mean()), 2)
+
+
+@pytest.mark.asyncio
+async def test_trigger_distance_uses_the_last_quote_while_the_market_is_closed():
+    """Outside market hours the dashboard showed the price at creation, so a trigger already past its limit looked 'away'."""
+    await init_db()
+    ticker = _unique("DIST")
+    trigger_id = await _insert_paper_trigger(ticker, "LIMIT_PULLBACK", 100.0, 101.2, 95.0, 110.0)
+    try:
+        quote = {"ticker": ticker, "price": 99.0, "currency": "USD"}
+        with patch.object(paper_broker, "adjust_triggers_dynamically", AsyncMock(return_value=[])), \
+             patch("src.trading.paper.check_market_hours", return_value=(False, "Market is CLOSED")), \
+             patch("src.trading.paper.market_data_provider.get_stock_data",
+                   side_effect=lambda sym: quote if sym == ticker else None):
+            triggers = await paper_broker.get_triggers()
+        found = next(t for t in triggers if t["id"] == trigger_id)
+        assert found["current_price"] == 99.0
+        assert found["distance_pct"] > 0  # price is below the pullback limit
+    finally:
+        await _delete_paper_rows(ticker)
