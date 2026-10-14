@@ -77,12 +77,39 @@ function renderAllocationBar(cashEur, positions) {
 function scoreSourceBadge(source) {
   if (!source) return '';
   const key = String(source).toLowerCase();
-  const label = key === 'llm' ? 'AI-oordeel' : (key === 'rules' ? 'Rekenregel' : null);
+  const label = key === 'llm' ? 'AI score' : (key === 'rules' ? 'Rule score' : null);
   if (!label) return '';
-  const cls = key === 'llm'
-    ? 'bg-purple-500/15 text-purple-300 border-purple-500/30'
-    : 'bg-slate-700/60 text-slate-300 border-slate-600';
-  return `<span class="inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded border ${cls}" title="Score source: ${esc(key)}">${esc(label)}</span>`;
+  return `<span class="block ui-faint text-[12px] mt-1" title="Score source: ${esc(key)}">${esc(label)}</span>`;
+}
+
+// Verdict badge for a committee action (BUY / STRONG_BUY / HOLD / SELL); arrow + word, never colour alone
+function adviceVerdictBadge(action) {
+  const a = String(action || '').toUpperCase();
+  const text = a.replace('_', ' ');
+  if (!text) return '';
+  if (a === 'STRONG_BUY' || a === 'BUY') return `<span class="ui-badge ui-badge-gain">▲ ${esc(text)}</span>`;
+  if (a === 'SELL' || a === 'STRONG_SELL') return `<span class="ui-badge ui-badge-loss">▼ ${esc(text)}</span>`;
+  return `<span class="ui-badge">${esc(text)}</span>`;
+}
+
+// Mono score out of 100 with a small bar underneath
+function adviceScoreBlock(score, label, sourceHtml = '') {
+  const n = Number(score);
+  const pct = Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0;
+  const shown = Number.isFinite(n) ? esc(Math.round(n)) : '--';
+  return `
+    <div class="adv-score" title="${esc(label)}">
+      <div class="ui-num text-[22px] font-semibold text-white leading-none">${shown}<span class="ui-faint text-[12px] font-normal">/100</span></div>
+      <div class="ui-track mt-2" aria-hidden="true"><span style="width:${pct}%"></span></div>
+      <div class="ui-faint text-[12px] mt-1">${esc(label)}</div>
+      ${sourceHtml}
+    </div>`;
+}
+
+// Price-like value from the API, or a dash when missing
+function advicePrice(value, suffix = '') {
+  if (value === null || value === undefined || value === '') return '—';
+  return `${esc(value)}${suffix ? ' ' + esc(suffix) : ''}`;
 }
 
 // Initialize on DOM Load
@@ -515,64 +542,53 @@ async function loadRecommendations() {
     const reports = await res.json();
     adviceReportsCache = Array.isArray(reports) ? reports : [];
     const container = document.getElementById('adviceContainer');
+    const countEl = document.getElementById('adviceCount');
+    if (countEl) countEl.textContent = adviceReportsCache.length ? String(adviceReportsCache.length) : '';
 
     if (adviceReportsCache.length === 0) {
       container.innerHTML = `
-        <div class="col-span-full text-center py-12 text-slate-400 text-sm bg-cardBg border border-borderCol rounded-xl p-6">
-          <i class="fa-solid fa-compass text-3xl mb-3 text-slate-500 block"></i>
-          No daily reports generated yet today. Click <strong>"Run Scan"</strong> in the top bar to run your first candidate discovery & agent debate!
+        <div class="col-span-full ui-card ui-card-pad adv-prose">
+          No advice yet today. Tap <strong class="text-white">Run Scan</strong> in the top bar to find candidates and run the committee.
         </div>`;
       return;
     }
 
     container.innerHTML = adviceReportsCache.map((r, idx) => {
-      const isBuy = r.action === 'STRONG_BUY' || r.action === 'BUY';
-      const actionText = String(r.action || '').replace('_', ' ');
-      const actionBadge = isBuy
-        ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
-        : (r.action === 'SELL' ? 'bg-rose-500/20 text-rose-400 border-rose-500/30' : 'bg-slate-700 text-slate-300 border-slate-600');
+      const source = scoreSourceBadge(r.score_source || (r.raw_signals && r.raw_signals.score_source));
+      const sub = r.name || r.created_at || '';
 
       return `
-        <div class="stock-card bg-cardBg border border-borderCol rounded-xl p-4 sm:p-5 shadow-sm space-y-4 flex flex-col justify-between">
-          <div class="space-y-2.5">
-            <div class="flex items-center justify-between gap-2">
-              <div class="flex flex-wrap items-center gap-2 min-w-0">
-                <span class="text-base font-bold text-white">${esc(r.ticker)}</span>
-                <span class="text-[11px] font-bold px-2.5 py-0.5 rounded-full border ${actionBadge}">${esc(actionText)}</span>
+        <article class="stock-card ui-card ui-card-pad flex flex-col gap-3">
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0 space-y-1">
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="text-[17px] font-bold text-white">${esc(r.ticker)}</span>
+                ${adviceVerdictBadge(r.action)}
               </div>
-              <div class="text-right shrink-0">
-                <div class="text-sm font-bold text-emerald-400">${esc(r.consensus_score)} <span class="text-slate-400 text-[10px]">/ 100</span></div>
-                <div class="text-[10px] text-slate-500">Conviction</div>
-                ${scoreSourceBadge(r.score_source || (r.raw_signals && r.raw_signals.score_source))}
-              </div>
+              ${sub ? `<div class="ui-faint text-[13px] truncate ${r.name ? '' : 'ui-num'}">${esc(sub)}</div>` : ''}
             </div>
-
-            <p class="text-xs text-slate-300 leading-relaxed">${esc(r.summary)}</p>
-
-            <div class="grid grid-cols-2 gap-2 text-[11px] bg-slate-900/60 p-2.5 rounded-lg border border-borderCol">
-              <div>
-                <span class="text-slate-500 block">Target Profit</span>
-                <span class="text-emerald-400 font-semibold">${r.target_price ? esc(r.target_price) : 'N/A'}</span>
-              </div>
-              <div>
-                <span class="text-slate-500 block">Stop Loss</span>
-                <span class="text-rose-400 font-semibold">${r.stop_loss ? esc(r.stop_loss) : 'N/A'}</span>
-              </div>
-            </div>
+            ${adviceScoreBlock(r.consensus_score, 'Conviction', source)}
           </div>
 
-          <div class="grid grid-cols-3 gap-2 pt-2 border-t border-borderCol/60">
-            <button type="button" data-action="inspect" data-idx="${idx}" class="min-h-[44px] px-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium flex items-center justify-center gap-1 transition-all" title="View multi-agent debate">
-              <i class="fa-solid fa-comments text-cyan-400"></i> Debate
-            </button>
-            <button type="button" data-action="arm-trigger" data-ticker="${esc(r.ticker)}" class="min-h-[44px] px-2 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 text-xs font-bold flex items-center justify-center gap-1 transition-all" title="Arm AI-calculated limit price trigger">
-              <i class="fa-solid fa-crosshairs text-indigo-400"></i> Trigger
-            </button>
-            <button type="button" data-action="buy" data-ticker="${esc(r.ticker)}" class="min-h-[44px] px-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center justify-center gap-1 shadow-sm active:scale-95 transition-all" title="Execute immediate market buy">
+          ${r.summary ? `<p class="adv-prose adv-clamp">${esc(r.summary)}</p>` : ''}
+
+          <div class="ui-inset px-3.5 py-2.5 space-y-1.5">
+            <div class="kv"><span>Target</span><span class="${r.target_price ? 'ui-gain' : ''}">${r.target_price ? `▲ ${esc(r.target_price)}` : '—'}</span></div>
+            <div class="kv"><span>Stop loss</span><span class="${r.stop_loss ? 'ui-loss' : ''}">${r.stop_loss ? `▼ ${esc(r.stop_loss)}` : '—'}</span></div>
+          </div>
+
+          <div class="grid grid-cols-3 gap-2 mt-auto">
+            <button type="button" data-action="buy" data-ticker="${esc(r.ticker)}" class="ui-btn ui-btn-primary !px-2 !gap-1.5" title="Market buy now">
               <i class="fa-solid fa-cart-shopping"></i> Buy
             </button>
+            <button type="button" data-action="arm-trigger" data-ticker="${esc(r.ticker)}" class="ui-btn !px-2 !gap-1.5" title="Arm an AI-calculated limit trigger">
+              <i class="fa-solid fa-crosshairs"></i> Trigger
+            </button>
+            <button type="button" data-action="inspect" data-idx="${idx}" class="ui-btn !px-2 !gap-1.5" title="Open the committee debate">
+              <i class="fa-solid fa-comments"></i> Debate
+            </button>
           </div>
-        </div>
+        </article>
       `;
     }).join('');
 
@@ -585,65 +601,67 @@ async function loadRecommendations() {
 async function loadScreener() {
   const container = document.getElementById('screenerContainer');
   container.innerHTML = `
-    <div class="col-span-full text-center py-10 text-slate-400 text-xs sm:text-sm">
-      <i class="fa-solid fa-spinner fa-spin text-2xl mb-2 text-emerald-400 block"></i>
-      Scanning liquid universe for high momentum setups...
+    <div class="col-span-full ui-card ui-card-pad adv-prose flex items-center gap-3">
+      <i class="fa-solid fa-spinner fa-spin ui-faint"></i>
+      Scanning for momentum setups...
     </div>`;
 
   try {
     const res = await fetch(`/api/screener?market=${currentScreenerMarket}`);
     const candidates = await res.json();
 
-    if (candidates.length === 0) {
-      container.innerHTML = `<div class="col-span-full text-center py-8 text-slate-400 text-sm">No qualifying breakout candidates found in this session.</div>`;
+    if (!Array.isArray(candidates) || candidates.length === 0) {
+      container.innerHTML = `<div class="col-span-full ui-card ui-card-pad adv-prose">No qualifying candidates right now.</div>`;
       return;
     }
 
-    container.innerHTML = candidates.map(c => `
-      <div class="stock-card bg-cardBg border border-borderCol rounded-xl p-4 shadow-sm space-y-3 flex flex-col justify-between">
-        <div>
-          <div class="flex items-center justify-between">
-            <div>
-              <span class="font-bold text-white text-sm sm:text-base">${esc(c.ticker)}</span>
-              <span class="text-xs text-slate-400 ml-1.5">${esc(c.name)}</span>
-            </div>
-            <span class="text-xs font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20 whitespace-nowrap" title="Pre-filter score from the technical scanner (not the committee score)">
-              Scanner-score ${esc(c.pre_score)}
-            </span>
+    container.innerHTML = candidates.map(c => {
+      const ret = Number(c.return_5d_pct);
+      const retUp = Number.isFinite(ret) && ret >= 0;
+      const retHtml = Number.isFinite(ret)
+        ? `<span class="${retUp ? 'ui-gain' : 'ui-loss'}">${retUp ? '▲ +' : '▼ '}${esc(c.return_5d_pct)}%</span>`
+        : '<span>—</span>';
+      const hot = Number(c.rsi) > 70;
+      return `
+      <article class="stock-card ui-card ui-card-pad flex flex-col gap-3">
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0 space-y-1">
+            <div class="text-[17px] font-bold text-white">${esc(c.ticker)}</div>
+            <div class="ui-faint text-[13px] truncate">${esc(c.name)}</div>
           </div>
-
-          <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs text-slate-400 mt-2">
-            <span>Price: <strong class="text-white">${esc(c.price)} ${esc(c.currency)}</strong></span>
-            <span>RSI(14): <strong class="${c.rsi > 70 ? 'text-amber-400' : 'text-slate-200'}">${esc(c.rsi)}</strong></span>
-            <span>5d: <strong class="${c.return_5d_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${c.return_5d_pct >= 0 ? '+' : ''}${esc(c.return_5d_pct)}%</strong></span>
-          </div>
-
-          <div class="text-[11px] text-slate-300 mt-2 bg-slate-900/70 p-2 rounded border border-borderCol/60">
-            <div class="font-semibold text-cyan-400 mb-0.5">${esc(c.setup_type)}</div>
-            <div class="text-slate-400">${esc(c.notes)}</div>
-          </div>
+          ${adviceScoreBlock(c.pre_score, 'Scanner')}
         </div>
 
-        <button type="button" data-action="analyze" data-ticker="${esc(c.ticker)}" class="w-full min-h-[44px] px-3 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 text-xs font-bold flex items-center justify-center gap-1.5 transition-all">
-          <i class="fa-solid fa-users-viewfinder"></i> Analyze with Committee
+        <div>
+          ${c.setup_type ? `<div class="text-[14px] font-semibold text-white">${esc(c.setup_type)}</div>` : ''}
+          ${c.notes ? `<p class="adv-prose adv-clamp mt-0.5">${esc(c.notes)}</p>` : ''}
+        </div>
+
+        <div class="ui-inset px-3.5 py-2.5 space-y-1.5">
+          <div class="kv"><span>Price</span><span>${advicePrice(c.price, c.currency)}</span></div>
+          <div class="kv"><span>RSI (14)</span><span${hot ? ' style="color: var(--warn)"' : ''}>${esc(c.rsi)}${hot ? ' · overbought' : ''}</span></div>
+          <div class="kv"><span>5 days</span>${retHtml}</div>
+        </div>
+
+        <button type="button" data-action="analyze" data-ticker="${esc(c.ticker)}" class="ui-btn ui-btn-primary w-full mt-auto">
+          <i class="fa-solid fa-users-viewfinder"></i> Analyze
         </button>
-      </div>
-    `).join('');
+      </article>
+    `;
+    }).join('');
 
   } catch (e) {
     console.error('Failed to load screener:', e);
-    container.innerHTML = `<div class="col-span-full text-center py-8 text-rose-400 text-sm">Failed to load screener.</div>`;
+    container.innerHTML = `<div class="col-span-full ui-card ui-card-pad adv-prose ui-loss">Failed to load the screener.</div>`;
   }
 }
 
 function filterScreener(market) {
   currentScreenerMarket = market;
   document.querySelectorAll('.screener-filter-btn').forEach(b => {
-    if (b.dataset.market === market) {
-      b.className = 'screener-filter-btn px-3 py-2 rounded-md bg-emerald-600 text-white';
-    } else {
-      b.className = 'screener-filter-btn px-3 py-2 rounded-md text-slate-400 hover:text-white';
-    }
+    const active = b.dataset.market === market;
+    b.classList.toggle('is-active', active);
+    b.setAttribute('aria-pressed', active ? 'true' : 'false');
   });
   loadScreener();
 }
@@ -665,7 +683,7 @@ async function analyzeDirect(ticker) {
   const btn = document.getElementById('analyzeBtn');
   const outputArea = document.getElementById('debateOutputArea');
 
-  btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Convening Committee...`;
+  btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Convening...`;
   btn.disabled = true;
 
   try {
@@ -690,69 +708,71 @@ async function analyzeDirect(ticker) {
     console.error('Analysis error:', e);
     showToast('Network error during analysis.', true);
   } finally {
-    btn.innerHTML = `<i class="fa-solid fa-users-viewfinder"></i> Convene Debate`;
+    btn.innerHTML = `<i class="fa-solid fa-users-viewfinder"></i> Convene debate`;
     btn.disabled = false;
   }
 }
 
 function renderDebateReport(report) {
-  const isBuy = report.action === 'STRONG_BUY' || report.action === 'BUY';
-  const actionColor = isBuy ? 'text-emerald-400 bg-emerald-500/20 border-emerald-500/30' : (report.action === 'SELL' ? 'text-rose-400 bg-rose-500/20 border-rose-500/30' : 'text-amber-400 bg-amber-500/20 border-amber-500/30');
-
   // Verdict Card
   const risk = report.risk || {};
-  const actionText = String(report.action || '').replace('_', ' ');
+  const rr = risk.risk_reward_ratio;
   document.getElementById('verdictCard').innerHTML = `
-    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-borderCol/60 pb-4">
-      <div class="min-w-0">
-        <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
-          <h2 class="text-xl font-bold text-white">${esc(report.ticker)}</h2>
-          <span class="text-xs text-slate-400">${esc(report.name)}</span>
-          <span class="text-xs px-2.5 py-0.5 rounded-full font-bold border ${actionColor}">${esc(actionText)}</span>
+    <div class="flex items-start justify-between gap-3">
+      <div class="min-w-0 space-y-1">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="text-[22px] font-bold text-white leading-tight">${esc(report.ticker)}</span>
+          ${adviceVerdictBadge(report.action)}
         </div>
-        <p class="text-xs text-slate-300 mt-1 max-w-2xl">${esc(report.summary)}</p>
+        ${report.name ? `<div class="ui-faint text-[13px] truncate">${esc(report.name)}</div>` : ''}
       </div>
-
-      <div class="flex items-center justify-between sm:justify-end gap-3">
-        <div class="text-left sm:text-right">
-          <div class="text-2xl font-black text-emerald-400">${esc(report.consensus_score)}</div>
-          <div class="text-[10px] text-slate-400 uppercase">Consensus Score</div>
-          ${scoreSourceBadge(report.score_source)}
-        </div>
-        <button type="button" data-action="buy" data-ticker="${esc(report.ticker)}" class="px-4 min-h-[44px] rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-md active:scale-95 transition-all">
-          <i class="fa-solid fa-cart-shopping mr-1"></i> Execute Trade
-        </button>
-      </div>
+      ${adviceScoreBlock(report.consensus_score, 'Consensus', scoreSourceBadge(report.score_source))}
     </div>
 
-    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs mt-3">
-      <div><span class="text-slate-500 block sm:inline">Current Price:</span> <strong class="text-white">${esc(report.price)} ${esc(report.currency)}</strong></div>
-      <div><span class="text-slate-500 block sm:inline">Target Profit:</span> <strong class="text-emerald-400">${esc(risk.take_profit_price)}</strong></div>
-      <div><span class="text-slate-500 block sm:inline">Stop Loss:</span> <strong class="text-rose-400">${esc(risk.stop_loss_price)}</strong></div>
-      <div><span class="text-slate-500 block sm:inline">Risk-to-Reward:</span> <strong class="text-cyan-400">${esc(risk.risk_reward_ratio)}:1</strong></div>
+    ${report.summary ? `<p class="adv-prose">${esc(report.summary)}</p>` : ''}
+
+    <div class="ui-inset px-3.5 py-2.5 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1.5">
+      <div class="kv"><span>Price</span><span>${advicePrice(report.price, report.currency)}</span></div>
+      <div class="kv"><span>Target</span><span class="${risk.take_profit_price ? 'ui-gain' : ''}">${risk.take_profit_price ? `▲ ${esc(risk.take_profit_price)}` : '—'}</span></div>
+      <div class="kv"><span>Stop loss</span><span class="${risk.stop_loss_price ? 'ui-loss' : ''}">${risk.stop_loss_price ? `▼ ${esc(risk.stop_loss_price)}` : '—'}</span></div>
+      <div class="kv"><span>Risk / reward</span><span>${rr !== null && rr !== undefined && rr !== '' ? `${esc(rr)} : 1` : '—'}</span></div>
+    </div>
+
+    <div class="grid grid-cols-2 gap-2">
+      <button type="button" data-action="buy" data-ticker="${esc(report.ticker)}" class="ui-btn ui-btn-primary" title="Market buy now">
+        <i class="fa-solid fa-cart-shopping"></i> Buy
+      </button>
+      <button type="button" data-action="arm-trigger" data-ticker="${esc(report.ticker)}" class="ui-btn" title="Arm an AI-calculated limit trigger">
+        <i class="fa-solid fa-crosshairs"></i> Arm trigger
+      </button>
     </div>
   `;
 
-  // Specialist Agents
-  const t = report.technical;
-  document.getElementById('techBiasBadge').textContent = t.bias;
-  document.getElementById('techBiasBadge').className = `text-xs px-2 py-0.5 rounded font-bold ${t.bias === 'BULLISH' ? 'bg-emerald-500/20 text-emerald-400' : (t.bias === 'BEARISH' ? 'bg-rose-500/20 text-rose-400' : 'bg-slate-700 text-slate-300')}`;
-  document.getElementById('techSummaryText').textContent = t.analysis_summary;
+  // Specialist agents: badge text via textContent (never innerHTML), arrow/word plus colour
+  const setBadge = (id, text, tone, mark) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const word = String(text || '');
+    const arrow = mark !== undefined ? mark : (tone === 'gain' ? '▲ ' : (tone === 'loss' ? '▼ ' : ''));
+    el.textContent = word ? arrow + word : '';
+    el.className = `ui-badge${tone ? ' ui-badge-' + tone : ''}${word ? '' : ' hidden'}`;
+  };
 
-  const f = report.fundamental;
-  document.getElementById('fundValuationBadge').textContent = f.valuation;
-  document.getElementById('fundValuationBadge').className = `text-xs px-2 py-0.5 rounded font-bold ${f.valuation === 'UNDERVALUED' ? 'bg-purple-500/20 text-purple-400' : 'bg-slate-700 text-slate-300'}`;
-  document.getElementById('fundSummaryText').textContent = f.analysis_summary;
+  const t = report.technical || {};
+  setBadge('techBiasBadge', t.bias, t.bias === 'BULLISH' ? 'gain' : (t.bias === 'BEARISH' ? 'loss' : ''));
+  document.getElementById('techSummaryText').textContent = t.analysis_summary || '';
 
-  const s = report.sentiment;
-  document.getElementById('sentMoodBadge').textContent = s.mood;
-  document.getElementById('sentMoodBadge').className = `text-xs px-2 py-0.5 rounded font-bold ${s.mood === 'POSITIVE' ? 'bg-amber-500/20 text-amber-400' : 'bg-slate-700 text-slate-300'}`;
-  document.getElementById('sentSummaryText').textContent = s.sentiment_summary;
+  const f = report.fundamental || {};
+  setBadge('fundValuationBadge', f.valuation, f.valuation === 'UNDERVALUED' ? 'gain' : (f.valuation === 'OVERVALUED' ? 'loss' : ''));
+  document.getElementById('fundSummaryText').textContent = f.analysis_summary || '';
 
-  const r = report.risk;
-  document.getElementById('riskApprovedBadge').textContent = r.approved ? 'APPROVED' : 'REJECTED';
-  document.getElementById('riskApprovedBadge').className = `text-xs px-2 py-0.5 rounded font-bold ${r.approved ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}`;
-  document.getElementById('riskSummaryText').textContent = r.risk_summary;
+  const s = report.sentiment || {};
+  setBadge('sentMoodBadge', s.mood, s.mood === 'POSITIVE' ? 'gain' : (s.mood === 'NEGATIVE' ? 'loss' : ''));
+  document.getElementById('sentSummaryText').textContent = s.sentiment_summary || '';
+
+  const r = report.risk || {};
+  setBadge('riskApprovedBadge', r.approved ? 'APPROVED' : 'REJECTED', r.approved ? 'gain' : 'loss', r.approved ? '✓ ' : '✕ ');
+  document.getElementById('riskSummaryText').textContent = r.risk_summary || '';
 
   // Transcript
   document.getElementById('debateTranscriptBox').textContent = report.debate_transcript;
@@ -770,12 +790,13 @@ function inspectReport(idx) {
     consensus_score: r.consensus_score,
     score_source: r.score_source || (r.raw_signals && r.raw_signals.score_source),
     summary: r.summary,
-    price: r.target_price ? (r.target_price * 0.92).toFixed(2) : 100,
-    currency: 'USD',
-    technical: { bias: 'EVALUATED', analysis_summary: r.technical_summary || 'Analysis complete' },
-    fundamental: { valuation: 'ASSESSED', analysis_summary: r.fundamental_summary || 'Valuation recorded' },
-    sentiment: { mood: 'REVIEWED', sentiment_summary: r.sentiment_summary || 'Sentiment factored' },
-    risk: { approved: true, take_profit_price: r.target_price, stop_loss_price: r.stop_loss, risk_reward_ratio: 2.1, risk_summary: r.risk_summary || 'Risk guardrails applied' },
+    // Saved advice has no live price or R:R; show a dash instead of an estimate
+    price: null,
+    currency: '',
+    technical: { bias: '', analysis_summary: r.technical_summary || 'Analysis complete' },
+    fundamental: { valuation: '', analysis_summary: r.fundamental_summary || 'Valuation recorded' },
+    sentiment: { mood: '', sentiment_summary: r.sentiment_summary || 'Sentiment factored' },
+    risk: { approved: true, take_profit_price: r.target_price, stop_loss_price: r.stop_loss, risk_reward_ratio: null, risk_summary: r.risk_summary || 'Risk guardrails applied' },
     debate_transcript: r.debate_transcript || 'Full transcript archived.'
   });
   const out = document.getElementById('debateOutputArea');
@@ -1804,8 +1825,13 @@ let currentMarketFilter = null;
 
 async function loadMarketReview(market = null) {
   if (market !== undefined && market !== null) {
-    currentMarketFilter = market;
+    currentMarketFilter = market || null;   // '' (the "Latest" pill) clears the filter
   }
+  document.querySelectorAll('[data-review-market]').forEach(b => {
+    const active = (b.dataset.reviewMarket || null) === (currentMarketFilter || null);
+    b.classList.toggle('is-active', active);
+    b.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
   try {
     const url = currentMarketFilter ? `/api/market-digest/latest?market=${encodeURIComponent(currentMarketFilter)}` : '/api/market-digest/latest';
     const res = await fetch(url);
@@ -1818,40 +1844,37 @@ async function loadMarketReview(market = null) {
     const textContainer = document.getElementById('reviewTextContainer');
 
     if (data.next_session && nextBadgeEl) {
-      nextBadgeEl.innerHTML = `<i class="fa-regular fa-clock mr-1"></i> Next: <b>${esc(data.next_session.formatted)}</b>`;
+      nextBadgeEl.innerHTML = `<i class="fa-regular fa-clock"></i> Next: <span class="ui-num text-white">${esc(data.next_session.formatted)}</span>`;
     }
 
     if (!data.found) {
       const marketLabel = currentMarketFilter ? `${currentMarketFilter} ` : '';
-      if (headlineEl) headlineEl.innerText = `No ${marketLabel}Market Reviews Recorded Today`;
-      if (contentEl) contentEl.innerHTML = `Click <b>"Run ${esc(currentMarketFilter || 'US')} Review"</b> above to evaluate top momentum candidates and generate daily advice.`;
+      if (headlineEl) headlineEl.innerText = `No ${marketLabel}review yet today`;
+      if (contentEl) contentEl.innerHTML = `Tap <strong class="text-white">Run ${esc(currentMarketFilter || 'US')} review</strong> below to score today's candidates and generate advice.`;
       if (timestampEl) timestampEl.innerText = 'Pending';
       if (textContainer) textContainer.classList.add('hidden');
       return;
     }
 
-    if (timestampEl) timestampEl.innerText = `${data.market || ''} ${data.session || ''} • ${data.timestamp || 'Today'}`.trim();
+    if (timestampEl) timestampEl.innerText = `${data.market || ''} ${data.session || ''} · ${data.timestamp || 'Today'}`.trim();
     if (headlineEl) headlineEl.innerText = data.headline || 'Market Session Review';
 
     let picksHtml = '';
     if (data.top_picks && data.top_picks.length > 0) {
-      picksHtml = '<div class="mt-2 flex flex-wrap gap-2">' + data.top_picks.slice(0, 4).map(p => 
-        `<span class="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-[11px] font-mono font-semibold text-emerald-400">
-          ${esc(p.ticker)}: ${esc(p.action)} (${esc(p.consensus_score)}/100)
-        </span>`
+      picksHtml = '<div class="mt-3 flex flex-wrap gap-2">' + data.top_picks.slice(0, 4).map(p =>
+        `<span class="ui-chip"><span class="ui-num text-white font-semibold">${esc(p.ticker)}</span> ${esc(String(p.action || '').replace('_', ' '))} <span class="ui-num">${esc(p.consensus_score)}</span></span>`
       ).join('') + '</div>';
     }
 
     let holdingsHtml = '';
     const positions = (data.portfolio_state && data.portfolio_state.positions) || [];
     if (positions.length > 0) {
-      holdingsHtml = '<div class="mt-2.5 pt-2 border-t border-slate-800"><div class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5"><i class="fa-solid fa-briefcase text-emerald-400 mr-1"></i> Current Stock Holdings:</div><div class="flex flex-wrap gap-2">' +
+      holdingsHtml = '<div class="mt-3"><div class="ui-eyebrow mb-1.5">Holdings</div><div class="ui-inset px-3.5 py-2.5 space-y-1.5">' +
         positions.map(pos => {
-          const pnlSign = pos.unrealized_pnl_eur >= 0 ? '+' : '';
-          const pnlColor = pos.unrealized_pnl_eur >= 0 ? 'text-emerald-400' : 'text-rose-400';
-          return `<span class="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-700/80 text-[11px] font-mono">
-            <b class="text-white">${esc(pos.ticker)}</b> (${esc(pos.shares)} shs @ ${esc(pos.entry_price_native)} ${esc(pos.currency)}) ➔ <span class="${pnlColor} font-bold">${pnlSign}€${num(pos.unrealized_pnl_eur)} (${pnlSign}${num(pos.unrealized_pnl_pct, 1)}%)</span>
-          </span>`;
+          const up = pos.unrealized_pnl_eur >= 0;
+          const sign = up ? '+' : '';
+          return `<div class="kv"><span><span class="ui-num text-white">${esc(pos.ticker)}</span> <span class="ui-num">${esc(pos.shares)} @ ${esc(pos.entry_price_native)} ${esc(pos.currency)}</span></span>
+            <span class="${up ? 'ui-gain' : 'ui-loss'}">${up ? '▲' : '▼'} ${sign}€${num(pos.unrealized_pnl_eur)} (${sign}${num(pos.unrealized_pnl_pct, 1)}%)</span></div>`;
         }).join('') + '</div></div>';
     }
 
@@ -1871,7 +1894,7 @@ async function loadMarketReview(market = null) {
 }
 
 async function triggerMarketReview(market) {
-  showToast(`⏳ Launching ${market} Opening Review in background...`);
+  showToast(`Starting the ${market} review in the background...`);
   try {
     // Record current latest digest id before running
     const prevRes = await fetch(`/api/market-digest/latest?market=${encodeURIComponent(market)}`);
@@ -1885,7 +1908,7 @@ async function triggerMarketReview(market) {
     });
     const data = await res.json();
     if (res.ok && data.success) {
-      showToast(`🚀 ${market} Review is analyzing candidates. Results will appear shortly...`);
+      showToast(`${market} review is analyzing candidates. Results will appear shortly.`);
       currentMarketFilter = market;
 
       // Poll every 5s for up to 90s for the review to appear or update
@@ -1897,7 +1920,7 @@ async function triggerMarketReview(market) {
           const checkData = await checkRes.json();
           if (checkData.found && checkData.id !== prevId) {
             clearInterval(poll);
-            showToast(`✅ ${market} Market Review generated successfully!`);
+            showToast(`${market} review is ready.`);
             loadMarketReview(market);
             loadWeeklyReviewComparison();
             loadRecommendations();
@@ -1928,6 +1951,7 @@ async function triggerMarketReview(market) {
 let weeklyReviewsCache = [];
 
 async function loadWeeklyReviewComparison() {
+  const STAT = 'ui-num text-[17px] font-semibold mt-1 truncate';
   try {
     const [compRes, weeklyRes] = await Promise.all([
       fetch('/api/reviews/compare'),
@@ -1952,30 +1976,30 @@ async function loadWeeklyReviewComparison() {
     if (archiveCountBadge) archiveCountBadge.innerText = (weeklyReviewsCache || []).length;
 
     if (!comp.has_history || !comp.tracked_picks || comp.tracked_picks.length === 0) {
-      if (winRateEl) { winRateEl.innerText = '--%'; winRateEl.className = 'text-lg font-bold text-slate-400 mt-0.5'; }
+      if (winRateEl) { winRateEl.innerText = '--%'; winRateEl.className = `${STAT} ui-faint`; }
       if (winCountsEl) winCountsEl.innerText = '0 picks evaluated';
-      if (deltaEl) deltaEl.innerText = '€0.00 (+0.0%)';
+      if (deltaEl) { deltaEl.innerText = '€0.00 (+0.0%)'; deltaEl.className = `${STAT} text-white`; }
       if (bestPickEl) bestPickEl.innerText = '--';
       if (picksContainer) {
-        picksContainer.innerHTML = `<div class="text-slate-500 italic p-3 bg-slate-900/40 rounded-lg border border-slate-800/80">
-          No historical picks recorded in past 7 days yet. Run an Opening Review to start tracking.
-        </div>`;
+        picksContainer.innerHTML = `<div class="p-3.5 adv-prose">No picks recorded in the past 7 days yet. Run a market review to start tracking.</div>`;
       }
+      renderWeeklyArchive();
       return;
     }
 
     if (winRateEl) {
       winRateEl.innerText = `${comp.win_rate_pct}%`;
-      winRateEl.className = comp.win_rate_pct >= 50 ? 'text-lg font-bold text-emerald-400 mt-0.5' : 'text-lg font-bold text-rose-400 mt-0.5';
+      winRateEl.className = `${STAT} ${comp.win_rate_pct >= 50 ? 'ui-gain' : 'ui-loss'}`;
     }
     if (winCountsEl) {
       winCountsEl.innerText = `${comp.positive_picks_count}/${comp.total_picks_tracked} picks in profit`;
     }
 
     if (deltaEl) {
-      const sign = comp.portfolio_delta_eur >= 0 ? '+' : '';
-      deltaEl.innerText = `${sign}€${comp.portfolio_delta_eur.toFixed(2)} (${sign}${comp.portfolio_delta_pct.toFixed(2)}%)`;
-      deltaEl.className = comp.portfolio_delta_eur >= 0 ? 'text-lg font-bold text-emerald-400 mt-0.5' : 'text-lg font-bold text-rose-400 mt-0.5';
+      const up = comp.portfolio_delta_eur >= 0;
+      const sign = up ? '+' : '';
+      deltaEl.innerText = `${up ? '▲' : '▼'} ${sign}€${num(comp.portfolio_delta_eur)} (${sign}${num(comp.portfolio_delta_pct)}%)`;
+      deltaEl.className = `${STAT} ${up ? 'ui-gain' : 'ui-loss'}`;
     }
     if (rangeEl && comp.portfolio_trajectory) {
       rangeEl.innerText = comp.portfolio_trajectory;
@@ -1984,8 +2008,9 @@ async function loadWeeklyReviewComparison() {
     if (bestPickEl && comp.best_performer) {
       const bp = comp.best_performer;
       const sign = bp.pnl_pct >= 0 ? '+' : '';
-      bestPickEl.innerText = `${bp.ticker} (${sign}${bp.pnl_pct}%)`;
-      if (bestPickDetailsEl) bestPickDetailsEl.innerText = `${bp.rec_session} | ${bp.status_badge}`;
+      bestPickEl.innerText = `${bp.ticker} ${sign}${bp.pnl_pct}%`;
+      bestPickEl.className = `${STAT} ${bp.pnl_pct >= 0 ? 'ui-gain' : 'ui-loss'}`;
+      if (bestPickDetailsEl) bestPickDetailsEl.innerText = `${bp.rec_session} · ${bp.status_badge}`;
     }
 
     // Render Tracked Picks
@@ -1993,39 +2018,30 @@ async function loadWeeklyReviewComparison() {
       picksContainer.innerHTML = comp.tracked_picks.map(p => {
         const isPos = p.pnl_pct >= 0;
         const sign = isPos ? '+' : '';
-        const pnlCol = isPos ? 'text-emerald-400' : 'text-rose-400';
-        
-        let badgeClass = 'bg-slate-700/50 text-slate-300 border-slate-600';
+
         const badgeText = String(p.status_badge || '');
-        if (badgeText.includes('TARGET')) {
-          badgeClass = 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30';
-        } else if (badgeText.includes('STOP')) {
-          badgeClass = 'bg-rose-500/20 text-rose-300 border-rose-500/30';
-        } else if (isPos) {
-          badgeClass = 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20';
-        } else {
-          badgeClass = 'bg-rose-500/10 text-rose-400 border-rose-500/20';
-        }
+        let badgeClass = 'ui-badge';
+        if (badgeText.includes('TARGET')) badgeClass = 'ui-badge ui-badge-gain';
+        else if (badgeText.includes('STOP')) badgeClass = 'ui-badge ui-badge-loss';
 
         return `
-          <div class="p-3 bg-slate-900/60 rounded-lg border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-            <div>
-              <div class="flex items-center gap-2">
-                <span class="font-bold text-white text-sm">${esc(p.ticker)}</span>
-                <span class="text-xs text-slate-400">${esc(p.name)}</span>
-                <span class="text-[10px] px-2 py-0.5 rounded border ${badgeClass} font-semibold">${esc(p.status_badge)}</span>
+          <div class="p-3.5 space-y-2">
+            <div class="flex items-start justify-between gap-3">
+              <div class="min-w-0">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="text-[15px] font-bold text-white">${esc(p.ticker)}</span>
+                  ${badgeText ? `<span class="${badgeClass}">${esc(badgeText)}</span>` : ''}
+                </div>
+                <div class="ui-faint text-[13px] truncate">${esc(p.name)}</div>
               </div>
-              <div class="text-xs text-slate-400 mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
-                <span>Advised In: <strong class="text-slate-200">${esc(p.rec_session)}</strong></span>
-                <span>Rec Price: <strong class="text-slate-300">${esc(p.rec_price)} ${esc(p.currency)}</strong></span>
-                <span>Live Price: <strong class="text-white">${esc(p.current_price)} ${esc(p.currency)}</strong></span>
-                ${p.target_price ? `<span>TP: <code class="text-emerald-400">${esc(p.target_price)}</code></span>` : ''}
-                ${p.stop_loss ? `<span>SL: <code class="text-rose-400">${esc(p.stop_loss)}</code></span>` : ''}
-              </div>
+              <div class="ui-num text-[15px] font-semibold shrink-0 ${isPos ? 'ui-gain' : 'ui-loss'}">${isPos ? '▲' : '▼'} ${sign}${esc(p.pnl_pct)}%</div>
             </div>
-            <div class="sm:text-right">
-              <div class="text-sm font-bold ${pnlCol}">${sign}${esc(p.pnl_pct)}%</div>
-              <div class="text-[10px] text-slate-500">Performance vs Rec</div>
+            <div class="space-y-1">
+              <div class="kv"><span>Advised</span><span>${esc(p.rec_session)}</span></div>
+              <div class="kv"><span>At advice</span><span>${advicePrice(p.rec_price, p.currency)}</span></div>
+              <div class="kv"><span>Now</span><span>${advicePrice(p.current_price, p.currency)}</span></div>
+              ${p.target_price ? `<div class="kv"><span>Target</span><span class="ui-gain">▲ ${esc(p.target_price)}</span></div>` : ''}
+              ${p.stop_loss ? `<div class="kv"><span>Stop loss</span><span class="ui-loss">▼ ${esc(p.stop_loss)}</span></div>` : ''}
             </div>
           </div>
         `;
@@ -2046,11 +2062,11 @@ function toggleWeeklyArchive() {
   const isHidden = container.classList.contains('hidden');
   if (isHidden) {
     container.classList.remove('hidden');
-    if (icon) icon.className = 'fa-solid fa-chevron-down text-[10px]';
+    if (icon) icon.className = 'fa-solid fa-chevron-down text-[12px]';
     renderWeeklyArchive();
   } else {
     container.classList.add('hidden');
-    if (icon) icon.className = 'fa-solid fa-chevron-right text-[10px]';
+    if (icon) icon.className = 'fa-solid fa-chevron-right text-[12px]';
   }
 }
 
@@ -2058,21 +2074,21 @@ function renderWeeklyArchive() {
   const container = document.getElementById('weeklyArchiveContainer');
   if (!container || !weeklyReviewsCache) return;
 
-  if (weeklyReviewsCache.length === 0) {
-    container.innerHTML = `<div class="text-slate-500 text-xs italic">No past reviews archived yet.</div>`;
+  if (!Array.isArray(weeklyReviewsCache) || weeklyReviewsCache.length === 0) {
+    container.innerHTML = `<div class="adv-prose ui-faint px-1">No past reviews archived yet.</div>`;
     return;
   }
 
   container.innerHTML = weeklyReviewsCache.map(r => {
     const picks = (r.top_picks || []).map(p => p.ticker).join(', ') || 'None'; // escaped below
     return `
-      <div class="p-3 bg-slate-900/80 rounded-lg border border-slate-800 text-xs space-y-1">
-        <div class="flex flex-wrap items-center justify-between gap-1">
-          <span class="font-bold text-slate-200">${esc(r.market)} ${esc(r.session)} — ${esc(r.headline)}</span>
-          <span class="text-[10px] font-mono text-slate-500">${esc(r.timestamp)}</span>
+      <div class="ui-inset p-3.5 space-y-1.5">
+        <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+          <span class="text-[14px] font-semibold text-white">${esc(r.market)} ${esc(r.session)} · ${esc(r.headline)}</span>
+          <span class="ui-num ui-faint text-[12px]">${esc(r.timestamp)}</span>
         </div>
-        <div class="text-slate-400">${safeRichText(r.content)}</div>
-        <div class="text-[11px] text-slate-500">Picks: <strong class="text-slate-300">${esc(picks)}</strong></div>
+        <div class="adv-prose adv-clamp">${safeRichText(r.content)}</div>
+        <div class="ui-faint text-[13px]">Picks: <span class="ui-num text-white">${esc(picks)}</span></div>
       </div>
     `;
   }).join('');
