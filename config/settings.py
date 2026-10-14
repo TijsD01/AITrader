@@ -67,6 +67,20 @@ class Settings(BaseSettings):
     TRIGGER_EXPIRY_DAYS: int = 7            # Pending price triggers older than this are marked EXPIRED
     ENFORCE_MARKET_HOURS: bool = True       # When true, trades are strictly blocked when markets are closed
 
+    # Shadow paper portfolios: simulated variants that follow the main bot's committee verdicts
+    # with other parameters, to see whether changing them pays off. They never place real orders.
+    SHADOW_ENABLED: bool = True
+    SHADOW_STRATEGIES: str = "aggressive"   # Comma-separated preset keys: aggressive, momentum, baseline (or custom keys)
+    SHADOW_INITIAL_CAPITAL: Optional[float] = None  # Starting cash per shadow (empty = INITIAL_PAPER_CAPITAL)
+    SHADOW_CUSTOM_STRATEGIES: str = ""      # JSON: {"key": {"base": "aggressive", "score_offset": -5, ...}}
+
+    @field_validator("SHADOW_INITIAL_CAPITAL", mode="before")
+    @classmethod
+    def _parse_shadow_capital(cls, v):
+        if v in ("", None) or (isinstance(v, str) and not v.strip()):
+            return None
+        return float(v)
+
     # Real Money Trading & Broker Scheme
     TRADING_MODE: str = "PAPER"             # "PAPER" or "LIVE"
     LIVE_TRADING_ENABLED: bool = False      # Explicit safety interlock for real money
