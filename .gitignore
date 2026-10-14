@@ -38,6 +38,8 @@ data/*.db
 data/*.sqlite
 data/*.sqlite3
 data/*.db-journal
+data/*.db-wal
+data/*.db-shm
 
 # Testing & Coverage
 .pytest_cache/
@@ -57,3 +59,6 @@ htmlcov/
 # Logs
 *.log
 logs/
+
+# Local agent tooling
+.agents/
