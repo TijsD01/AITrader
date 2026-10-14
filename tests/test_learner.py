@@ -121,7 +121,7 @@ async def test_telegram_learning_and_review_commands():
     mock_update_learning = {
         "message": {
             "text": "/learning",
-            "chat": {"id": 999999}
+            "chat": {"id": 12345}
         }
     }
     with patch.object(telegram_bot, "_reply_chat", return_value=None) as mock_reply:
@@ -135,7 +135,7 @@ async def test_telegram_learning_and_review_commands():
     mock_update_calibrate = {
         "message": {
             "text": "/calibrate",
-            "chat": {"id": 999999}
+            "chat": {"id": 12345}
         }
     }
     with patch.object(telegram_bot, "_reply_chat", return_value=None) as mock_reply:
@@ -147,10 +147,10 @@ async def test_telegram_learning_and_review_commands():
     mock_update_review = {
         "message": {
             "text": "/review EU",
-            "chat": {"id": 999999}
+            "chat": {"id": 12345}
         }
     }
     with patch.object(telegram_bot, "_reply_chat", return_value=None) as mock_reply, \
          patch.object(trading_scheduler, "run_market_session", return_value=None) as mock_run:
         await telegram_bot._handle_update(mock_update_review)
-        mock_run.assert_called_once_with(market="EU", session="OPEN", target_chat_id=999999)
+        mock_run.assert_called_once_with(market="EU", session="OPEN", target_chat_id=12345)

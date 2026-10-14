@@ -375,7 +375,7 @@ async def test_telegram_triggers_command():
     mock_update = {
         "message": {
             "text": "/triggers",
-            "chat": {"id": 123456789}
+            "chat": {"id": 12345}
         }
     }
     with patch.object(telegram_bot, "_reply_chat", return_value=None) as mock_reply:

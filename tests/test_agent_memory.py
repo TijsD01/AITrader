@@ -274,10 +274,18 @@ async def test_history_recap_uses_lesson_and_handles_null_pnl_pct():
         ))
         await session.commit()
 
-    recap = await ColdStartEngine._build_history_recap({"available": True, "total_equity_eur": 100.0})
-    assert "RECAP.AS" in recap
-    assert "PnL: €-3.50" in recap
-    assert "unique-lesson-marker" in recap
+    try:
+        recap = await ColdStartEngine._build_history_recap({"available": True, "total_equity_eur": 100.0})
+        assert "RECAP.AS" in recap
+        assert "PnL: €-3.50" in recap
+        assert "unique-lesson-marker" in recap
+    finally:
+        # Remove the future-dated rows so they don't skew other tests (e.g. learner calibration)
+        from sqlalchemy import delete
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(Trade).where(Trade.ticker == "RECAP.AS"))
+            await session.execute(delete(TradeLesson).where(TradeLesson.ticker == "RECAP.AS"))
+            await session.commit()
 
 
 @pytest.mark.asyncio

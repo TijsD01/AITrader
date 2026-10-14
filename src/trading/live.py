@@ -507,7 +507,12 @@ class LiveBroker(BaseBroker):
                 order_action="BUY"
             )
             fee_eur = fee_info["fee_eur"]
-            if actual_cost_eur + fee_eur > cash_eur:
+            # Leave room for the commission when the allocation uses all remaining cash (same as paper)
+            if actual_cost_eur + fee_eur > cash_eur and cash_eur > fee_eur:
+                import math
+                shares = math.floor(((cash_eur - fee_eur) / price_eur) * 10000.0) / 10000.0
+                actual_cost_eur = round(shares * price_eur, 2)
+            if shares <= 0 or actual_cost_eur + fee_eur > cash_eur:
                 return {"success": False, "message": f"Insufficient cash (€{cash_eur:.2f}) for {ticker} cost €{actual_cost_eur:.2f} plus fee €{fee_eur:.2f}."}
 
             # 9. Dispatch real order to broker API

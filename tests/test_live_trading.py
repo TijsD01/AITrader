@@ -155,7 +155,7 @@ async def test_live_broker_full_execution_lifecycle():
                 rationale="High conviction live trade test",
                 is_manual=True
             )
-            assert buy_res["success"] is True
+            assert buy_res["success"] is True, buy_res
             assert buy_res["is_live"] is True
             assert buy_res["broker"] == "IBKR"
             assert buy_res["broker_order_id"].startswith("ibkr_")

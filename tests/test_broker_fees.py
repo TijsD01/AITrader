@@ -214,7 +214,9 @@ async def test_live_execution_fee_accounting():
             await session.commit()
 
         mock_quote = {"price": 100.0, "currency": "USD", "name": "NVIDIA Corp"}
-        with patch("src.trading.live.market_data_provider.get_stock_data", return_value=mock_quote):
+        with patch("src.trading.live.market_data_provider.get_stock_data", return_value=mock_quote), \
+             patch.object(live_broker, "_dispatch_real_order", return_value="ibkr_2001"), \
+             patch.object(live_broker, "_dispatch_real_close", return_value="ibkr_exit_2002"):
             # Execute BUY of €100
             buy_res = await live_broker.execute_buy(
                 ticker=ticker,

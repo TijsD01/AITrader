@@ -55,3 +55,9 @@ def setup_test_db():
             TEST_DB_FILE.unlink()
         except Exception:
             pass
+
+
+@pytest.fixture(autouse=True)
+def _telegram_owner_chat(monkeypatch):
+    """The Telegram bot only accepts commands from the configured owner chat (12345 in tests)."""
+    monkeypatch.setattr(settings, "TELEGRAM_CHAT_ID", "12345")
