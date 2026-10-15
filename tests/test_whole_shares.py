@@ -101,6 +101,8 @@ async def test_ibkr_bracket_tif_explicit():
     ib = SimpleNamespace(
         isConnected=lambda: True,
         qualifyContractsAsync=AsyncMock(),
+        reqContractDetailsAsync=AsyncMock(return_value=[SimpleNamespace(validExchanges="SMART", marketRuleIds="26")]),
+        reqMarketRuleAsync=AsyncMock(return_value=[SimpleNamespace(lowEdge=0.0, increment=0.01)]),
         bracketOrder=lambda **kw: bracket,
         placeOrder=lambda c, o: placed.append(o) or SimpleNamespace(order=o, orderStatus=SimpleNamespace(status="Submitted"), log=[]),
     )
@@ -108,3 +110,14 @@ async def test_ibkr_bracket_tif_explicit():
     with patch.object(settings, "LIVE_BROKER", "ibkr"), patch.object(broker, "_get_ib", AsyncMock(return_value=ib)):
         assert await broker._dispatch_real_order("NVDA", 1, 220.5, "USD", 215.0, 230.0) == "ibkr_0"
     assert [o.tif for o in placed] == ["DAY", "GTC", "GTC"]
+
+
+def test_round_to_tick_follows_price_band():
+    # Euronext rule 1874 as IBKR returns it: TTE.PA at 80.735 was rejected with Error 110
+    from src.trading.live import round_to_tick
+    euronext = [(0.0, 0.0001), (1.0, 0.0002), (5.0, 0.001), (10.0, 0.002), (20.0, 0.005), (50.0, 0.01), (100.0, 0.02), (200.0, 0.05)]
+    assert round_to_tick(80.735, euronext) in (80.73, 80.74)
+    assert round_to_tick(870.77, euronext) == 870.75
+    assert round_to_tick(150.03, euronext) in (150.02, 150.04)
+    assert round_to_tick(12.3456, euronext) == 12.346
+    assert round_to_tick(220.5, []) == 220.5

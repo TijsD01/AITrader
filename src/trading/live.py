@@ -17,6 +17,12 @@ from src.trading.cash_flows import scan_live_cash_flows, net_cash_flows_eur
 
 logger = logging.getLogger(__name__)
 
+
+def round_to_tick(price: float, increments: List[Tuple[float, float]]) -> float:
+    """Rounds a price to the tick that applies at that price; increments is an IBKR market rule [(lowEdge, increment), ...] in ascending order."""
+    tick = next((inc for low, inc in reversed(increments) if price >= low), 0.01)
+    return round(round(price / tick) * tick, 6)
+
 class LiveBroker(BaseBroker):
     """
     Live Real-Money Broker for the Antigravity Multi-Agent Trading System.
@@ -170,12 +176,17 @@ class LiveBroker(BaseBroker):
                 if ib and ib.isConnected():
                     contract = Stock(ticker.upper().split(".")[0], "SMART", currency.upper())
                     await ib.qualifyContractsAsync(contract)
+                    # Exchanges reject prices off their tick grid (Error 110); Euronext/Xetra ticks grow with the price
+                    details = (await ib.reqContractDetailsAsync(contract))[0]
+                    exchanges, rule_ids = details.validExchanges.split(","), details.marketRuleIds.split(",")
+                    rule_id = rule_ids[exchanges.index(contract.primaryExchange)] if contract.primaryExchange in exchanges else rule_ids[0]
+                    increments = [(r.lowEdge, r.increment) for r in await ib.reqMarketRuleAsync(int(rule_id))]
                     bracket = ib.bracketOrder(
                         action="BUY",
                         quantity=shares,
-                        limitPrice=price,
-                        takeProfitPrice=take_profit if take_profit else round(price * 1.10, 2),
-                        stopLossPrice=stop_loss if stop_loss else round(price * 0.95, 2)
+                        limitPrice=round_to_tick(price, increments),
+                        takeProfitPrice=round_to_tick(take_profit or price * 1.10, increments),
+                        stopLossPrice=round_to_tick(stop_loss or price * 0.95, increments)
                     )
                     # Explicit TIF avoids IBKR's preset-override notice (10349); TP/SL must survive the close
                     for order in bracket:
