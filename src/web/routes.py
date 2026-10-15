@@ -1,7 +1,10 @@
 import asyncio
 import logging
+import time
+import uuid
 from typing import Dict, Any, List, Optional, Tuple
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import select, desc, func
 
@@ -54,6 +57,7 @@ class CreateTriggerFromAIRequest(BaseModel):
     ticker: str
     allocation_eur: Optional[float] = None
     force: bool = False  # arm despite a soft block (HOLD verdict, low score); hard blocks stay blocked
+    report_job_id: Optional[str] = None  # reuse the committee report of this earlier arm job instead of re-running it
 
 class SettingsUpdateRequest(BaseModel):
     auto_buy_enabled: Optional[bool] = None
@@ -171,9 +175,44 @@ async def get_recommendations(limit: int = 15):
             for r in reports
         ]
 
+# Committee runs take minutes, so they run as background jobs that survive the client disconnecting.
+# shortcut: in-memory only, a server restart loses jobs (the client gets a 404), upgrade to a DB table if that bites.
+_jobs: Dict[str, Dict[str, Any]] = {}
+_JOB_TTL_SECONDS = 3600
+
+async def _run_job(job: Dict[str, Any], coro) -> None:
+    try:
+        job["body"], job["status_code"] = await coro, 200
+    except HTTPException as e:
+        job["status_code"], job["body"] = e.status_code, {"detail": e.detail}
+    except Exception:
+        logging.getLogger(__name__).exception("Background job %s (%s) failed", job["id"], job["kind"])
+        job["status_code"], job["body"] = 500, {"detail": "Internal error while running the committee."}
+    job["status"], job["finished_at"] = "done", time.time()
+
+def _start_job(kind: str, ticker: str, make_coro) -> JSONResponse:
+    now = time.time()
+    for jid in [j for j, v in _jobs.items() if v["finished_at"] and now - v["finished_at"] > _JOB_TTL_SECONDS]:
+        del _jobs[jid]
+    job = {"id": uuid.uuid4().hex, "kind": kind, "ticker": ticker, "status": "running", "status_code": None,
+           "body": None, "report": None, "finished_at": None}
+    _jobs[job["id"]] = job
+    job["task"] = asyncio.create_task(_run_job(job, make_coro(job)))
+    return JSONResponse({"job_id": job["id"]}, status_code=202)
+
+@router.get("/api/jobs/{job_id}")
+async def get_job(job_id: str):
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found (the server may have restarted).")
+    return {k: job[k] for k in ("status", "kind", "ticker", "status_code", "body")}
+
 # 3. On-Demand Analysis
 @router.post("/api/analyze")
 async def analyze_ticker(req: AnalyzeRequest):
+    return _start_job("analyze", req.ticker.strip().upper(), lambda job: _analyze(req))
+
+async def _analyze(req: AnalyzeRequest):
     ticker = req.ticker.strip().upper()
     data = await asyncio.to_thread(market_data_provider.get_stock_data, ticker)
     if not data:
@@ -348,10 +387,18 @@ async def create_trigger(req: CreateTriggerRequest):
 
 @router.post("/api/triggers/from-ai")
 async def create_trigger_from_ai(req: CreateTriggerFromAIRequest):
-    """Convenience endpoint: Runs AI committee and arms optimal limit trigger directly."""
+    """Convenience endpoint: Runs AI committee and arms optimal limit trigger directly (as a background job)."""
+    return _start_job("arm", req.ticker.strip().upper(), lambda job: _arm_from_ai(req, job))
+
+async def _arm_from_ai(req: CreateTriggerFromAIRequest, job: Dict[str, Any]):
     ticker, data, summary, available_cash = await _precheck_trigger(req.ticker)
 
-    report = await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
+    prev = _jobs.get(req.report_job_id or "")
+    if prev and prev["kind"] == "arm" and prev["ticker"] == job["ticker"] and prev["report"]:
+        report = prev["report"]
+    else:
+        report = await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
+    job["report"] = report
 
     trigger_type, trigger_price, sl, tp = derive_trigger_levels(report, data["price"])
     alloc_eur = _calculate_safe_allocation(

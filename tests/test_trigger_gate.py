@@ -1,4 +1,5 @@
 """Validation of manually armed triggers: the gate rules, the ticker prechecks and both trigger endpoints."""
+import asyncio
 import json
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -434,8 +435,17 @@ def _api_env(data, report, cash=5000.0, min_score=80, regime=(True, "")):
 
 
 async def _post(path, **body):
+    """from-ai answers 202 with a job id; poll the job and return its outcome in the shape of a direct response."""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        return await client.post(path, json=body)
+        resp = await client.post(path, json=body)
+        if resp.status_code != 202:
+            return resp
+        for _ in range(200):
+            job = (await client.get(f"/api/jobs/{resp.json()['job_id']}")).json()
+            if job["status"] == "done":
+                return SimpleNamespace(status_code=job["status_code"], json=lambda: job["body"], text=str(job["body"]))
+            await asyncio.sleep(0.05)
+        raise AssertionError("job did not finish")
 
 
 @pytest.mark.asyncio

@@ -117,6 +117,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initChart();
   loadAllData();
   switchTabUi('portfolio');
+  resumePendingJob();
 
   // Enter key submits the ticker inputs (on-screen keyboard "Go")
   const analyzeInput = document.getElementById('analyzeInput');
@@ -685,7 +686,61 @@ async function runOnDemandAnalysis() {
   await analyzeDirect(ticker);
 }
 
-async function analyzeDirect(ticker) {
+// Committee runs take minutes and the server runs them as background jobs, so the page can be swiped away
+// and come back: the job is remembered in localStorage and polled until it is done.
+const JOB_KEY = 'pendingCommitteeJob';
+const JOB_LOST_MSG = 'Server restarted, the committee run was lost. Please try again.';
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// Resolves {status, data, jobId} like a plain request would. Pass `resume` ({job_id, ...}) to skip the POST.
+async function runJob(url, body, meta, resume = null) {
+  let job = resume;
+  if (!job) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (res.status !== 202) {
+      const raw = await res.text();
+      let data = null;
+      try { data = raw ? JSON.parse(raw) : null; } catch (e) { data = null; }
+      return { status: res.status, data, raw };
+    }
+    job = { ...meta, job_id: (await res.json()).job_id };
+    localStorage.setItem(JOB_KEY, JSON.stringify(job));
+  }
+  for (;;) {
+    try {
+      const res = await fetch(`/api/jobs/${job.job_id}`);
+      if (res.status === 404) {
+        localStorage.removeItem(JOB_KEY);
+        return { status: 404, data: { detail: JOB_LOST_MSG }, lost: true };
+      }
+      if (res.ok) {
+        const j = await res.json();
+        if (j.status === 'done') {
+          localStorage.removeItem(JOB_KEY);
+          return { status: j.status_code, data: j.body, jobId: job.job_id };
+        }
+      }
+    } catch (e) { /* app was backgrounded or offline: keep polling */ }
+    await sleep(3000);
+  }
+}
+
+function resumePendingJob() {
+  let job = null;
+  try { job = JSON.parse(localStorage.getItem(JOB_KEY)); } catch (e) { /* ignore */ }
+  if (!job || !job.job_id) return;
+  if (job.kind === 'arm') {
+    switchTab('triggers');
+    armTriggerFlow(job.ticker, { resume: job, button: document.getElementById('armTriggerBtn') });
+  }
+  else analyzeDirect(job.ticker, job);
+}
+
+async function analyzeDirect(ticker, resume = null) {
   switchTab('debate');
   document.getElementById('analyzeInput').value = ticker;
   const btn = document.getElementById('analyzeBtn');
@@ -695,20 +750,14 @@ async function analyzeDirect(ticker) {
   btn.disabled = true;
 
   try {
-    const res = await fetch('/api/analyze', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ticker: ticker })
-    });
+    const { status, data } = await runJob('/api/analyze', { ticker: ticker }, { kind: 'analyze', ticker }, resume);
 
-    if (!res.ok) {
-      const err = await res.json();
-      showToast(err.detail || 'Analysis failed', true);
+    if (status !== 200) {
+      showToast((data && data.detail) || 'Analysis failed', true);
       return;
     }
 
-    const report = await res.json();
-    renderDebateReport(report);
+    renderDebateReport(data);
     outputArea.classList.remove('hidden');
     showToast(`Committee completed review for ${ticker}!`);
 
@@ -1814,17 +1863,14 @@ function parseTriggerFailure(status, data, raw) {
   return info;
 }
 
-async function postArmTrigger(ticker, force) {
-  const res = await fetch('/api/triggers/from-ai', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ticker: ticker, force: !!force })
-  });
-  const raw = await res.text();
-  let data = null;
-  try { data = raw ? JSON.parse(raw) : null; } catch (e) { data = null; }
-  if (res.ok && data && data.success) return { ok: true, status: res.status, data };
-  return { ok: false, status: res.status, error: parseTriggerFailure(res.status, data, raw) };
+async function postArmTrigger(ticker, force, reportJobId = null, resume = null) {
+  const { status, data, raw, jobId } = await runJob(
+    '/api/triggers/from-ai',
+    { ticker: ticker, force: !!force, report_job_id: reportJobId },
+    { kind: 'arm', ticker }, resume
+  );
+  if (status === 200 && data && data.success) return { ok: true, status, data, jobId };
+  return { ok: false, status, jobId, error: parseTriggerFailure(status, data, raw) };
 }
 
 // "Arm anyway?" text for a soft block (verdict is not a buy, or score too low)
@@ -1840,7 +1886,7 @@ let triggerArmBusy = false;
 
 // Shared by the Triggers tab input and the Trigger buttons on advice cards.
 // Resolves true when a trigger was armed.
-async function armTriggerFlow(rawTicker, { button = null, announce = false } = {}) {
+async function armTriggerFlow(rawTicker, { button = null, announce = false, resume = null } = {}) {
   clearTriggerFeedback();
   const typed = String(rawTicker || '').trim();
   if (!typed) {
@@ -1860,7 +1906,7 @@ async function armTriggerFlow(rawTicker, { button = null, announce = false } = {
     showToast('Already arming a trigger, please wait.', 'info');
     return false;
   }
-  if (!confirmArmTrigger(ticker)) return false;
+  if (!resume && !confirmArmTrigger(ticker)) return false;
 
   triggerArmBusy = true;
   if (button) {
@@ -1870,7 +1916,7 @@ async function armTriggerFlow(rawTicker, { button = null, announce = false } = {
   if (announce) showToast(`Analysing ${ticker} and arming an entry trigger...`, 'info');
 
   try {
-    let out = await postArmTrigger(ticker, false);
+    let out = await postArmTrigger(ticker, false, null, resume);
     // Soft block (HOLD verdict, low score): the user may override it explicitly
     if (!out.ok && out.status === 422 && out.error.overridable) {
       const err = out.error;
@@ -1879,7 +1925,7 @@ async function armTriggerFlow(rawTicker, { button = null, announce = false } = {
         showToast(`${ticker} was not armed.`, 'info');
         return false;
       }
-      out = await postArmTrigger(ticker, true);
+      out = await postArmTrigger(ticker, true, out.jobId);
     }
 
     if (out.ok) {
