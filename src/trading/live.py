@@ -354,6 +354,27 @@ class LiveBroker(BaseBroker):
             available_cash = max(0.0, usable_cash - pending_alloc)
             equity = sum(round(p.current_price_eur * p.shares, 2) for p in positions)
             total_val = round(cash + equity, 2)
+            # Portfolio value comes from IBKR: fresh account summary, else the last synced snapshot, else local quotes
+            value_source = "local"
+            ib_total = ib_equity = None
+            if settings.LIVE_BROKER.lower() == "ibkr":
+                try:
+                    async def _fresh():
+                        ib = await self._get_ib(timeout=2.0)
+                        if not (ib and ib.isConnected()):
+                            return None, None
+                        _, t, e = await self._fetch_ibkr_account_values(ib)
+                        return t, e
+                    ib_total, ib_equity = await asyncio.wait_for(_fresh(), timeout=4.0)
+                except Exception as e:
+                    logger.debug(f"Fresh IBKR account values unavailable: {e}")
+                if ib_total is not None:
+                    value_source = "ibkr"
+                elif snapshot and snapshot.total_value_eur:
+                    ib_total, ib_equity, value_source = snapshot.total_value_eur, snapshot.equity_eur, "snapshot"
+            if ib_total is not None:
+                total_val = round(ib_total, 2)
+                equity = ib_equity if ib_equity is not None else total_val - cash
             unrealized_pnl = sum(round(p.unrealized_pnl_eur, 2) for p in positions)
             daily_loss = await self.get_daily_realized_loss_eur()
 
@@ -385,6 +406,7 @@ class LiveBroker(BaseBroker):
                 "reserved_triggers_eur": round(pending_alloc, 2),
                 "equity_eur": round(equity, 2),
                 "total_value_eur": total_val,
+                "value_source": value_source,
                 "unrealized_pnl_eur": round(unrealized_pnl, 2),
                 "total_return_pct": total_return_pct,
                 "initial_capital_eur": round(initial_cap, 2),
@@ -1328,7 +1350,7 @@ class LiveBroker(BaseBroker):
                     select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True).order_by(desc(PortfolioSnapshot.timestamp), desc(PortfolioSnapshot.id))
                 )
                 latest = snap_res.scalars().first()
-                if latest and latest.cash_eur == ib_cash:
+                if latest and latest.cash_eur == ib_cash and (ib_total is None or latest.total_value_eur == ib_total) and (ib_equity is None or latest.equity_eur == ib_equity):
                     return
 
                 pos_res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == True))
