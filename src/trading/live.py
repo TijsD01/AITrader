@@ -372,20 +372,22 @@ class LiveBroker(BaseBroker):
             total_val = round(cash + equity, 2)
             # Portfolio value comes from IBKR: fresh account summary, else the last synced snapshot, else local quotes
             value_source = "local"
-            ib_total = ib_equity = None
+            ib_cash = ib_total = ib_equity = None
             if settings.LIVE_BROKER.lower() == "ibkr":
                 try:
                     async def _fresh():
                         ib = await self._get_ib(timeout=2.0)
                         if not (ib and ib.isConnected()):
-                            return None, None
-                        _, t, e = await self._fetch_ibkr_account_values(ib)
-                        return t, e
-                    ib_total, ib_equity = await asyncio.wait_for(_fresh(), timeout=4.0)
+                            return None, None, None
+                        return await self._fetch_ibkr_account_values(ib)
+                    ib_cash, ib_total, ib_equity = await asyncio.wait_for(_fresh(), timeout=4.0)
                 except Exception as e:
                     logger.debug(f"Fresh IBKR account values unavailable: {e}")
                 if ib_total is not None:
                     value_source = "ibkr"
+                    # Same moment as the total, so cash + equity add up
+                    if ib_cash is not None:
+                        cash = ib_cash
                 elif snapshot and snapshot.total_value_eur:
                     ib_total, ib_equity, value_source = snapshot.total_value_eur, snapshot.equity_eur, "snapshot"
             if ib_total is not None:
@@ -1288,13 +1290,24 @@ class LiveBroker(BaseBroker):
 
                 unique_pos = list({(p.ticker, p.currency) for p in positions})
                 ib_prices = await self._fetch_ibkr_prices(unique_pos) if (unique_pos and settings.LIVE_BROKER.lower() == "ibkr") else {}
+                # IBKR's own per-position marketPrice (native currency) wins so values match the broker's.
+                try:
+                    ib = self._ib if settings.LIVE_BROKER.lower() == "ibkr" else None
+                    pf = {
+                        (i.contract.symbol.upper(), (i.contract.currency or "USD").upper()): float(i.marketPrice)
+                        for i in (ib.portfolio() if ib and ib.isConnected() else [])
+                        if i.marketPrice == i.marketPrice and i.marketPrice > 0
+                    }
+                except Exception as e:
+                    logger.debug(f"IBKR portfolio() prices unavailable: {e}")
+                    pf = {}
 
                 for p in positions:
                     is_open, _ = check_market_hours(p.ticker)
                     if not is_open and p.current_price_native and p.current_price_native > 0:
                         continue
 
-                    curr_price = ib_prices.get(p.ticker)
+                    curr_price = pf.get((p.ticker.upper().split(".")[0], (p.currency or "USD").upper())) or ib_prices.get(p.ticker)
                     if not curr_price:
                         data = await asyncio.to_thread(market_data_provider.get_stock_data, p.ticker)
                         if data:
@@ -1439,14 +1452,27 @@ class LiveBroker(BaseBroker):
                         cost_eur = currency_service.to_eur(cost_native, curr_code) * shares
                         if key in existing_live:
                             pos = existing_live[key]
-                            pos.shares = shares
-                            pos.cost_basis_eur = cost_eur
+                            # Keep the bot's own euro cost basis (incl. fees); re-converting avgCost at today's FX drifts it.
+                            if abs(pos.shares - shares) > 1e-9:
+                                if shares > pos.shares:
+                                    pos.cost_basis_eur += currency_service.to_eur(cost_native, curr_code) * (shares - pos.shares)
+                                else:
+                                    pos.cost_basis_eur *= shares / pos.shares
+                                pos.shares = shares
                             if not pos.stop_loss_native or not pos.take_profit_native:
                                 sl, tp = await self._planned_levels(session, sym, pos.entry_price_native or cost_native)
                                 pos.stop_loss_native = pos.stop_loss_native or sl
                                 pos.take_profit_native = pos.take_profit_native or tp
                         else:
                             sl, tp = await self._planned_levels(session, sym, cost_native)
+                            # IBKR avgCost already includes commission; sum the session's BUY commissions for fees_eur.
+                            # shortcut: ib.fills() only covers this gateway session, so older adoptions keep fees 0; upgrade via reqExecutions.
+                            fees_eur = sum(
+                                currency_service.to_eur(f.commissionReport.commission, f.commissionReport.currency or curr_code)
+                                for f in ib.fills()
+                                if f.contract.conId == p.contract.conId and f.execution.side == "BOT"
+                                and f.commissionReport and f.commissionReport.commission == f.commissionReport.commission
+                            )
                             new_pos = Position(
                                 ticker=sym,
                                 name=sym,
@@ -1460,6 +1486,7 @@ class LiveBroker(BaseBroker):
                                 entry_price_eur=currency_service.to_eur(cost_native, curr_code),
                                 current_price_eur=currency_service.to_eur(cost_native, curr_code),
                                 cost_basis_eur=cost_eur,
+                                fees_eur=round(fees_eur, 2),
                                 status="OPEN",
                                 is_live=True
                             )

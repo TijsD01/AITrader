@@ -305,3 +305,45 @@ async def test_portfolio_summary_uses_ibkr_values():
         async with AsyncSessionLocal() as session:
             await session.execute(delete(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True))
             await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_sync_keeps_cost_basis_and_adopts_with_fees():
+    """Sync must not re-convert an existing position's cost at today's FX, and adoption books fees from fills."""
+    from types import SimpleNamespace as NS
+    from unittest.mock import AsyncMock, MagicMock
+    await init_db()
+    orig_broker = settings.LIVE_BROKER
+    settings.LIVE_BROKER = "ibkr"
+    tickers = ("SYNCKEEP", "SYNCADOPT")
+    try:
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(Position).where(Position.ticker.in_(tickers)))
+            session.add(Position(ticker="SYNCKEEP", name="k", currency="USD", shares=2.0, entry_price_native=100.0,
+                                 current_price_native=100.0, highest_price_native=100.0, entry_price_eur=90.0,
+                                 current_price_eur=90.0, cost_basis_eur=183.0, status="OPEN", is_live=True))
+            await session.commit()
+
+        def ibpos(sym, n, avg, con):
+            return NS(contract=NS(symbol=sym, currency="USD", conId=con), position=n, avgCost=avg)
+        fill = NS(contract=NS(conId=2), execution=NS(side="BOT"), commissionReport=NS(commission=1.0, currency="USD"))
+        ib = MagicMock()
+        ib.isConnected.return_value = True
+        ib.positions.return_value = [ibpos("SYNCKEEP", 2.0, 100.0, 1), ibpos("SYNCADOPT", 1.0, 200.0, 2)]
+        ib.fills.return_value = [fill]
+        with patch.object(live_broker, "_get_ib", AsyncMock(return_value=ib)), \
+             patch.object(live_broker, "_fetch_ibkr_account_values", AsyncMock(return_value=(None, None, None))), \
+             patch.object(live_broker, "refresh_positions_pnl", AsyncMock()), \
+             patch.object(live_broker, "get_portfolio_summary", AsyncMock(return_value={"cash_eur": 0, "equity_eur": 0, "total_value_eur": 0})), \
+             patch("src.trading.live.currency_service.to_eur", side_effect=lambda v, c: v * 0.5):
+            await live_broker.sync_account_state()
+
+        async with AsyncSessionLocal() as session:
+            rows = {p.ticker: p for p in (await session.execute(select(Position).where(Position.ticker.in_(tickers)))).scalars()}
+        assert rows["SYNCKEEP"].cost_basis_eur == 183.0
+        assert rows["SYNCADOPT"].cost_basis_eur == 100.0 and rows["SYNCADOPT"].fees_eur == 0.5
+    finally:
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(Position).where(Position.ticker.in_(tickers)))
+            await session.commit()
+        settings.LIVE_BROKER = orig_broker
