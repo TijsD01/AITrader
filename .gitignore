@@ -62,3 +62,4 @@ logs/
 
 # Local agent tooling
 .agents/
+.claude/

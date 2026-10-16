@@ -9,6 +9,27 @@ from src.memory.store import memory_store
 
 logger = logging.getLogger(__name__)
 
+from config.default_universe import EU_STOCKS, US_STOCKS
+
+_STOP_TICKERS = {
+    "A", "I", "AN", "AS", "AT", "BE", "BY", "DO", "FOR", "FROM", "GO", "IF", "IN", "IS", "IT",
+    "NO", "NOT", "OF", "ON", "OR", "SO", "THE", "TO", "UP", "US", "WE", "WITH", "AND", "ALL",
+    "ANY", "NEW", "OLD", "ONE", "TWO", "TOP", "MAX", "MIN", "CAP", "FEE", "NET", "RAW",
+    "BUY", "SELL", "HOLD", "STRONG_BUY", "LIMIT", "PULLBACK", "BREAKOUT", "LIMIT_PULLBACK",
+    "BREAKOUT_BUY", "ORDER", "TRIGGER", "ENTRY", "PRICE", "TARGET", "HIT", "STOP", "LOSS",
+    "EUR", "USD", "GBP", "EU", "UK", "NL", "DE", "FR", "VETO", "RISK", "NEWS", "SCORE",
+    "USER", "AI", "PM", "EMA", "SMA", "RSI", "MACD", "ATR", "PEG", "ROE", "PE", "PB", "PS",
+    "EV", "EPS", "FCF", "YOY", "QOQ", "ETF", "AEX", "DAX", "CAC", "XETRA", "NYSE", "IBKR",
+    "SEC", "SDRT", "WIN", "HIGH", "LOW", "FAIR", "STRONG", "WEAK", "POOR", "GOOD", "FLAT",
+    "MIXED", "BULL", "BEAR", "BULLISH", "BEARISH", "NEUTRAL", "WAIT", "PASS", "LONG", "SHORT",
+    "CASH", "SPOT", "FILL", "OPEN", "CLOSE", "LEAD", "ARMED", "VERDICT", "TECHNICAL",
+}
+
+_UNIVERSE_TICKERS = {s["ticker"] for s in (EU_STOCKS + US_STOCKS)} | {
+    "ASML", "INGA", "PHIA", "HEIA", "SHEL", "BESI", "SAP", "SIE", "ALV", "TTE", "SAN",
+}
+
+
 class AssetExtractor:
     """
     TencentDB Agent Memory Asset Extraction Engine.
@@ -43,20 +64,55 @@ class AssetExtractor:
 
         now = time.time()
         session_id = session_id or f"sess_{int(now*1000)}"
+        metadata = metadata or {}
 
-        # 1. Pattern Extraction for Financial Entities & Tickers
-        ticker_matches = re.findall(r'\b([A-Z0-9]{1,6}(?:\.[A-Z]{1,3})?)\b', text)
-        known_stocks = set(t for t in ticker_matches if any(x in t for x in [".AS", ".PA", ".DE", ".L"]) or t in ["AAPL", "NVDA", "MSFT", "ASML", "BESI.AS", "TSLA"])
+        # 1. Pattern Extraction for Financial Entities & Tickers (case-sensitive uppercase tokens)
+        raw_tickers = re.findall(r'\b([A-Z][A-Z0-9]{0,5}(?:\.[A-Z]{1,3})?)\b', text)
+        ticker_matches = [
+            t for t in raw_tickers
+            if t not in _STOP_TICKERS and not t.isdigit() and (len(t) >= 2 or t in _UNIVERSE_TICKERS)
+        ]
+        known_stocks = {
+            t for t in ticker_matches
+            if any(x in t for x in (".AS", ".PA", ".DE", ".L")) or t in _UNIVERSE_TICKERS
+        }
+
+        is_hold_or_sell_delib = (
+            metadata.get("action") in ("HOLD", "SELL")
+            or bool(re.search(r'Deliberation on [^\n]+\((?:HOLD|SELL)\b', text))
+        )
 
         # 2. Extract Episodic Atoms (Trades, Orders, Triggers)
-        # Look for trigger entries
-        trigger_matches = re.finditer(r'(?:trigger|order|pullback|limit)\s*(?:#?(\d+))?.*?(?:for|on)?\s*([A-Z0-9\.]+).*?(?:@|at)\s*€?([\d\.]+)', text, re.IGNORECASE)
-        for m in trigger_matches:
-            trig_id = m.group(1) or "unknown"
-            t_ticker = m.group(2)
-            t_price = m.group(3)
+        for sent in re.split(r'(?<=[.!?])\s+|\n+', text):
+            if not re.search(
+                r'\b(?:trigger|pullback\s+entry|limit\s+(?:order|entry|pullback)|breakout\s+(?:buy|entry|order))\b',
+                sent,
+                re.IGNORECASE,
+            ):
+                continue
+            id_m = re.search(r'(?:trigger|order|ref)\s*#(\d+)', sent, re.IGNORECASE)
+            # In a HOLD/SELL deliberation without an explicit trigger #<id>, no trigger was actually armed
+            if is_hold_or_sell_delib and not id_m:
+                continue
+            price_m = re.search(r'(?:@|\bat\b)\s*(?:target\s+price\s*)?[€$£]?(\d+(?:\.\d+)?)', sent, re.IGNORECASE)
+            if not price_m:
+                continue
+            t_price = price_m.group(1).rstrip(".")
+            trig_id = id_m.group(1) if id_m else str(metadata.get("trigger_id") or "latest")
+            sent_tickers = [
+                t for t in re.findall(r'\b([A-Z][A-Z0-9]{0,5}(?:\.[A-Z]{1,3})?)\b', sent)
+                if t not in _STOP_TICKERS and not t.isdigit() and (len(t) >= 2 or t in _UNIVERSE_TICKERS)
+            ]
+            t_ticker = (
+                metadata.get("ticker")
+                or next((t for t in sent_tickers if t in known_stocks), None)
+                or (sent_tickers[0] if sent_tickers else None)
+            )
+            if not t_ticker or t_ticker.upper() in _STOP_TICKERS:
+                continue
+            slug = re.sub(r'[^a-z0-9.]', '_', t_ticker.lower())
             atom = L1Atom(
-                atom_id=f"atom_trig_{int(now*1000)}_{trig_id}",
+                atom_id=f"atom_trig_{slug}_{trig_id}",
                 team_id=team_id,
                 agent_id=agent_id,
                 type="episodic",
@@ -69,30 +125,46 @@ class AssetExtractor:
             )
             extracted_atoms.append(atom)
 
-        # Look for fee & commission observations
-        fee_matches = re.finditer(r'(?:fee|commission|drag|stamp duty).*?(\d+(?:\.\d+)?%|\d+(?:\.\d+)?\s*(?:EUR|€|GBP|USD))', text, re.IGNORECASE)
+        # Look for fee & commission rules/observations (deduplicated by normalized value)
+        fee_matches = re.finditer(r'(?:fee|commission|drag|stamp duty)[^.\n]{0,60}?(\d+(?:\.\d+)?%|\d+(?:\.\d+)?\s*(?:EUR|€|GBP|USD)|€\d+(?:\.\d+)?)', text, re.IGNORECASE)
+        seen_fees = set()
         for fm in fee_matches:
-            val = fm.group(1)
+            val = fm.group(1).strip()
+            snippet = fm.group(0).strip()[:120]
+            # Require rule/constraint context so routine "with fee of €1.90" trade logs or "Est. commission: €1.79 (0.7% drag)" are skipped
+            has_rule_kw = bool(re.search(r'\b(?:limit|max|min|minimum|exceed|cap|rule|enforce|threshold|floor)\b', snippet, re.IGNORECASE))
+            is_rule = has_rule_kw or "3.8%" in val
+            if not is_rule:
+                continue
+            norm_val = re.sub(r'[^a-z0-9]', '', val.lower())
+            if norm_val in seen_fees:
+                continue
+            seen_fees.add(norm_val)
             atom = L1Atom(
-                atom_id=f"atom_fee_{int(now*1000)}_{len(extracted_atoms)}",
+                atom_id=f"atom_fee_rule_{norm_val}",
                 team_id=team_id,
                 agent_id=agent_id,
                 type="instruction",
                 subject="IBKR_Broker_Fee",
                 predicate="fee_constraint_observed",
                 object=val,
-                content=f"Fee constraint identified in trade context: {fm.group(0).strip()[:120]}.",
+                content=f"Fee constraint: {snippet}.",
                 confidence=0.90,
                 source_session_id=session_id
             )
             extracted_atoms.append(atom)
 
-        # Look for capital or cash allocation mentions
-        cash_matches = re.finditer(r'(?:cash|portfolio|allocation|equity).*?€?([\d\.]+)\s*(?:EUR|€|euros?)', text, re.IGNORECASE)
-        for cm in cash_matches:
-            val = cm.group(1)
+        # Look for capital or cash allocation mentions (excluding "Portfolio Manager:" speaker labels)
+        cash_matches = list(re.finditer(
+            r'(?:deployable\s+cash|available\s+cash|cash\s+balance|account\s+balance|portfolio\s+(?!manager\b)[^.\n]{0,30}?|allocated\s+capital[^.\n]{0,20}?|with\s+)(?:€(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*(?:EUR|€|euros?))',
+            text,
+            re.IGNORECASE,
+        ))
+        if cash_matches:
+            cm = cash_matches[-1]
+            val = cm.group(1) or cm.group(2)
             atom = L1Atom(
-                atom_id=f"atom_cash_{int(now*1000)}_{len(extracted_atoms)}",
+                atom_id="atom_cash_balance",
                 team_id=team_id,
                 agent_id=agent_id,
                 type="persona",
@@ -106,48 +178,72 @@ class AssetExtractor:
             extracted_atoms.append(atom)
 
         # 3. Extract Committee Consensus / Action Verdicts
-        metadata = metadata or {}
-        # Only the assistant's own lines can carry a verdict, never quoted "User:" lines
+        # Only the assistant's own lines can carry a verdict, never quoted "User:" lines or raw trade fill logs
+        is_trade_fill_event = metadata.get("event") == "trade_execution" or bool(re.match(r'^\s*Executed\s+(?:BUY|SELL)\s+on\b', text))
         verdict_text = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("User:"))
         action_match = re.search(r'\b(STRONG_BUY|BUY|HOLD|SELL)\b', verdict_text)
         score_match = re.search(r'(?:consensus|score|conviction).*?(\d{2,3})', verdict_text, re.IGNORECASE)
+        has_deliberation_cue = bool(
+            metadata.get("action") in ("STRONG_BUY", "BUY", "HOLD", "SELL")
+            or score_match
+            or re.search(r'\b(?:committee|deliberat|consensus|verdict|conviction)\b', verdict_text, re.IGNORECASE)
+        )
 
         ticker = metadata.get("ticker") if isinstance(metadata.get("ticker"), str) else None
         verdict = metadata.get("action") if metadata.get("action") in ("STRONG_BUY", "BUY", "HOLD", "SELL") else None
         score = metadata.get("consensus_score")
-        if ticker is None or verdict is None:
-            # Regex fallback: first known ticker in order of appearance
-            ordered = [t for t in ticker_matches if t in known_stocks and t in verdict_text]
-            if ticker is None and ordered:
-                ticker = ordered[0]
-            if verdict is None and action_match:
-                verdict = action_match.group(1)
-        if score is None:
-            score = score_match.group(1) if score_match else "75"
+        if not is_trade_fill_event and has_deliberation_cue:
+            if ticker is None or verdict is None:
+                # Regex fallback: first known ticker in order of appearance
+                ordered = [t for t in ticker_matches if t in known_stocks and t in verdict_text]
+                if ticker is None and ordered:
+                    ticker = ordered[0]
+                if verdict is None and action_match:
+                    verdict = action_match.group(1)
+            if score is None:
+                score = score_match.group(1) if score_match else "75"
 
-        if ticker and verdict:
-            atom = L1Atom(
-                atom_id=f"atom_verdict_{int(now*1000)}",
-                team_id=team_id,
-                agent_id=agent_id,
-                type="episodic",
-                subject=ticker,
-                predicate="committee_verdict",
-                object=f"{verdict} (Score: {score})",
-                content=f"Investment Committee rendered {verdict} verdict on {ticker} with consensus conviction of {score}/100.",
-                confidence=0.98,
-                source_session_id=session_id
-            )
-            extracted_atoms.append(atom)
+            if ticker and verdict and ticker.upper() not in _STOP_TICKERS:
+                slug = re.sub(r'[^a-z0-9.]', '_', ticker.lower())
+                atom = L1Atom(
+                    atom_id=f"atom_verdict_{slug}",
+                    team_id=team_id,
+                    agent_id=agent_id,
+                    type="episodic",
+                    subject=ticker,
+                    predicate="committee_verdict",
+                    object=f"{verdict} (Score: {score})",
+                    content=f"Investment Committee rendered {verdict} verdict on {ticker} with consensus conviction of {score}/100.",
+                    confidence=0.98,
+                    source_session_id=session_id
+                )
+                extracted_atoms.append(atom)
 
-            # L2 Scenario update
-            l2_updates.append({
-                "scenario_key": f"evaluation-{ticker.lower()}",
-                "title": f"Committee Deliberation on {ticker}",
-                "summary": f"Deliberated {verdict} on {ticker} factoring in technicals, fundamentals, sentiment, and fees.",
-                "context_content": text[:500],
-                "active_entities": [ticker, verdict]
-            })
+                # L2 Scenario update
+                l2_updates.append({
+                    "scenario_key": f"evaluation-{ticker.lower()}",
+                    "title": f"Committee Deliberation on {ticker}",
+                    "summary": f"Deliberated {verdict} on {ticker} (Score {score}/100).",
+                    "context_content": text[:350],
+                    "active_entities": [ticker, verdict]
+                })
+        elif is_trade_fill_event and ticker:
+            order_m = re.search(r'\bExecuted\s+(BUY|SELL)\s+on\s+([\d.]+)x\s+\S+\s+at\s+([\d.]+)\s+(\w+)', text)
+            if order_m:
+                side, shares_s, price_s, curr_s = order_m.groups()
+                slug = re.sub(r'[^a-z0-9.]', '_', ticker.lower())
+                extracted_atoms.append(L1Atom(
+                    atom_id=f"atom_trade_{slug}",
+                    team_id=team_id,
+                    agent_id=agent_id,
+                    type="episodic",
+                    subject=ticker,
+                    predicate="trade_executed",
+                    object=f"{side} {shares_s}x @ {price_s} {curr_s}",
+                    content=text.strip()[:160],
+                    confidence=0.98,
+                    source_session_id=session_id
+                ))
 
         # 4. Extract Reusable Skills (if playbook steps detected)
         if "pullback" in text.lower() and ("limit" in text.lower() or "rsi" in text.lower()):

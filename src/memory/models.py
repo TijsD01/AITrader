@@ -177,7 +177,7 @@ class ChatMemoryContextRequest(BaseModel):
     agent_id: str = "committee"
     user_id: str = "default"
     session_id: Optional[str] = None
-    char_budget: int = 8000
+    char_budget: int = 3200
     include_skills: bool = True
     include_wiki: bool = True
     include_portfolio: bool = True

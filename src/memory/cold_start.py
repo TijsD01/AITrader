@@ -27,54 +27,99 @@ class ColdStartEngine:
         team_id: str = "trading-team",
         agent_id: str = "committee",
         query: Optional[str] = "",
-        char_budget: int = 8000
+        char_budget: int = 3200,
+        include_lessons: bool = True
     ) -> ColdStartLoadout:
+        import asyncio
         t0 = time.time()
         await memory_store.init_db()
 
-        # 1. Fetch live portfolio & trigger status from TradingBot DB
-        portfolio_state = await ColdStartEngine._fetch_portfolio_status()
+        # 1. Fetch portfolio state and memory layers in parallel
+        portfolio_state, l3, scenarios, l1_atoms, skills, wiki_pages = await asyncio.gather(
+            ColdStartEngine._fetch_portfolio_status(),
+            memory_store.get_core_profile(team_id=team_id, agent_id=agent_id),
+            memory_store.list_scenarios(team_id=team_id),
+            memory_store.search_l1_atoms(query=query or None, team_id=team_id, limit=6),
+            memory_store.search_skills(query=query or None, team_id=team_id, top_k=3),
+            memory_store.list_wiki_pages(team_id=team_id),
+        )
+
+        # Fall back to core skills when query is a ticker symbol that matches no skill name
+        if not skills:
+            skills = await memory_store.search_skills(query=None, team_id=team_id, top_k=2)
 
         # 2. Build "What Had Happened" history recap
-        what_happened_text = await ColdStartEngine._build_history_recap(portfolio_state)
+        what_happened_text = await ColdStartEngine._build_history_recap(
+            portfolio_state, include_lessons=include_lessons
+        )
 
-        # 3. Fetch L3 Core Profile
-        l3 = await memory_store.get_core_profile(team_id=team_id, agent_id=agent_id)
+        # 3. Format L3 Core Profile (deduplicating wisdom lines)
+        wisdom_lines = []
+        for line in (l3.get("cumulative_wisdom") or "").splitlines():
+            clean = line.strip()
+            if clean and clean not in wisdom_lines:
+                wisdom_lines.append(clean)
         l3_text = (
             f"**Persona**: {l3.get('persona_name')}\n"
-            f"**Core Mandate**: {l3.get('core_profile')}\n\n"
-            f"**Cumulative Wisdom & Rules**:\n{l3.get('cumulative_wisdom')}\n"
+            f"**Mandate**: {l3.get('core_profile')}\n"
+            f"**Rules**:\n" + "\n".join(wisdom_lines[:3])
         )
-        if l3.get("risk_rules"):
-            l3_text += "\n**Enforced Risk Rules**:\n" + "\n".join(f"- {r}" for r in l3["risk_rules"])
 
-        # 4. Fetch L2 Active Scenario
-        scenarios = await memory_store.list_scenarios(team_id=team_id)
-        if scenarios:
-            active_sc = scenarios[0]
-            l2_text = f"**Scenario: {active_sc['title']}**\n{active_sc['summary']}\n{active_sc.get('context_content', '')}"
+        # 4. Select L2 Active Scenario (match query ticker/entity tokens; never inject an unrelated ticker's deliberation)
+        matched_sc = None
+        q_clean = (query or "").strip()
+        if q_clean and scenarios:
+            from src.memory.store import _query_tokens
+            _generic_sc_words = {
+                "buy", "sell", "hold", "strong_buy", "committee", "deliberation",
+                "evaluation", "scenario", "active", "session", "status", "today",
+            }
+            q_tokens = [t.lower() for t in _query_tokens(q_clean) if t.lower() not in _generic_sc_words]
+            for sc in scenarios:
+                sc_key = sc.get("scenario_key", "").lower()
+                sc_ticker = sc_key[len("evaluation-"):] if sc_key.startswith("evaluation-") else sc_key
+                entities_lower = {
+                    str(e).lower() for e in sc.get("active_entities", [])
+                    if str(e).lower() not in _generic_sc_words
+                }
+                if any(
+                    tok == sc_ticker
+                    or tok == sc_key
+                    or tok in entities_lower
+                    or any(ent.startswith(f"{tok}.") for ent in entities_lower if len(tok) >= 2)
+                    for tok in q_tokens
+                ):
+                    matched_sc = sc
+                    break
+        elif scenarios:
+            matched_sc = scenarios[0]
+
+        if matched_sc:
+            l2_text = f"**Scenario: {matched_sc['title']}** — {matched_sc['summary']}"
         else:
             l2_text = "**Active Scenario**: Live Equities Session (Euronext, XETRA, US Equities with Tiered Fee Accounting)."
 
-        # 5. Fetch L1 Facts
-        l1_atoms = await memory_store.search_l1_atoms(query=query or None, team_id=team_id, limit=8)
-        l1_key_facts = [f"[{a['type'].upper()}] {a['content']}" for a in l1_atoms]
+        # 5. Format L1 Facts (prioritize non-redundant facts; keep at least 1 fact)
+        all_l1_facts = [f"[{a['type'].upper()}] {a['content']}" for a in l1_atoms]
+        filtered_l1 = [
+            f for a, f in zip(l1_atoms, all_l1_facts)
+            if a.get("subject") not in ("IBKR_Broker_Fee", "RiskManager")
+        ]
+        l1_key_facts = (filtered_l1 or all_l1_facts[:2])[:5]
 
-        # 6. Fetch Active Skills
-        skills = await memory_store.search_skills(query=query or None, team_id=team_id, top_k=5)
+        # 6. Format Active Skills compactly
         active_skills = [
-            f"**{s['name']}** ({s['category']}): {s['description']}\n  - Steps: {'; '.join(s['execution_steps'][:3])}"
-            for s in skills
+            f"**{s['name']}** ({s['category']}): {s['description']}"
+            for s in skills[:3]
         ]
 
-        # 7. Fetch Wiki Highlights
-        wiki_pages = await memory_store.list_wiki_pages(team_id=team_id)
+        # 7. Format Wiki Highlights
         wiki_highlights = [
             f"**{w['title']}**: {w['content_md'].splitlines()[2] if len(w['content_md'].splitlines()) > 2 else w['title']}"
             for w in wiki_pages[:3]
         ]
 
-        # 8. Assemble Full Prompt Context
+        # 8. Assemble Compact Full Prompt Context
         if portfolio_state.get("available", True):
             status_summary = (
                 f"Portfolio: €{portfolio_state.get('total_equity_eur', 0):.2f} Total Equity | "
@@ -85,26 +130,19 @@ class ColdStartEngine:
         else:
             status_summary = "Portfolio status unavailable: live broker state could not be queried. Do not assume cash, positions or triggers."
 
-        full_prompt_context = f"""=== INSTANT MEMORY LOADOUT (TENCENTDB AGENT MEMORY) ===
-[SYSTEM SITUATION REPORT]
-{status_summary}
-
---- WHAT HAD HAPPENED RECENTLY ---
-{what_happened_text}
-
---- L3 CORE PERSONA & INSTITUTIONAL RULES ---
-{l3_text}
-
---- L2 ACTIVE OPERATIONAL SCENARIO ---
-{l2_text}
-
---- L1 KEY EXTRACTED ATOMS & CONSTRAINTS ---
-""" + "\n".join(f"- {f}" for f in l1_key_facts) + """
-
---- ACTIVE SKILL PLAYBOOKS ---
-""" + "\n".join(f"- {s}" for s in active_skills) + """
-======================================================
-"""
+        sections = [
+            "=== INSTANT MEMORY LOADOUT (TENCENTDB AGENT MEMORY) ===",
+            f"[SYSTEM SITUATION REPORT]\n{status_summary}",
+            f"--- WHAT HAD HAPPENED RECENTLY ---\n{what_happened_text}",
+            f"--- L3 CORE PERSONA & INSTITUTIONAL RULES ---\n{l3_text}",
+            f"--- L2 ACTIVE OPERATIONAL SCENARIO ---\n{l2_text}",
+        ]
+        if l1_key_facts:
+            sections.append("--- L1 KEY EXTRACTED ATOMS & CONSTRAINTS ---\n" + "\n".join(f"- {f}" for f in l1_key_facts))
+        if active_skills:
+            sections.append("--- ACTIVE SKILL PLAYBOOKS ---\n" + "\n".join(f"- {s}" for s in active_skills))
+        sections.append("======================================================")
+        full_prompt_context = "\n\n".join(sections) + "\n"
 
         # Enforce character budget
         if len(full_prompt_context) > char_budget:
@@ -185,7 +223,7 @@ class ColdStartEngine:
             }
 
     @staticmethod
-    async def _build_history_recap(portfolio_state: Dict[str, Any]) -> str:
+    async def _build_history_recap(portfolio_state: Dict[str, Any], include_lessons: bool = True) -> str:
         """Constructs concise narrative of recent trades, triggers, and post-mortems."""
         lines = []
 
@@ -198,9 +236,7 @@ class ColdStartEngine:
             lines.append("• **Active Order Triggers Armed**:")
             for t in triggers:
                 lines.append(
-                    f"  - Trigger #{t['id']}: {t['ticker']} ({t['trigger_type']} @ €{t['target_price']:.2f}) "
-                    f"with allocated capital of €{t['allocation_eur']:.2f}. "
-                    f"This ring-fences €{t['allocation_eur']:.2f} of cash, leaving €{portfolio_state.get('available_cash_eur', 0):.2f} deployable."
+                    f"  - Trigger #{t['id']}: {t['ticker']} ({t['trigger_type']} @ €{t['target_price']:.2f}, alloc €{t['allocation_eur']:.2f})"
                 )
         else:
             lines.append("• **Active Triggers**: None armed currently.")
@@ -226,22 +262,15 @@ class ColdStartEngine:
                             f"  - {tr.order_type} {tr.shares}x {tr.ticker} @ {tr.price_native} {tr.currency}{detail_str}"
                         )
 
-                lesson_res = await session.execute(select(TradeLesson).order_by(desc(TradeLesson.created_at)).limit(2))
-                lessons = lesson_res.scalars().all()
-                if lessons:
-                    lines.append("• **Recent Trade Post-Mortems & Lessons**:")
-                    for les in lessons:
-                        lines.append(f"  - [{les.ticker} {les.outcome}]: {les.lesson}")
+                if include_lessons:
+                    lesson_res = await session.execute(select(TradeLesson).order_by(desc(TradeLesson.created_at)).limit(2))
+                    lessons = lesson_res.scalars().all()
+                    if lessons:
+                        lines.append("• **Recent Trade Post-Mortems & Lessons**:")
+                        for les in lessons:
+                            lines.append(f"  - [{les.ticker} {les.outcome}]: {les.lesson}")
         except Exception as e:
             logger.debug(f"Could not load trade history from database: {e}")
-
-        # 3. Capital & Slot Consolidation Note
-        if available:
-            lines.append(
-                f"• **Capital Optimization**: Account balance is €{portfolio_state.get('total_equity_eur', 0):.2f}. "
-                f"Dynamic slot consolidation is active to avoid micro-trade commission erosion under IBKR tiered pricing "
-                f"(orders consolidated to €100 min on Euronext/Xetra, €35 min on US)."
-            )
 
         return "\n".join(lines)
 

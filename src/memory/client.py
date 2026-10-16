@@ -25,7 +25,8 @@ class AgentMemoryClient:
         self,
         query: Optional[str] = "",
         agent_id: Optional[str] = None,
-        char_budget: int = 8000
+        char_budget: int = 3200,
+        include_lessons: bool = True
     ) -> ColdStartLoadout:
         """
         Instantly builds the Cold Start Situation Report so an agent
@@ -36,7 +37,8 @@ class AgentMemoryClient:
             team_id=self.team_id,
             agent_id=target_agent,
             query=query,
-            char_budget=char_budget
+            char_budget=char_budget,
+            include_lessons=include_lessons
         )
 
     async def log_interaction(

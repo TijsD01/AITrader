@@ -1,9 +1,11 @@
+import ast
 import os
 import re
 import json
 import time
+import asyncio
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from contextlib import asynccontextmanager
 import aiosqlite
 from pathlib import Path
@@ -14,14 +16,36 @@ from src.memory.models import (
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "memory.db"
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+DB_PATH = REPO_ROOT / "data" / "memory.db"
+
+_SHORT_QUERY_STOPWORDS = {
+    "A", "I", "AN", "AS", "AT", "BE", "BY", "DO", "GO", "IF", "IN", "IS",
+    "IT", "NO", "OF", "ON", "OR", "SO", "TO", "UP", "US", "WE",
+}
+
+_QUERY_STOPWORDS_LOWER = {
+    "the", "and", "for", "with", "from", "that", "this", "what", "when", "where",
+    "which", "who", "whom", "whose", "why", "how", "are", "was", "were", "been",
+    "being", "have", "has", "had", "having", "does", "did", "doing", "will", "would",
+    "shall", "should", "can", "could", "may", "might", "must", "about", "into",
+    "through", "during", "before", "after", "above", "below", "between", "under",
+    "again", "further", "then", "once", "here", "there", "all", "any", "both",
+    "each", "few", "more", "most", "other", "some", "such", "only", "own", "same",
+    "than", "too", "very", "just", "today", "our", "your", "their", "not", "but",
+}
+
 
 def _query_tokens(query: str, max_tokens: int = 12) -> List[str]:
-    """Splits a free-text query into unique search words (len >= 3). Falls back to the whole query."""
+    """Splits a free-text query into unique search words (len >= 3, or 1-2 char uppercase tickers), filtering conversational stop words."""
     tokens: List[str] = []
     for raw in re.findall(r"[A-Za-z0-9\u20ac][A-Za-z0-9\u20ac._-]*", query or ""):
         tok = raw.strip("._-")
-        if len(tok) >= 3 and tok.lower() not in (t.lower() for t in tokens):
+        if not tok:
+            continue
+        is_short_ticker = 1 <= len(tok) < 3 and tok.isupper() and tok.isalpha() and tok not in _SHORT_QUERY_STOPWORDS
+        is_long_token = len(tok) >= 3 and (tok.isupper() or tok.lower() not in _QUERY_STOPWORDS_LOWER) and tok.lower() not in {"for", "with", "the", "and", "what", "how", "should", "today", "about"}
+        if (is_long_token or is_short_ticker) and tok.lower() not in (t.lower() for t in tokens):
             tokens.append(tok)
     if not tokens and query and query.strip():
         tokens = [query.strip()]
@@ -34,144 +58,174 @@ def _like_pattern(token: str) -> str:
     return f"%{esc}%"
 
 
+def _resolve_symbol_lines(file_path: str, symbol_name: str, fallback_start: int = 1, fallback_end: int = 1) -> Tuple[int, int]:
+    """Resolves exact 1-indexed (line_start, line_end) of a class or function from AST so CodeGraph never drifts."""
+    try:
+        full_path = REPO_ROOT / file_path
+        if not full_path.exists():
+            return fallback_start, fallback_end
+        tree = ast.parse(full_path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == symbol_name:
+                return int(node.lineno), int(node.end_lineno or node.lineno)
+    except Exception:
+        pass
+    return fallback_start, fallback_end
+
+
 class AgentMemoryStore:
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = db_path or DB_PATH
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialized = False
+        self._initialized_path: Optional[Path] = None
+        self._init_lock = asyncio.Lock()
+        self._compact_lock = asyncio.Lock()
 
     @asynccontextmanager
     async def _get_conn(self):
-        async with aiosqlite.connect(str(self.db_path)) as conn:
+        async with aiosqlite.connect(str(self.db_path), timeout=10.0) as conn:
             conn.row_factory = aiosqlite.Row
-            await conn.execute("PRAGMA journal_mode = WAL")
+            await conn.execute("PRAGMA busy_timeout = 5000")
             await conn.execute("PRAGMA synchronous = NORMAL")
+            await conn.execute("PRAGMA temp_store = MEMORY")
             yield conn
 
     async def init_db(self):
-        if self._initialized:
+        if self._initialized and self._initialized_path == self.db_path:
             return
-        async with self._get_conn() as db:
-            # 1. L0 Raw Conversations
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS memory_l0_conversations (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id TEXT NOT NULL,
-                    team_id TEXT NOT NULL,
-                    agent_id TEXT NOT NULL,
-                    user_id TEXT NOT NULL,
-                    task_id TEXT,
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    metadata_json TEXT,
-                    created_at REAL NOT NULL
-                )
-            """)
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_l0_session ON memory_l0_conversations(session_id)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_l0_team_agent ON memory_l0_conversations(team_id, agent_id)")
+        async with self._init_lock:
+            if self._initialized and self._initialized_path == self.db_path:
+                return
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            async with self._get_conn() as db:
+                await db.execute("PRAGMA journal_mode = WAL")
+                # 1. L0 Raw Conversations
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS memory_l0_conversations (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id TEXT NOT NULL,
+                        team_id TEXT NOT NULL,
+                        agent_id TEXT NOT NULL,
+                        user_id TEXT NOT NULL,
+                        task_id TEXT,
+                        role TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        metadata_json TEXT,
+                        created_at REAL NOT NULL
+                    )
+                """)
+                await db.execute("CREATE INDEX IF NOT EXISTS idx_l0_session ON memory_l0_conversations(session_id)")
+                await db.execute("CREATE INDEX IF NOT EXISTS idx_l0_team_agent ON memory_l0_conversations(team_id, agent_id)")
+                await db.execute("CREATE INDEX IF NOT EXISTS idx_l0_created ON memory_l0_conversations(team_id, created_at DESC)")
 
-            # 2. L1 Atoms
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS memory_l1_atoms (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    atom_id TEXT UNIQUE,
-                    team_id TEXT NOT NULL,
-                    agent_id TEXT NOT NULL,
-                    type TEXT NOT NULL, -- episodic, persona, instruction
-                    subject TEXT NOT NULL,
-                    predicate TEXT NOT NULL,
-                    object TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    confidence REAL NOT NULL,
-                    source_session_id TEXT,
-                    created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL
-                )
-            """)
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_l1_type ON memory_l1_atoms(type)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_l1_team ON memory_l1_atoms(team_id, agent_id)")
+                # 2. L1 Atoms
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS memory_l1_atoms (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        atom_id TEXT UNIQUE,
+                        team_id TEXT NOT NULL,
+                        agent_id TEXT NOT NULL,
+                        type TEXT NOT NULL, -- episodic, persona, instruction
+                        subject TEXT NOT NULL,
+                        predicate TEXT NOT NULL,
+                        object TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        confidence REAL NOT NULL,
+                        source_session_id TEXT,
+                        created_at REAL NOT NULL,
+                        updated_at REAL NOT NULL
+                    )
+                """)
+                await db.execute("CREATE INDEX IF NOT EXISTS idx_l1_type ON memory_l1_atoms(type)")
+                await db.execute("CREATE INDEX IF NOT EXISTS idx_l1_team ON memory_l1_atoms(team_id, agent_id)")
+                await db.execute("CREATE INDEX IF NOT EXISTS idx_l1_subj_pred ON memory_l1_atoms(team_id, subject, predicate)")
+                await db.execute("CREATE INDEX IF NOT EXISTS idx_l1_updated ON memory_l1_atoms(team_id, updated_at DESC)")
 
-            # 3. L2 Scenarios
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS memory_l2_scenarios (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    scenario_key TEXT UNIQUE NOT NULL,
-                    title TEXT NOT NULL,
-                    team_id TEXT NOT NULL,
-                    agent_id TEXT NOT NULL,
-                    summary TEXT NOT NULL,
-                    context_content TEXT NOT NULL,
-                    active_entities_json TEXT,
-                    updated_at REAL NOT NULL
-                )
-            """)
+                # 3. L2 Scenarios
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS memory_l2_scenarios (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        scenario_key TEXT UNIQUE NOT NULL,
+                        title TEXT NOT NULL,
+                        team_id TEXT NOT NULL,
+                        agent_id TEXT NOT NULL,
+                        summary TEXT NOT NULL,
+                        context_content TEXT NOT NULL,
+                        active_entities_json TEXT,
+                        updated_at REAL NOT NULL
+                    )
+                """)
+                await db.execute("CREATE INDEX IF NOT EXISTS idx_l2_team_updated ON memory_l2_scenarios(team_id, updated_at DESC)")
 
-            # 4. L3 Core Profile / Persona
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS memory_l3_core (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    team_id TEXT NOT NULL,
-                    agent_id TEXT NOT NULL,
-                    persona_name TEXT NOT NULL,
-                    core_profile TEXT NOT NULL,
-                    cumulative_wisdom TEXT NOT NULL,
-                    risk_rules_json TEXT,
-                    updated_at REAL NOT NULL,
-                    UNIQUE(team_id, agent_id)
-                )
-            """)
+                # 4. L3 Core Profile / Persona
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS memory_l3_core (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        team_id TEXT NOT NULL,
+                        agent_id TEXT NOT NULL,
+                        persona_name TEXT NOT NULL,
+                        core_profile TEXT NOT NULL,
+                        cumulative_wisdom TEXT NOT NULL,
+                        risk_rules_json TEXT,
+                        updated_at REAL NOT NULL,
+                        UNIQUE(team_id, agent_id)
+                    )
+                """)
 
-            # 5. Skills
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS memory_skills (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    skill_id TEXT UNIQUE NOT NULL,
-                    name TEXT NOT NULL,
-                    team_id TEXT NOT NULL,
-                    category TEXT NOT NULL,
-                    description TEXT NOT NULL,
-                    trigger_conditions_json TEXT NOT NULL,
-                    execution_steps_json TEXT NOT NULL,
-                    code_template TEXT,
-                    version TEXT NOT NULL,
-                    created_at REAL NOT NULL
-                )
-            """)
+                # 5. Skills
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS memory_skills (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        skill_id TEXT UNIQUE NOT NULL,
+                        name TEXT NOT NULL,
+                        team_id TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        description TEXT NOT NULL,
+                        trigger_conditions_json TEXT NOT NULL,
+                        execution_steps_json TEXT NOT NULL,
+                        code_template TEXT,
+                        version TEXT NOT NULL,
+                        created_at REAL NOT NULL
+                    )
+                """)
 
-            # 6. Wiki Pages
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS memory_wiki (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    page_id TEXT UNIQUE NOT NULL,
-                    team_id TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    content_md TEXT NOT NULL,
-                    tags_json TEXT,
-                    links_json TEXT,
-                    updated_at REAL NOT NULL
-                )
-            """)
+                # 6. Wiki Pages
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS memory_wiki (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        page_id TEXT UNIQUE NOT NULL,
+                        team_id TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        content_md TEXT NOT NULL,
+                        tags_json TEXT,
+                        links_json TEXT,
+                        updated_at REAL NOT NULL
+                    )
+                """)
 
-            # 7. CodeGraph
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS memory_codegraph (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    symbol_name TEXT UNIQUE NOT NULL,
-                    symbol_type TEXT NOT NULL,
-                    file_path TEXT NOT NULL,
-                    line_start INTEGER,
-                    line_end INTEGER,
-                    docstring TEXT,
-                    dependencies_json TEXT,
-                    callers_json TEXT
-                )
-            """)
+                # 7. CodeGraph
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS memory_codegraph (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        symbol_name TEXT UNIQUE NOT NULL,
+                        symbol_type TEXT NOT NULL,
+                        file_path TEXT NOT NULL,
+                        line_start INTEGER,
+                        line_end INTEGER,
+                        docstring TEXT,
+                        dependencies_json TEXT,
+                        callers_json TEXT
+                    )
+                """)
+                await db.execute("CREATE INDEX IF NOT EXISTS idx_codegraph_type ON memory_codegraph(symbol_type)")
 
-            await db.commit()
+                await db.commit()
 
-        self._initialized = True
-        logger.info("AgentMemoryStore SQLite initialized at %s", self.db_path)
-        await self._seed_default_assets_if_empty()
+            self._initialized = True
+            self._initialized_path = self.db_path
+            logger.info("AgentMemoryStore SQLite initialized at %s", self.db_path)
+            await self._seed_default_assets_if_empty()
 
     # --- L0 Conversations ---
 
@@ -248,22 +302,66 @@ class AgentMemoryStore:
         if atom_type:
             sql += " AND type = ?"
             params.append(atom_type)
+        order_sql = " ORDER BY updated_at DESC LIMIT ?"
         if query:
-            clauses = []
-            for tok in _query_tokens(query):
-                clauses.append("content LIKE ? ESCAPE '\\' OR subject LIKE ? ESCAPE '\\' OR object LIKE ? ESCAPE '\\'")
-                pat = _like_pattern(tok)
-                params.extend([pat, pat, pat])
-            # Instruction atoms (rules/constraints) are always relevant
-            clauses.append("type = 'instruction'")
-            sql += " AND (" + " OR ".join(clauses) + ")"
-        sql += " ORDER BY updated_at DESC LIMIT ?"
-        params.append(limit)
+            tokens = _query_tokens(query)
+            if tokens:
+                token_clauses = []
+                token_params: List[Any] = []
+                subj_like_clauses = []
+                subj_like_params: List[Any] = []
+                exact_subj_params: List[Any] = [t.upper() for t in tokens]
+                for tok in tokens:
+                    if len(tok) <= 2:
+                        # Short 1-2 char ticker tokens (e.g. V, KO) match subject directly, not single letters in prose
+                        prefix_pat = _like_pattern(tok.upper()).strip("%") + ".%"
+                        token_clauses.append("(UPPER(subject) = ? OR UPPER(subject) LIKE ? ESCAPE '\\')")
+                        token_params.extend([tok.upper(), prefix_pat])
+                        subj_like_clauses.append("UPPER(subject) LIKE ? ESCAPE '\\'")
+                        subj_like_params.append(prefix_pat)
+                    else:
+                        pat = _like_pattern(tok)
+                        token_clauses.append("(content LIKE ? ESCAPE '\\' OR subject LIKE ? ESCAPE '\\' OR object LIKE ? ESCAPE '\\')")
+                        token_params.extend([pat, pat, pat])
+                        subj_like_clauses.append("subject LIKE ? ESCAPE '\\'")
+                        subj_like_params.append(pat)
+                match_expr = "(" + " OR ".join(token_clauses) + ")"
+                exact_subj_expr = "UPPER(subject) IN (" + ",".join("?" for _ in tokens) + ")"
+                subj_like_expr = "(" + " OR ".join(subj_like_clauses) + ")"
+                # Instruction atoms (rules/constraints) are also included, ranked after direct matches
+                sql += f" AND ({match_expr} OR type = 'instruction')"
+                params.extend(token_params)
+                order_sql = (
+                    f" ORDER BY CASE "
+                    f"WHEN {exact_subj_expr} THEN 0 "
+                    f"WHEN {subj_like_expr} THEN 1 "
+                    f"WHEN {match_expr} THEN 2 "
+                    f"ELSE 3 END ASC, updated_at DESC LIMIT ?"
+                )
+                params.extend(exact_subj_params)
+                params.extend(subj_like_params)
+                params.extend(token_params)
+            else:
+                sql += " AND type = 'instruction'"
+        # Fetch extra rows to allow content deduplication before applying limit
+        sql += order_sql
+        params.append(max(limit * 3, 30))
 
         async with self._get_conn() as db:
             async with await db.execute(sql, params) as cursor:
                 rows = await cursor.fetchall()
-                return [dict(r) for r in rows]
+                results: List[Dict[str, Any]] = []
+                seen = set()
+                for r in rows:
+                    d = dict(r)
+                    dedup_key = (d["type"], d["subject"], d["predicate"], d["object"])
+                    if dedup_key in seen:
+                        continue
+                    seen.add(dedup_key)
+                    results.append(d)
+                    if len(results) >= limit:
+                        break
+                return results
 
     # --- L2 Scenarios ---
 
@@ -431,9 +529,11 @@ class AgentMemoryStore:
         if query:
             clauses = []
             for tok in _query_tokens(query):
-                clauses.append("name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\'")
+                clauses.append("(name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\')")
                 pat = _like_pattern(tok)
                 params.extend([pat, pat])
+            if not clauses:
+                return []
             sql += " AND (" + " OR ".join(clauses) + ")"
         sql += " ORDER BY created_at DESC LIMIT ?"
         params.append(top_k)
@@ -513,67 +613,329 @@ class AgentMemoryStore:
                     results.append(item)
                 return results
 
+    async def search_codegraph(self, query: Optional[str] = None, limit: int = 20) -> List[Dict[str, Any]]:
+        await self.init_db()
+        if not query or not query.strip():
+            return await self.list_codegraph(limit=limit)
+        clauses = []
+        params: List[Any] = []
+        for tok in _query_tokens(query):
+            clauses.append("(symbol_name LIKE ? ESCAPE '\\' OR file_path LIKE ? ESCAPE '\\' OR docstring LIKE ? ESCAPE '\\')")
+            pat = _like_pattern(tok)
+            params.extend([pat, pat, pat])
+        if not clauses:
+            return []
+        sql = "SELECT * FROM memory_codegraph WHERE " + " OR ".join(clauses) + " LIMIT ?"
+        params.append(limit)
+        async with self._get_conn() as db:
+            async with await db.execute(sql, params) as cursor:
+                rows = await cursor.fetchall()
+                results = []
+                for r in rows:
+                    item = dict(r)
+                    item["dependencies"] = json.loads(item.get("dependencies_json") or "[]")
+                    item["callers"] = json.loads(item.get("callers_json") or "[]")
+                    results.append(item)
+                return results
+
+    async def prune_and_compact(self, max_l0_rows: int = 150) -> Dict[str, int]:
+        """
+        Cleans up duplicate L1 atoms, removes stop-word/test pollution,
+        caps L0 conversation history, refreshes CodeGraph AST line ranges, and compacts the SQLite file.
+        """
+        await self.init_db()
+        stats = {"l1_deleted": 0, "l2_deleted": 0, "l0_deleted": 0}
+        async with self._compact_lock:
+            async with self._get_conn() as db:
+                # 1. Remove stop-word, non-uppercase, or test-only subjects in L1 atoms
+                cur = await db.execute("""
+                    DELETE FROM memory_l1_atoms
+                    WHERE UPPER(subject) IN (
+                        'FOR', 'ON', 'AT', 'ENTRY', 'TRIGGER', 'HIT', 'LIMIT', 'BREAKOUT',
+                        'ORDER', 'NEWS', 'LEAD', 'ARMED', 'VERDICT', 'TECHNICAL', 'PULLBACK', '.'
+                    )
+                       OR (predicate IN ('trigger_price_level', 'committee_verdict') AND subject != UPPER(subject))
+                       OR (subject = 'Capital_Allocation' AND content LIKE '%Portfolio Manager:%')
+                       OR subject LIKE '%_TEST%'
+                       OR subject LIKE 'OPEN_%'
+                       OR subject LIKE 'POS_%'
+                       OR subject LIKE 'SLOTA_%'
+                       OR subject LIKE 'SLOTB_%'
+                       OR subject LIKE 'TRIG_%'
+                       OR subject LIKE 'CLOSE_%'
+                       OR subject LIKE 'DUP_%'
+                       OR subject LIKE 'GATE%'
+                       OR subject IN ('JOBX', 'HIGH85', 'AUTO85')
+                       OR source_session_id = 'test_extract'
+                       OR source_session_id LIKE 'test_%'
+                       OR source_session_id IN ('trade_SAP.DE_1792131101', 'trade_ASML.AS_1792131520', 'sess_1792131520126')
+                """)
+                stats["l1_deleted"] += cur.rowcount or 0
+
+                # 2. Deduplicate L1 atoms by (team_id, agent_id, type, subject, predicate), keeping newest id
+                cur = await db.execute("""
+                    DELETE FROM memory_l1_atoms
+                    WHERE id NOT IN (
+                        SELECT MAX(id)
+                        FROM memory_l1_atoms
+                        GROUP BY team_id, agent_id, type, subject, predicate
+                    )
+                """)
+                stats["l1_deleted"] += cur.rowcount or 0
+
+                # 3. Clean test scenarios from L2
+                cur = await db.execute("""
+                    DELETE FROM memory_l2_scenarios
+                    WHERE scenario_key LIKE 'evaluation-pos_%'
+                       OR scenario_key LIKE 'evaluation-open_%'
+                       OR scenario_key LIKE 'evaluation-slota_%'
+                       OR scenario_key LIKE 'evaluation-slotb_%'
+                       OR scenario_key LIKE 'evaluation-%_test%'
+                       OR scenario_key IN ('evaluation-news', 'test-scenario')
+                       OR context_content LIKE 'Executed SELL on 4.0x SAP.DE at 201.25%'
+                       OR context_content LIKE 'Deliberated BUY on BESI.AS with consensus score 85/100. Armed trigger #96%'
+                """)
+                stats["l2_deleted"] += cur.rowcount or 0
+
+                # 4. Prune L0 conversations (remove test sessions and cap total rows)
+                cur = await db.execute("""
+                    DELETE FROM memory_l0_conversations
+                    WHERE session_id LIKE 'test_%'
+                       OR session_id LIKE '%_TEST%'
+                       OR session_id LIKE 'trade_OPEN_%'
+                       OR session_id LIKE 'trade_POS_%'
+                       OR session_id LIKE 'trade_SLOTA_%'
+                       OR session_id LIKE 'trade_SLOTB_%'
+                       OR content LIKE '% for JOBX %'
+                       OR content LIKE '% for GATE%'
+                       OR content LIKE '% for HIGH85 %'
+                       OR content LIKE '% for AUTO85 %'
+                       OR content LIKE '%_TEST%'
+                       OR content LIKE '% for SLOTA_%'
+                       OR content LIKE '% for SLOTB_%'
+                       OR content LIKE '% for TRIG_%'
+                       OR content LIKE '% for CLOSE_%'
+                       OR content LIKE '% for OPEN_%'
+                       OR content LIKE '% for DUP_%'
+                       OR content LIKE '%Rationale: Pullback test%'
+                       OR content LIKE '%Rationale: Dip entry%'
+                       OR content LIKE '%Rationale: Strong Technical Breakout%'
+                       OR content LIKE '%Rationale: Target Reached%'
+                """)
+                stats["l0_deleted"] += cur.rowcount or 0
+
+                cur = await db.execute("""
+                    DELETE FROM memory_l0_conversations
+                    WHERE id NOT IN (
+                        SELECT id FROM memory_l0_conversations
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT ?
+                    )
+                """, (max_l0_rows,))
+                stats["l0_deleted"] += cur.rowcount or 0
+
+                await db.commit()
+
+            await self.refresh_codegraph()
+
+            async with aiosqlite.connect(str(self.db_path), isolation_level=None, timeout=10.0) as vdb:
+                await vdb.execute("PRAGMA busy_timeout = 5000")
+                async with await vdb.execute("PRAGMA wal_checkpoint(TRUNCATE)") as c:
+                    await c.fetchall()
+                async with await vdb.execute("VACUUM") as c:
+                    await c.fetchall()
+        return stats
+
+    async def refresh_codegraph(self) -> int:
+        """Re-syncs CodeGraph nodes with AST-resolved (line_start, line_end) from source files."""
+        await self.init_db()
+        async with self._get_conn() as db:
+            await db.execute(
+                "DELETE FROM memory_codegraph WHERE symbol_name IN ('check_trigger_gate', 'ShadowPortfolioManager')"
+            )
+            await db.commit()
+        nodes = self._default_codegraph_nodes()
+        for node in nodes:
+            await self.add_codegraph_node(node)
+        return len(nodes)
+
+    @staticmethod
+    def _default_codegraph_nodes() -> List[CodeGraphNode]:
+        specs = [
+            (
+                "InvestmentCommittee", "class", "src/agents/committee.py", 16, 264,
+                "Multi-agent hedge fund committee presiding over investment decisions.",
+                ["TechnicalAnalystAgent", "FundamentalAnalystAgent", "SentimentAnalystAgent", "RiskManagerAgent", "trade_learner"],
+                ["run_market_session", "routes.analyze_ticker"],
+            ),
+            (
+                "RiskManagerAgent", "class", "src/agents/risk_manager.py", 9, 368,
+                "Risk management agent with unilateral veto power over fee drag and risk limits.",
+                ["evaluate_trade_economic_viability", "calculate_position_allocation"],
+                ["InvestmentCommittee.evaluate_ticker"],
+            ),
+            (
+                "LLMClient", "class", "src/agents/base.py", 55, 254,
+                "LLM execution engine supporting Antigravity CLI (agy), Gemini, and OpenAI.",
+                ["settings.LLM_PROVIDER"],
+                ["InvestmentCommittee", "TechnicalAnalystAgent", "FundamentalAnalystAgent", "SentimentAnalystAgent", "RiskManagerAgent"],
+            ),
+            (
+                "LiveBroker", "class", "src/trading/live.py", 26, 1666,
+                "IBKR & Alpaca real-money broker handling live orders, triggers, and portfolio sync.",
+                ["validate_buy_order", "calculate_broker_fee", "evaluate_trigger_verdict"],
+                ["get_active_broker", "TradingScheduler", "routes"],
+            ),
+            (
+                "PaperBroker", "class", "src/trading/paper.py", 19, 949,
+                "Simulated paper broker with realistic IBKR fee deduction and trigger execution.",
+                ["calculate_broker_fee", "evaluate_trigger_verdict", "validate_buy_order"],
+                ["get_active_broker", "TradingScheduler", "routes"],
+            ),
+            (
+                "calculate_broker_fee", "function", "src/trading/fees.py", 42, 153,
+                "Accurate IBKR commission calculation for EU, US, and UK equities.",
+                ["settings.IBKR_PRICING_TIER"],
+                ["validate_buy_order", "evaluate_trade_economic_viability", "LiveBroker.execute_buy", "PaperBroker.execute_buy"],
+            ),
+            (
+                "evaluate_trade_economic_viability", "function", "src/trading/fees.py", 234, 377,
+                "Rule 9 guardrail preventing micro-trades where round-trip fees erode expected profit.",
+                ["calculate_round_trip_fee"],
+                ["RiskManagerAgent.evaluate_risk", "validate_buy_order"],
+            ),
+            (
+                "calculate_position_allocation", "function", "src/trading/risk.py", 31, 102,
+                "Dynamic slot consolidation and risk-capped position sizing.",
+                ["settings.FULL_BUDGET_UTILIZATION", "settings.MIN_ORDER_EUR_IBKR_EU"],
+                ["RiskManagerAgent.evaluate_risk", "LiveBroker", "PaperBroker"],
+            ),
+            (
+                "evaluate_trigger_verdict", "function", "src/trading/trigger_gate.py", 87, 122,
+                "Pre-execution gate validating consensus score, vetoes, and trigger thresholds before arming or firing triggers.",
+                ["get_trigger_min_score", "TriggerGateResult"],
+                ["LiveBroker.check_and_execute_triggers", "PaperBroker.check_and_execute_triggers", "evaluate_manual_trigger"],
+            ),
+            (
+                "TradeLearner", "class", "src/trading/learner.py", 13, 614,
+                "Post-mortem reflection and autonomous parameter calibration engine.",
+                ["LLMClient", "TradeLesson", "SystemConfig"],
+                ["LiveBroker.execute_sell", "PaperBroker.execute_sell", "InvestmentCommittee.evaluate_ticker"],
+            ),
+            (
+                "ShadowPortfolios", "class", "src/trading/shadow.py", 210, 818,
+                "Parallel shadow strategy simulator comparing alternative parameter presets.",
+                ["ShadowStrategy", "ShadowTrade", "ShadowPosition"],
+                ["TradingScheduler", "routes.get_shadow_comparison"],
+            ),
+            (
+                "MarketScanner", "class", "src/screener/scanner.py", 13, 125,
+                "Universe screener ranking EU and US equities on technical momentum and setups.",
+                ["market_data_provider", "EU_STOCKS", "US_STOCKS"],
+                ["TradingScheduler.run_market_session", "routes.get_screener_candidates"],
+            ),
+            (
+                "TradingScheduler", "class", "src/scheduler/jobs.py", 27, 571,
+                "APScheduler orchestrator for EU/US market sessions, trigger monitoring, and reviews.",
+                ["MarketScanner", "InvestmentCommittee", "get_active_broker"],
+                ["src.web.app.lifespan"],
+            ),
+            (
+                "AgentMemoryStore", "class", "src/memory/store.py", 76, 994,
+                "SQLite WAL store for TencentDB Agent Memory (L0-L3, Skills, Wiki, CodeGraph).",
+                ["aiosqlite"],
+                ["ColdStartEngine", "AssetExtractor", "AgentMemoryClient", "memory_router"],
+            ),
+            (
+                "ColdStartEngine", "class", "src/memory/cold_start.py", 13, 275,
+                "Builds compact token-budgeted situational memory loadouts for AI agents.",
+                ["AgentMemoryStore", "get_active_broker"],
+                ["InvestmentCommittee.evaluate_ticker", "openai_chat_completions_proxy", "anthropic_messages_proxy"],
+            ),
+        ]
+        nodes: List[CodeGraphNode] = []
+        for sym, stype, fpath, fb_start, fb_end, doc, deps, callers in specs:
+            l_start, l_end = _resolve_symbol_lines(fpath, sym, fb_start, fb_end)
+            nodes.append(CodeGraphNode(
+                symbol_name=sym,
+                symbol_type=stype,
+                file_path=fpath,
+                line_start=l_start,
+                line_end=l_end,
+                docstring=doc,
+                dependencies=deps,
+                callers=callers,
+            ))
+        return nodes
+
     # --- Seed Default Assets from Current System & DB ---
 
     async def _seed_default_assets_if_empty(self):
+        skills_cnt = 0
+        cg_cnt = 0
+        stale_cg_cnt = 0
         async with self._get_conn() as db:
             # Drop stale point-in-time facts seeded by earlier versions (trigger #96, EUR 200 account)
             await db.execute("DELETE FROM memory_l1_atoms WHERE atom_id IN ('atom_init_besi_trigger', 'atom_init_account_size')")
             await db.commit()
             async with await db.execute("SELECT COUNT(*) as cnt FROM memory_skills") as c:
                 row = await c.fetchone()
-                if row["cnt"] > 0:
-                    return
+                skills_cnt = row["cnt"] if row else 0
+            async with await db.execute("SELECT symbol_name, file_path, line_start, line_end FROM memory_codegraph") as c:
+                cg_rows = {(r["symbol_name"], r["file_path"], r["line_start"], r["line_end"]) for r in await c.fetchall()}
+            expected_cg = {
+                (n.symbol_name, n.file_path, n.line_start, n.line_end)
+                for n in self._default_codegraph_nodes()
+            }
+            cg_cnt = len(cg_rows)
+            stale_cg_cnt = 0 if cg_rows == expected_cg else 1
 
-        logger.info("Seeding initial TencentDB Agent Memory assets...")
-        now = time.time()
+        if skills_cnt == 0:
+            logger.info("Seeding initial TencentDB Agent Memory assets...")
+            skill_fee = SkillAsset(
+                skill_id="ibkr-tiered-fee-mitigation",
+                name="IBKR Tiered Fee Mitigation Playbook",
+                category="risk-execution",
+                description="Prevent micro-trade commission erosion on Interactive Brokers for EU and US equities.",
+                trigger_conditions=[
+                    "Account capital is small (e.g. €200 - €1,000)",
+                    "Placing orders on Euronext (.AS, .PA), XETRA (.DE), or London (.L)",
+                    "Round-trip commission drag would exceed 3.8% of trade capital"
+                ],
+                execution_steps=[
+                    "Consolidate position slots: calculate available cash / min_viable (€100 for EU, €35 for US)",
+                    "Rule 9 check: evaluate_trade_economic_viability() before placing order or arming trigger",
+                    "If fee drag > 3.8% or net expected gain <= 0, Risk Officer triggers immediate veto",
+                    "Record estimated fees in trade audit log and track cumulative commissions in database"
+                ],
+                version="1.0.0"
+            )
+            await self.add_skill(skill_fee)
 
-        # Seed Skills
-        skill_fee = SkillAsset(
-            skill_id="ibkr-tiered-fee-mitigation",
-            name="IBKR Tiered Fee Mitigation Playbook",
-            category="risk-execution",
-            description="Prevent micro-trade commission erosion on Interactive Brokers for EU and US equities.",
-            trigger_conditions=[
-                "Account capital is small (e.g. €200 - €1,000)",
-                "Placing orders on Euronext (.AS, .PA), XETRA (.DE), or London (.L)",
-                "Round-trip commission drag would exceed 3.8% of trade capital"
-            ],
-            execution_steps=[
-                "Consolidate position slots: calculate available cash / min_viable (€100 for EU, €35 for US)",
-                "Rule 9 check: evaluate_trade_economic_viability() before placing order or arming trigger",
-                "If fee drag > 3.8% or net expected gain <= 0, Risk Officer triggers immediate veto",
-                "Record estimated fees in trade audit log and track cumulative commissions in database"
-            ],
-            version="1.0.0"
-        )
-        await self.add_skill(skill_fee)
+            skill_pullback = SkillAsset(
+                skill_id="pullback-limit-entry",
+                name="Limit Pullback Dip Entry Playbook",
+                category="strategy-execution",
+                description="Identify quality pullback entries on institutional growth stocks using limit triggers.",
+                trigger_conditions=[
+                    "Technical analyst detects oversold pullback (RSI < 45 or near 50-day EMA support)",
+                    "Fundamental balance sheet health is STRONG or EXCELLENT",
+                    "Consensus score >= 70 from committee"
+                ],
+                execution_steps=[
+                    "Calculate pullback price level (1.5% - 3.0% below current spot)",
+                    "Arm OrderTrigger with dynamic consolidated allocation (e.g. €100)",
+                    "Set stop-loss at 1.8x ATR below entry and take-profit at upper resistance (min 2:1 R:R)",
+                    "Monitor real-time ticker quotes via scheduler; fire buy order on price breach"
+                ],
+                version="1.0.0"
+            )
+            await self.add_skill(skill_pullback)
 
-        skill_pullback = SkillAsset(
-            skill_id="pullback-limit-entry",
-            name="Limit Pullback Dip Entry Playbook",
-            category="strategy-execution",
-            description="Identify quality pullback entries on institutional growth stocks using limit triggers.",
-            trigger_conditions=[
-                "Technical analyst detects oversold pullback (RSI < 45 or near 50-day EMA support)",
-                "Fundamental balance sheet health is STRONG or EXCELLENT",
-                "Consensus score >= 70 from committee"
-            ],
-            execution_steps=[
-                "Calculate pullback price level (1.5% - 3.0% below current spot)",
-                "Arm OrderTrigger with dynamic consolidated allocation (e.g. €100)",
-                "Set stop-loss at 1.8x ATR below entry and take-profit at upper resistance (min 2:1 R:R)",
-                "Monitor real-time ticker quotes via scheduler; fire buy order on price breach"
-            ],
-            version="1.0.0"
-        )
-        await self.add_skill(skill_pullback)
-
-        # Seed Wiki Pages
-        wiki_ibkr = WikiPage(
-            page_id="wiki-ibkr-pricing",
-            title="Interactive Brokers Pricing & Fee Architecture",
-            content_md="""# Interactive Brokers Pricing Architecture
+            wiki_ibkr = WikiPage(
+                page_id="wiki-ibkr-pricing",
+                title="Interactive Brokers Pricing & Fee Architecture",
+                content_md="""# Interactive Brokers Pricing Architecture
 
 ## Commission Structure
 - **European Equities (Euronext Amsterdam / Paris / Brussels / Lisbon, XETRA)**:
@@ -593,15 +955,15 @@ class AgentMemoryStore:
 3. `MIN_ORDER_EUR_IBKR_US = 35.0`
 4. `FULL_BUDGET_UTILIZATION`: Dynamically consolidates small budgets into viable €100 slots instead of splitting into toxic micro-orders.
 """,
-            tags=["ibkr", "fees", "broker", "pricing", "risk"],
-            links=["wiki-portfolio-architecture", "skill-ibkr-tiered-fee-mitigation"]
-        )
-        await self.add_wiki_page(wiki_ibkr)
+                tags=["ibkr", "fees", "broker", "pricing", "risk"],
+                links=["wiki-portfolio-architecture", "skill-ibkr-tiered-fee-mitigation"]
+            )
+            await self.add_wiki_page(wiki_ibkr)
 
-        wiki_portfolio = WikiPage(
-            page_id="wiki-portfolio-architecture",
-            title="Portfolio Capital & Order Trigger System",
-            content_md="""# Portfolio Capital & Order Trigger Architecture
+            wiki_portfolio = WikiPage(
+                page_id="wiki-portfolio-architecture",
+                title="Portfolio Capital & Order Trigger System",
+                content_md="""# Portfolio Capital & Order Trigger Architecture
 
 ## Capital Segregation
 - **Portfolio Value (Total Equity)**: Cash balance + sum of open market value of positions.
@@ -612,53 +974,23 @@ class AgentMemoryStore:
 ## Dynamic Slot Consolidation
 When total capital is small (€200), rather than dividing into `MAX_POSITIONS = 6` micro-slots (€33.33 each), the system concentrates funds into viable order slots (2 slots of €100.00 for EU equities).
 """,
-            tags=["portfolio", "cash", "triggers", "architecture"],
-            links=["wiki-ibkr-pricing"]
-        )
-        await self.add_wiki_page(wiki_portfolio)
+                tags=["portfolio", "cash", "triggers", "architecture"],
+                links=["wiki-ibkr-pricing"]
+            )
+            await self.add_wiki_page(wiki_portfolio)
 
-        # Seed Initial L1 Atoms
-        await self.add_l1_atom(L1Atom(
-            atom_id="atom_init_fee_rule",
-            type="instruction",
-            subject="RiskManager",
-            predicate="enforces_fee_drag_limit",
-            object="3.8% max round-trip commission drag",
-            content="Risk Officer enforces a 3.8% max round-trip fee drag and €100 minimum order size on Euronext equities."
-        ))
+            await self.add_l1_atom(L1Atom(
+                atom_id="atom_init_fee_rule",
+                type="instruction",
+                subject="RiskManager",
+                predicate="enforces_fee_drag_limit",
+                object="3.8% max round-trip commission drag",
+                content="Risk Officer enforces a 3.8% max round-trip fee drag and €100 minimum order size on Euronext equities."
+            ))
 
-        # Seed CodeGraph
-        await self.add_codegraph_node(CodeGraphNode(
-            symbol_name="InvestmentCommittee",
-            symbol_type="class",
-            file_path="src/agents/committee.py",
-            line_start=11,
-            line_end=193,
-            docstring="Multi-agent hedge fund committee presiding over investment decisions.",
-            dependencies=["TechnicalAnalystAgent", "FundamentalAnalystAgent", "SentimentAnalystAgent", "RiskManagerAgent", "trade_learner"],
-            callers=["run_market_session", "routes.api_evaluate"]
-        ))
-        await self.add_codegraph_node(CodeGraphNode(
-            symbol_name="RiskManagerAgent",
-            symbol_type="class",
-            file_path="src/agents/risk_manager.py",
-            line_start=12,
-            line_end=150,
-            docstring="Risk management agent with unilateral veto power over fee drag and risk limits.",
-            dependencies=["evaluate_trade_economic_viability", "calculate_position_allocation"],
-            callers=["InvestmentCommittee.evaluate_ticker"]
-        ))
-        await self.add_codegraph_node(CodeGraphNode(
-            symbol_name="calculate_broker_fee",
-            symbol_type="function",
-            file_path="src/trading/fees.py",
-            line_start=15,
-            line_end=75,
-            docstring="Accurate IBKR commission calculation for EU, US, and UK equities.",
-            dependencies=["settings.IBKR_PRICING_TIER"],
-            callers=["validate_buy_order", "evaluate_trade_economic_viability", "live_broker.execute_buy"]
-        ))
+        if cg_cnt < 15 or stale_cg_cnt > 0:
+            await self.refresh_codegraph()
 
-        logger.info("TencentDB Agent Memory default assets seeded successfully.")
+        logger.info("TencentDB Agent Memory default assets ready.")
 
 memory_store = AgentMemoryStore()

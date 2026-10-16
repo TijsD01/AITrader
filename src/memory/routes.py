@@ -29,11 +29,14 @@ START_TIME = time.time()
 
 @memory_router.get("/health")
 async def health_check():
+    import asyncio
     await memory_store.init_db()
-    atoms = await memory_store.search_l1_atoms(limit=1)
-    skills = await memory_store.search_skills(top_k=1)
-    wiki = await memory_store.list_wiki_pages()
-    scenarios = await memory_store.list_scenarios()
+    atoms, skills, wiki, scenarios = await asyncio.gather(
+        memory_store.search_l1_atoms(limit=1),
+        memory_store.search_skills(top_k=50),
+        memory_store.list_wiki_pages(),
+        memory_store.list_scenarios(),
+    )
     return {
         "status": "ok",
         "version": "2.0.0-tencentdb-agent-memory",
@@ -265,17 +268,32 @@ async def create_wiki_page(req: CreateWikiRequest):
     await memory_store.add_wiki_page(page)
     return ApiResponse(data={"page_id": page.page_id, "created": True})
 
+@memory_router.post("/v3/codegraph/search", response_model=ApiResponse)
+@memory_router.get("/v3/codegraph/search", response_model=ApiResponse)
+async def search_codegraph(query: Optional[str] = None, limit: int = 20):
+    nodes = await memory_store.search_codegraph(query=query, limit=limit)
+    return ApiResponse(data={"items": nodes, "total": len(nodes)})
+
+@memory_router.post("/v3/memory/compact", response_model=ApiResponse)
+async def compact_memory(max_l0_rows: int = 150):
+    stats = await memory_store.prune_and_compact(max_l0_rows=max_l0_rows)
+    return ApiResponse(data=stats)
+
 # --- Unified Assets Overview ---
 
 @memory_router.get("/v3/memory/assets", response_model=ApiResponse)
 async def get_all_assets(team_id: str = "trading-team", agent_id: str = "committee"):
     """Returns the unified 4-asset catalog (Chat Memory L0-L3, Skills, Wiki, CodeGraph)."""
-    l3 = await memory_store.get_core_profile(team_id=team_id, agent_id=agent_id)
-    scenarios = await memory_store.list_scenarios(team_id=team_id)
-    atoms = await memory_store.search_l1_atoms(team_id=team_id, limit=30)
-    skills = await memory_store.search_skills(team_id=team_id, top_k=20)
-    wiki = await memory_store.list_wiki_pages(team_id=team_id)
-    codegraph = await memory_store.list_codegraph(limit=30)
+    import asyncio
+    await memory_store.init_db()
+    l3, scenarios, atoms, skills, wiki, codegraph = await asyncio.gather(
+        memory_store.get_core_profile(team_id=team_id, agent_id=agent_id),
+        memory_store.list_scenarios(team_id=team_id),
+        memory_store.search_l1_atoms(team_id=team_id, limit=30),
+        memory_store.search_skills(team_id=team_id, top_k=20),
+        memory_store.list_wiki_pages(team_id=team_id),
+        memory_store.list_codegraph(limit=30),
+    )
 
     return ApiResponse(data={
         "chat_memory": {

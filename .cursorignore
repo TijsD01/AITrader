@@ -1,0 +1,19 @@
+# Exclude binary databases, caches, logs, and virtual environments from AI agent indexing
+.venv/
+venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.git/
+.agents/
+.claude/
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/*.db-journal
+data/*.sqlite*
+data/*.log
+*.log
+.env
+ib-gateway.env

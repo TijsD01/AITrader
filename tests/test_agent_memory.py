@@ -352,3 +352,317 @@ async def test_extractor_metadata_dedup_and_fixed_skill_id(temp_db_path, monkeyp
     wisdom = (await store.get_core_profile())["cumulative_wisdom"]
     bullet = "Enforce strict Risk Officer veto"
     assert wisdom.count(bullet) == 1
+
+
+@pytest.mark.asyncio
+async def test_extractor_filters_stop_words_and_upserts_deterministically(temp_db_path, monkeypatch):
+    import src.memory.extractor as ext
+    store = AgentMemoryStore(db_path=temp_db_path)
+    await store.init_db()
+    monkeypatch.setattr(ext, "memory_store", store)
+
+    # Trigger extraction must extract BESI.AS (not "for" or "entry" or "LIMIT_PULLBACK")
+    r1 = await AssetExtractor.extract_from_text(
+        "Armed order trigger #96 for BESI.AS (LIMIT_PULLBACK) at target price €175.88. "
+        "Est. IBKR round-trip commission: €1.79 (0.7% drag). "
+        "Enforced IBKR fee drag limit 3.8%.",
+        metadata={"ticker": "BESI.AS", "action": "BUY", "consensus_score": 85}
+    )
+    subjects = [a["subject"] for a in r1["extracted_atoms"]]
+    assert "BESI.AS" in subjects
+    for bad in ("for", "entry", "LIMIT", "LIMIT_PULLBACK", "Hit", "trigger"):
+        assert bad not in subjects
+
+    # Routine per-trade commission (€1.79 / 0.7%) is skipped; the 3.8% fee rule is extracted once
+    fee_atoms = [a for a in r1["extracted_atoms"] if a["subject"] == "IBKR_Broker_Fee"]
+    assert len(fee_atoms) == 1
+    assert fee_atoms[0]["object"] == "3.8%"
+
+    # Repeated extraction upserts the same deterministic atom_ids instead of multiplying rows
+    await AssetExtractor.extract_from_text(
+        "Armed order trigger #96 for BESI.AS (LIMIT_PULLBACK) at target price €174.50. "
+        "Enforced IBKR fee drag limit 3.8%.",
+        metadata={"ticker": "BESI.AS", "action": "HOLD", "consensus_score": 60}
+    )
+    besi_verdicts = [
+        a for a in await store.search_l1_atoms(query="BESI.AS", limit=50)
+        if a["subject"] == "BESI.AS" and a["predicate"] == "committee_verdict"
+    ]
+    assert len(besi_verdicts) == 1
+    assert "HOLD (Score: 60)" in besi_verdicts[0]["object"]
+
+
+@pytest.mark.asyncio
+async def test_l1_ranking_and_prune_and_compact(temp_db_path):
+    store = AgentMemoryStore(db_path=temp_db_path)
+    await store.init_db()
+
+    # Insert an older query-matching episodic atom and a newer generic instruction atom
+    await store.add_l1_atom(L1Atom(
+        atom_id="ep_asml", type="episodic", subject="ASML.AS",
+        predicate="committee_verdict", object="BUY (Score: 88)",
+        content="Committee BUY on ASML.AS.", created_at=100.0
+    ))
+    await store.add_l1_atom(L1Atom(
+        atom_id="inst_generic", type="instruction", subject="GeneralRule",
+        predicate="rule", object="always check risk",
+        content="Always check risk limits.", created_at=999999.0
+    ))
+    # Direct token match (ASML.AS) must rank above the newer unrelated instruction atom
+    ranked = await store.search_l1_atoms(query="ASML.AS", limit=5)
+    assert ranked[0]["atom_id"] == "ep_asml"
+
+    # Insert stop-word/test pollution and verify prune_and_compact removes it
+    await store.add_l1_atom(L1Atom(
+        atom_id="bad_for", type="episodic", subject="for",
+        predicate="trigger_price_level", object="€100", content="Trigger for for"
+    ))
+    await store.add_l1_atom(L1Atom(
+        atom_id="bad_test", type="episodic", subject="NVDA_FEE_TEST",
+        predicate="committee_verdict", object="BUY", content="Test atom"
+    ))
+    stats = await store.prune_and_compact(max_l0_rows=10)
+    assert stats["l1_deleted"] >= 2
+    remaining_subjects = {a["subject"] for a in await store.search_l1_atoms(limit=100)}
+    assert "for" not in remaining_subjects
+    assert "NVDA_FEE_TEST" not in remaining_subjects
+
+    # Verify CodeGraph search finds seeded symbols
+    cg = await store.search_codegraph(query="LiveBroker")
+    assert any(n["symbol_name"] == "LiveBroker" for n in cg)
+
+
+@pytest.mark.asyncio
+async def test_cold_start_scenario_matching_and_token_budget(temp_db_path, monkeypatch):
+    import src.memory.cold_start as cs_mod
+    store = AgentMemoryStore(db_path=temp_db_path)
+    await store.init_db()
+    monkeypatch.setattr(cs_mod, "memory_store", store)
+    monkeypatch.setattr(ColdStartEngine, "_portfolio_cache", None)
+    monkeypatch.setattr("src.trading.broker.get_active_broker", lambda: _FakeBroker())
+
+    await store.update_scenario(L2Scenario(
+        scenario_key="evaluation-asml.as", title="Committee Deliberation on ASML.AS",
+        summary="Deliberated BUY on ASML.AS (Score 85/100).", context_content="Details",
+        active_entities=["ASML.AS", "BUY"]
+    ))
+    await store.update_scenario(L2Scenario(
+        scenario_key="evaluation-crm", title="Committee Deliberation on CRM",
+        summary="Deliberated HOLD on CRM (Score 65/100).", context_content="CRM details",
+        active_entities=["CRM", "HOLD"]
+    ))
+
+    # Querying ASML.AS selects ASML.AS scenario even though CRM was updated more recently
+    loadout_asml = await ColdStartEngine.generate_cold_start_loadout(query="ASML.AS", include_lessons=False)
+    assert "ASML.AS" in loadout_asml.l2_active_scenario
+    assert "CRM" not in loadout_asml.l2_active_scenario
+    # Skills fall back to core playbooks even when query is a ticker symbol
+    assert len(loadout_asml.active_skills) >= 1
+    # Token-optimized prompt stays compact (< 2400 chars)
+    assert len(loadout_asml.full_prompt_context) < 2400
+
+    # Querying a ticker with no scenario does not leak CRM's scenario into the prompt
+    loadout_nvda = await ColdStartEngine.generate_cold_start_loadout(query="NVDA", include_lessons=False)
+    assert "CRM" not in loadout_nvda.l2_active_scenario
+
+    # Short 1-char ticker "V" must match evaluation-v, never "evaluation-asml.as" (which has 'v' in 'evaluation')
+    await store.update_scenario(L2Scenario(
+        scenario_key="evaluation-v", title="Committee Deliberation on V",
+        summary="Deliberated HOLD on V (Score 69/100).", context_content="V details",
+        active_entities=["V", "HOLD"]
+    ))
+    await store.update_scenario(L2Scenario(
+        scenario_key="evaluation-asml.as", title="Committee Deliberation on ASML.AS",
+        summary="Deliberated BUY on ASML.AS (Score 85/100).", context_content="Details",
+        active_entities=["ASML.AS", "BUY"]
+    ))
+    loadout_v = await ColdStartEngine.generate_cold_start_loadout(query="V", include_lessons=False)
+    assert "Deliberation on V" in loadout_v.l2_active_scenario
+    assert "ASML.AS" not in loadout_v.l2_active_scenario
+
+    # Conversational sentence query matches CRM scenario
+    loadout_sentence = await ColdStartEngine.generate_cold_start_loadout(
+        query="What should we do with CRM today?", include_lessons=False
+    )
+    assert "Deliberation on CRM" in loadout_sentence.l2_active_scenario
+
+
+@pytest.mark.asyncio
+async def test_concurrent_init_and_ast_codegraph_and_short_ticker_search(temp_db_path):
+    import asyncio
+    import ast
+    from src.memory.store import REPO_ROOT
+
+    # 1. Concurrent calls on an uninitialized store must not raise 'database is locked'
+    store = AgentMemoryStore(db_path=temp_db_path)
+    l3, scenarios, atoms, skills, wiki, cg = await asyncio.gather(
+        store.get_core_profile(),
+        store.list_scenarios(),
+        store.search_l1_atoms(),
+        store.search_skills(),
+        store.list_wiki_pages(),
+        store.list_codegraph(limit=30),
+    )
+    assert "Committee" in l3["persona_name"]
+    assert len(cg) >= 15
+
+    # 2. Every seeded CodeGraphNode must exist in the AST with exact (lineno, end_lineno)
+    for node in cg:
+        fp = REPO_ROOT / node["file_path"]
+        assert fp.exists(), f"Missing file {node['file_path']}"
+        tree = ast.parse(fp.read_text(encoding="utf-8"))
+        matched = [
+            n for n in ast.walk(tree)
+            if isinstance(n, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == node["symbol_name"]
+        ]
+        assert matched, f"Symbol {node['symbol_name']} not found in {node['file_path']}"
+        assert (node["line_start"], node["line_end"]) == (matched[0].lineno, matched[0].end_lineno)
+
+    # 3. Short ticker 'V' and conversational query with 'with' must not match unrelated verdict prose
+    await store.add_l1_atom(L1Atom(
+        atom_id="v_atom", type="episodic", subject="V", predicate="committee_verdict",
+        object="HOLD (Score: 69)",
+        content="Investment Committee rendered HOLD verdict on V with consensus conviction of 69/100.",
+        created_at=100.0
+    ))
+    await store.add_l1_atom(L1Atom(
+        atom_id="jpm_atom", type="episodic", subject="JPM", predicate="committee_verdict",
+        object="HOLD (Score: 69)",
+        content="Investment Committee rendered HOLD verdict on JPM with consensus conviction of 69/100.",
+        created_at=500.0
+    ))
+    v_res = await store.search_l1_atoms(query="V", limit=5)
+    assert v_res[0]["subject"] == "V"
+    assert "JPM" not in [a["subject"] for a in v_res]
+
+    jpm_sentence_res = await store.search_l1_atoms(query="What should we do with V today?", limit=5)
+    assert jpm_sentence_res[0]["subject"] == "V"
+    assert "JPM" not in [a["subject"] for a in jpm_sentence_res]
+
+
+@pytest.mark.asyncio
+async def test_extractor_skips_hold_triggers_and_trade_fill_verdicts(temp_db_path, monkeypatch):
+    import src.memory.extractor as ext
+    store = AgentMemoryStore(db_path=temp_db_path)
+    await store.init_db()
+    monkeypatch.setattr(ext, "memory_store", store)
+
+    # 1. HOLD deliberation with technical breakout commentary and 'Portfolio Manager:' speaker label
+    hold_delib = (
+        "Deliberation on OR.PA (HOLD, Score 75/100):\n"
+        "**[Technical Analyst]**: \"OR.PA presents a setup following a breakout above its pivot at 392.15 EUR.\"\n"
+        "**[Portfolio Manager]**: \"Consensus is HOLD. AI Trigger: LIMIT_PULLBACK @ 392.15 EUR.\""
+    )
+    res_hold = await AssetExtractor.extract_from_text(
+        hold_delib, metadata={"ticker": "OR.PA", "action": "HOLD", "consensus_score": 75}, sync_to_store=False
+    )
+    preds = [a["predicate"] for a in res_hold["extracted_atoms"]]
+    assert "committee_verdict" in preds
+    assert "trigger_price_level" not in preds
+    assert "account_balance_state" not in preds
+
+    # 2. Trade fill execution log must record trade_executed, not fabricate a committee_verdict or €1.90 fee rule
+    fill_text = "Executed BUY on 3.0x TTE.PA at 80.76 EUR with fee of €1.90 . Rationale: Live Trigger #109 Hit"
+    res_fill = await AssetExtractor.extract_from_text(
+        fill_text, metadata={"event": "trade_execution", "ticker": "TTE.PA"}, sync_to_store=False
+    )
+    fill_preds = [a["predicate"] for a in res_fill["extracted_atoms"]]
+    assert "trade_executed" in fill_preds
+    assert "committee_verdict" not in fill_preds
+    assert "fee_constraint_observed" not in fill_preds
+
+
+@pytest.mark.asyncio
+async def test_agents_md_and_production_codegraph_ast_sync(temp_db_path):
+    import ast
+    import re
+    import sqlite3
+    import aiosqlite
+    from src.memory.store import REPO_ROOT, DB_PATH, AgentMemoryStore, memory_store
+
+    agents_md_path = REPO_ROOT / "AGENTS.md"
+    assert agents_md_path.exists(), "AGENTS.md must exist at repository root"
+    text = agents_md_path.read_text(encoding="utf-8")
+
+    # Parse every file link and its optional (`symbol:start-end`, ...) block
+    link_pattern = re.compile(
+        r"\[[^\]]+\]\(file:///home/tdapper/TradingBotNew/([^)]+)\)\s*(?:\(([^)]+)\))?"
+    )
+    sym_pattern = re.compile(r"^([A-Za-z0-9_]+):(\d+)-(\d+)$")
+
+    ast_cache = {}
+
+    def _get_ast_ranges(rel_path: str):
+        if rel_path not in ast_cache:
+            fp = REPO_ROOT / rel_path
+            tree = ast.parse(fp.read_text(encoding="utf-8"))
+            by_name = {}
+            for n in ast.walk(tree):
+                if isinstance(n, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                    by_name.setdefault(n.name, []).append((n.lineno, n.end_lineno))
+            ast_cache[rel_path] = by_name
+        return ast_cache[rel_path]
+
+    checked_symbols = 0
+    for m in link_pattern.finditer(text):
+        rel_path, sym_block = m.group(1), m.group(2)
+        fp = REPO_ROOT / rel_path
+        assert fp.exists(), f"AGENTS.md references non-existent file: {rel_path}"
+        if not sym_block or fp.suffix != ".py":
+            continue
+        nodes = _get_ast_ranges(rel_path)
+        tokens = re.findall(r"`([^`]+)`", sym_block)
+        assert tokens, f"Empty parenthetical block for {rel_path} in AGENTS.md"
+        for tok in tokens:
+            if "/" in tok:
+                assert (REPO_ROOT / tok).exists(), f"Referenced path {tok} does not exist"
+                continue
+            sym_m = sym_pattern.match(tok)
+            assert sym_m is not None, (
+                f"Symbol `{tok}` for {rel_path} in AGENTS.md is missing an explicit `:start-end` line range"
+            )
+            sym, start_line, end_line = sym_m.group(1), int(sym_m.group(2)), int(sym_m.group(3))
+            assert sym in nodes, f"Symbol {sym} not found in {rel_path}"
+            assert (start_line, end_line) in nodes[sym], (
+                f"AGENTS.md drift for {rel_path}::{sym}: expected {nodes[sym]}, got {(start_line, end_line)}"
+            )
+            checked_symbols += 1
+
+    assert checked_symbols >= 45, f"Expected at least 45 symbol ranges in AGENTS.md, found {checked_symbols}"
+
+    # Verify the persisted production SQLite database (data/memory.db, not conftest's test_memory.db)
+    assert DB_PATH.exists(), f"Production memory DB missing at {DB_PATH}"
+    with sqlite3.connect(str(DB_PATH)) as conn:
+        rows = conn.execute(
+            "SELECT symbol_name, file_path, line_start, line_end FROM memory_codegraph"
+        ).fetchall()
+    assert len(rows) >= 15, f"Expected >= 15 codegraph rows in {DB_PATH}, found {len(rows)}"
+    for sym_name, rel_path, l_start, l_end in rows:
+        expected_ranges = _get_ast_ranges(rel_path).get(sym_name, [])
+        assert (l_start, l_end) in expected_ranges, (
+            f"data/memory.db memory_codegraph drift for {rel_path}::{sym_name}: "
+            f"expected {expected_ranges}, got {(l_start, l_end)}"
+        )
+
+    # Also verify active memory_store.list_codegraph() without calling refresh_codegraph() beforehand
+    cg = await memory_store.list_codegraph(limit=50)
+    assert len(cg) >= 15
+    for node in cg:
+        rel_path = node["file_path"]
+        expected_ranges = _get_ast_ranges(rel_path).get(node["symbol_name"], [])
+        assert (node["line_start"], node["line_end"]) in expected_ranges, (
+            f"memory_codegraph drift for {rel_path}::{node['symbol_name']}: "
+            f"expected {expected_ranges}, got {(node['line_start'], node['line_end'])}"
+        )
+
+    # Verify that if a store has drifted line numbers in memory_codegraph, init_db() auto-repairs it
+    drift_store = AgentMemoryStore(db_path=temp_db_path)
+    await drift_store.init_db()
+    async with aiosqlite.connect(str(temp_db_path)) as db:
+        await db.execute("UPDATE memory_codegraph SET line_end = 999999 WHERE symbol_name = 'AgentMemoryStore'")
+        await db.commit()
+    reopened_store = AgentMemoryStore(db_path=temp_db_path)
+    repaired_cg = await reopened_store.list_codegraph(limit=50)
+    ams_node = next(n for n in repaired_cg if n["symbol_name"] == "AgentMemoryStore")
+    assert (ams_node["line_start"], ams_node["line_end"]) in _get_ast_ranges("src/memory/store.py")["AgentMemoryStore"]
+

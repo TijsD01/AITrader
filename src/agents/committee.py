@@ -59,7 +59,9 @@ class InvestmentCommittee:
         memory_context = ""
         try:
             from src.memory.client import agent_memory_client
-            cold_start = await agent_memory_client.get_cold_start_loadout(query=ticker)
+            cold_start = await agent_memory_client.get_cold_start_loadout(
+                query=ticker, char_budget=2400, include_lessons=False
+            )
             memory_context = cold_start.full_prompt_context
         except Exception as e:
             logger.debug(f"Memory client context load note: {e}")
