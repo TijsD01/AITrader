@@ -270,3 +270,38 @@ async def test_live_buy_not_recorded_when_broker_rejects():
             await session.execute(delete(Position).where(Position.ticker == ticker))
             await session.commit()
         settings.TRADING_MODE, settings.LIVE_TRADING_ENABLED, settings.KILL_SWITCH_ACTIVE, settings.LIVE_BROKER = orig
+
+
+@pytest.mark.asyncio
+async def test_portfolio_summary_uses_ibkr_values():
+    """Dashboard total/equity come from IBKR account summary, not local quotes."""
+    from types import SimpleNamespace as NS
+    await init_db()
+    async with AsyncSessionLocal() as session:
+        await session.execute(delete(Position).where(Position.is_live == True))
+        await session.execute(delete(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True))
+        session.add(PortfolioSnapshot(cash_eur=100.0, equity_eur=300.0, total_value_eur=400.0, daily_pnl_eur=0.0,
+                                      daily_pnl_pct=0.0, open_positions_count=0, is_live=True))
+        await session.commit()
+
+    class FakeIB:
+        def isConnected(self):
+            return True
+        async def accountSummaryAsync(self):
+            return [NS(tag="TotalCashValue", value="100.0", currency="EUR"),
+                    NS(tag="NetLiquidation", value="431.69", currency="EUR"),
+                    NS(tag="GrossPositionValue", value="331.69", currency="EUR")]
+
+    try:
+        with patch.object(settings, "LIVE_BROKER", "ibkr"), patch.object(live_broker, "_get_ib", return_value=FakeIB()):
+            s = await live_broker.get_portfolio_summary()
+            assert s["value_source"] == "ibkr"
+            assert s["total_value_eur"] == 431.69 and s["equity_eur"] == 331.69
+        # Gateway down: falls back to the stored snapshot
+        with patch.object(settings, "LIVE_BROKER", "ibkr"), patch.object(live_broker, "_get_ib", side_effect=ConnectionError):
+            s = await live_broker.get_portfolio_summary()
+            assert s["value_source"] == "snapshot" and s["total_value_eur"] == 400.0
+    finally:
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True))
+            await session.commit()
