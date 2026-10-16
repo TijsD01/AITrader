@@ -45,7 +45,7 @@ class ReviewTracker:
         us_close_min = (settings.US_CLOSE_HOUR * 60) + settings.US_CLOSE_MINUTE    # 22:00 = 1320
 
         # On weekends (Sat/Sun) or Friday after US Close: Next session is Monday European Open!
-        if weekday >= 5 or (weekday == 4 and time_minutes >= (us_close_min + 2)):
+        if weekday >= 5 or (weekday == 4 and time_minutes >= us_close_min):
             return {
                 "market": "EU",
                 "session": "OPEN",
@@ -56,8 +56,8 @@ class ReviewTracker:
             }
 
         # Weekdays (Mon-Fri) chronological progression:
-        # Margin of 2 minutes to avoid self-referencing if evaluated exactly at trigger time
-        if time_minutes < (eu_open_min + 2):
+        # Strict < so a review sent at its own trigger time points to the following session
+        if time_minutes < eu_open_min:
             return {
                 "market": "EU",
                 "session": "OPEN",
@@ -66,7 +66,7 @@ class ReviewTracker:
                 "flag": "🇪🇺",
                 "formatted": f"🇪🇺 European Market Open at {settings.EU_OPEN_HOUR:02d}:{settings.EU_OPEN_MINUTE:02d} CET"
             }
-        elif time_minutes < (us_open_min + 2):
+        elif time_minutes < us_open_min:
             return {
                 "market": "US",
                 "session": "OPEN",
@@ -75,7 +75,7 @@ class ReviewTracker:
                 "flag": "🇺🇸",
                 "formatted": f"🇺🇸 US Market Open at {settings.US_OPEN_HOUR:02d}:{settings.US_OPEN_MINUTE:02d} CET"
             }
-        elif time_minutes < (eu_close_min + 2):
+        elif time_minutes < eu_close_min:
             return {
                 "market": "EU",
                 "session": "CLOSE",
@@ -84,7 +84,7 @@ class ReviewTracker:
                 "flag": "🇪🇺",
                 "formatted": f"🇪🇺 European Market Close at {settings.EU_CLOSE_HOUR:02d}:{settings.EU_CLOSE_MINUTE:02d} CET"
             }
-        elif time_minutes < (us_close_min + 2):
+        elif time_minutes < us_close_min:
             return {
                 "market": "US",
                 "session": "CLOSE",

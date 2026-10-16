@@ -78,6 +78,15 @@ async def test_next_session_schedule_cycle():
     assert s_sun["session"] == "OPEN"
     assert "Monday" in s_sun["formatted"]
 
+    # 9. Reviews sent at their own trigger time must point to the following session
+    s_eu_close = ReviewTracker.get_next_session_info(datetime.datetime(2026, 9, 7, 17, 30, 20, tzinfo=tz))
+    assert (s_eu_close["market"], s_eu_close["session"]) == ("US", "CLOSE")
+    s_us_close = ReviewTracker.get_next_session_info(datetime.datetime(2026, 9, 7, 22, 0, 20, tzinfo=tz))
+    assert (s_us_close["market"], s_us_close["session"]) == ("EU", "OPEN")
+    assert "tomorrow" in s_us_close["formatted"]
+    s_fri_close = ReviewTracker.get_next_session_info(datetime.datetime(2026, 9, 11, 22, 0, 20, tzinfo=tz))
+    assert "Monday" in s_fri_close["formatted"]
+
 @pytest.mark.asyncio
 async def test_save_and_retrieve_weekly_reviews():
     """Verify saving session review persists portfolio state and review text."""
