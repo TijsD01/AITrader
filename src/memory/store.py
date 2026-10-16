@@ -640,7 +640,7 @@ class AgentMemoryStore:
 
     async def prune_and_compact(self, max_l0_rows: int = 150) -> Dict[str, int]:
         """
-        Cleans up duplicate L1 atoms, removes stop-word/test pollution,
+        Removes stop-word/test pollution from L1/L2/L0,
         caps L0 conversation history, refreshes CodeGraph AST line ranges, and compacts the SQLite file.
         """
         await self.init_db()
@@ -648,7 +648,7 @@ class AgentMemoryStore:
         async with self._compact_lock:
             async with self._get_conn() as db:
                 # 1. Remove stop-word, non-uppercase, or test-only subjects in L1 atoms
-                cur = await db.execute("""
+                cur = await db.execute(r"""
                     DELETE FROM memory_l1_atoms
                     WHERE UPPER(subject) IN (
                         'FOR', 'ON', 'AT', 'ENTRY', 'TRIGGER', 'HIT', 'LIMIT', 'BREAKOUT',
@@ -656,71 +656,42 @@ class AgentMemoryStore:
                     )
                        OR (predicate IN ('trigger_price_level', 'committee_verdict') AND subject != UPPER(subject))
                        OR (subject = 'Capital_Allocation' AND content LIKE '%Portfolio Manager:%')
-                       OR subject LIKE '%_TEST%'
-                       OR subject LIKE 'OPEN_%'
-                       OR subject LIKE 'POS_%'
-                       OR subject LIKE 'SLOTA_%'
-                       OR subject LIKE 'SLOTB_%'
-                       OR subject LIKE 'TRIG_%'
-                       OR subject LIKE 'CLOSE_%'
-                       OR subject LIKE 'DUP_%'
-                       OR subject LIKE 'GATE%'
+                       OR subject LIKE '%\_TEST%' ESCAPE '\'
+                       OR subject LIKE 'OPEN\_%' ESCAPE '\'
+                       OR subject LIKE 'POS\_%' ESCAPE '\'
+                       OR subject LIKE 'SLOTA\_%' ESCAPE '\'
+                       OR subject LIKE 'SLOTB\_%' ESCAPE '\'
+                       OR subject LIKE 'TRIG\_%' ESCAPE '\'
+                       OR subject LIKE 'CLOSE\_%' ESCAPE '\'
+                       OR subject LIKE 'DUP\_%' ESCAPE '\'
+                       OR subject GLOB 'GATE*'
                        OR subject IN ('JOBX', 'HIGH85', 'AUTO85')
                        OR source_session_id = 'test_extract'
-                       OR source_session_id LIKE 'test_%'
-                       OR source_session_id IN ('trade_SAP.DE_1792131101', 'trade_ASML.AS_1792131520', 'sess_1792131520126')
+                       OR source_session_id LIKE 'test\_%' ESCAPE '\'
                 """)
                 stats["l1_deleted"] += cur.rowcount or 0
 
-                # 2. Deduplicate L1 atoms by (team_id, agent_id, type, subject, predicate), keeping newest id
-                cur = await db.execute("""
-                    DELETE FROM memory_l1_atoms
-                    WHERE id NOT IN (
-                        SELECT MAX(id)
-                        FROM memory_l1_atoms
-                        GROUP BY team_id, agent_id, type, subject, predicate
-                    )
-                """)
-                stats["l1_deleted"] += cur.rowcount or 0
-
-                # 3. Clean test scenarios from L2
-                cur = await db.execute("""
+                # 2. Clean test scenarios from L2
+                cur = await db.execute(r"""
                     DELETE FROM memory_l2_scenarios
-                    WHERE scenario_key LIKE 'evaluation-pos_%'
-                       OR scenario_key LIKE 'evaluation-open_%'
-                       OR scenario_key LIKE 'evaluation-slota_%'
-                       OR scenario_key LIKE 'evaluation-slotb_%'
-                       OR scenario_key LIKE 'evaluation-%_test%'
+                    WHERE scenario_key LIKE 'evaluation-pos\_%' ESCAPE '\'
+                       OR scenario_key LIKE 'evaluation-open\_%' ESCAPE '\'
+                       OR scenario_key LIKE 'evaluation-slota\_%' ESCAPE '\'
+                       OR scenario_key LIKE 'evaluation-slotb\_%' ESCAPE '\'
+                       OR scenario_key LIKE 'evaluation-%\_test%' ESCAPE '\'
                        OR scenario_key IN ('evaluation-news', 'test-scenario')
-                       OR context_content LIKE 'Executed SELL on 4.0x SAP.DE at 201.25%'
-                       OR context_content LIKE 'Deliberated BUY on BESI.AS with consensus score 85/100. Armed trigger #96%'
                 """)
                 stats["l2_deleted"] += cur.rowcount or 0
 
-                # 4. Prune L0 conversations (remove test sessions and cap total rows)
-                cur = await db.execute("""
+                # 3. Prune L0 conversations (remove test sessions and cap total rows)
+                cur = await db.execute(r"""
                     DELETE FROM memory_l0_conversations
-                    WHERE session_id LIKE 'test_%'
-                       OR session_id LIKE '%_TEST%'
-                       OR session_id LIKE 'trade_OPEN_%'
-                       OR session_id LIKE 'trade_POS_%'
-                       OR session_id LIKE 'trade_SLOTA_%'
-                       OR session_id LIKE 'trade_SLOTB_%'
-                       OR content LIKE '% for JOBX %'
-                       OR content LIKE '% for GATE%'
-                       OR content LIKE '% for HIGH85 %'
-                       OR content LIKE '% for AUTO85 %'
-                       OR content LIKE '%_TEST%'
-                       OR content LIKE '% for SLOTA_%'
-                       OR content LIKE '% for SLOTB_%'
-                       OR content LIKE '% for TRIG_%'
-                       OR content LIKE '% for CLOSE_%'
-                       OR content LIKE '% for OPEN_%'
-                       OR content LIKE '% for DUP_%'
-                       OR content LIKE '%Rationale: Pullback test%'
-                       OR content LIKE '%Rationale: Dip entry%'
-                       OR content LIKE '%Rationale: Strong Technical Breakout%'
-                       OR content LIKE '%Rationale: Target Reached%'
+                    WHERE session_id LIKE 'test\_%' ESCAPE '\'
+                       OR session_id LIKE '%\_TEST%' ESCAPE '\'
+                       OR session_id LIKE 'trade\_OPEN\_%' ESCAPE '\'
+                       OR session_id LIKE 'trade\_POS\_%' ESCAPE '\'
+                       OR session_id LIKE 'trade\_SLOTA\_%' ESCAPE '\'
+                       OR session_id LIKE 'trade\_SLOTB\_%' ESCAPE '\'
                 """)
                 stats["l0_deleted"] += cur.rowcount or 0
 
@@ -749,11 +720,6 @@ class AgentMemoryStore:
     async def refresh_codegraph(self) -> int:
         """Re-syncs CodeGraph nodes with AST-resolved (line_start, line_end) from source files."""
         await self.init_db()
-        async with self._get_conn() as db:
-            await db.execute(
-                "DELETE FROM memory_codegraph WHERE symbol_name IN ('check_trigger_gate', 'ShadowPortfolioManager')"
-            )
-            await db.commit()
         nodes = self._default_codegraph_nodes()
         for node in nodes:
             await self.add_codegraph_node(node)

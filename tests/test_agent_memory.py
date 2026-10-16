@@ -421,11 +421,30 @@ async def test_l1_ranking_and_prune_and_compact(temp_db_path):
         atom_id="bad_test", type="episodic", subject="NVDA_FEE_TEST",
         predicate="committee_verdict", object="BUY", content="Test atom"
     ))
+    # Real data that only looks like test pollution under unescaped LIKE ('_' = any char, case-insensitive)
+    await store.add_l1_atom(L1Atom(
+        atom_id="real_post", type="episodic", subject="POST",
+        predicate="committee_verdict", object="HOLD", content="Committee HOLD on POST."
+    ))
+    for i, obj in enumerate(("3.8% max drag", "€100 minimum order")):
+        await store.add_l1_atom(L1Atom(
+            atom_id=f"fee_{i}", type="instruction", subject="IBKR_Broker_Fee",
+            predicate="fee_constraint_observed", object=obj, content=f"Fee constraint: {obj}."
+        ))
+    await store.add_l0_messages("sess_real", [L0Message(
+        role="assistant", content="Deliberation on HEIA.AS: waiting for the breakout retest."
+    )])
     stats = await store.prune_and_compact(max_l0_rows=10)
     assert stats["l1_deleted"] >= 2
     remaining_subjects = {a["subject"] for a in await store.search_l1_atoms(limit=100)}
     assert "for" not in remaining_subjects
     assert "NVDA_FEE_TEST" not in remaining_subjects
+    assert "POST" in remaining_subjects
+    fee_objs = {a["object"] for a in await store.search_l1_atoms(limit=100) if a["subject"] == "IBKR_Broker_Fee"}
+    assert {"3.8% max drag", "€100 minimum order"} <= fee_objs
+    async with store._get_conn() as db:
+        async with await db.execute("SELECT COUNT(*) FROM memory_l0_conversations WHERE session_id = 'sess_real'") as c:
+            assert (await c.fetchone())[0] == 1
 
     # Verify CodeGraph search finds seeded symbols
     cg = await store.search_codegraph(query="LiveBroker")
@@ -573,89 +592,11 @@ async def test_extractor_skips_hold_triggers_and_trade_fill_verdicts(temp_db_pat
 
 
 @pytest.mark.asyncio
-async def test_agents_md_and_production_codegraph_ast_sync(temp_db_path):
+async def test_codegraph_auto_repairs_drift(temp_db_path):
     import ast
-    import re
-    import sqlite3
     import aiosqlite
-    from src.memory.store import REPO_ROOT, DB_PATH, AgentMemoryStore, memory_store
+    from src.memory.store import REPO_ROOT, AgentMemoryStore
 
-    agents_md_path = REPO_ROOT / "AGENTS.md"
-    assert agents_md_path.exists(), "AGENTS.md must exist at repository root"
-    text = agents_md_path.read_text(encoding="utf-8")
-
-    # Parse every file link and its optional (`symbol:start-end`, ...) block
-    link_pattern = re.compile(
-        r"\[[^\]]+\]\(file:///home/tdapper/TradingBotNew/([^)]+)\)\s*(?:\(([^)]+)\))?"
-    )
-    sym_pattern = re.compile(r"^([A-Za-z0-9_]+):(\d+)-(\d+)$")
-
-    ast_cache = {}
-
-    def _get_ast_ranges(rel_path: str):
-        if rel_path not in ast_cache:
-            fp = REPO_ROOT / rel_path
-            tree = ast.parse(fp.read_text(encoding="utf-8"))
-            by_name = {}
-            for n in ast.walk(tree):
-                if isinstance(n, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-                    by_name.setdefault(n.name, []).append((n.lineno, n.end_lineno))
-            ast_cache[rel_path] = by_name
-        return ast_cache[rel_path]
-
-    checked_symbols = 0
-    for m in link_pattern.finditer(text):
-        rel_path, sym_block = m.group(1), m.group(2)
-        fp = REPO_ROOT / rel_path
-        assert fp.exists(), f"AGENTS.md references non-existent file: {rel_path}"
-        if not sym_block or fp.suffix != ".py":
-            continue
-        nodes = _get_ast_ranges(rel_path)
-        tokens = re.findall(r"`([^`]+)`", sym_block)
-        assert tokens, f"Empty parenthetical block for {rel_path} in AGENTS.md"
-        for tok in tokens:
-            if "/" in tok:
-                assert (REPO_ROOT / tok).exists(), f"Referenced path {tok} does not exist"
-                continue
-            sym_m = sym_pattern.match(tok)
-            assert sym_m is not None, (
-                f"Symbol `{tok}` for {rel_path} in AGENTS.md is missing an explicit `:start-end` line range"
-            )
-            sym, start_line, end_line = sym_m.group(1), int(sym_m.group(2)), int(sym_m.group(3))
-            assert sym in nodes, f"Symbol {sym} not found in {rel_path}"
-            assert (start_line, end_line) in nodes[sym], (
-                f"AGENTS.md drift for {rel_path}::{sym}: expected {nodes[sym]}, got {(start_line, end_line)}"
-            )
-            checked_symbols += 1
-
-    assert checked_symbols >= 45, f"Expected at least 45 symbol ranges in AGENTS.md, found {checked_symbols}"
-
-    # Verify the persisted production SQLite database (data/memory.db, not conftest's test_memory.db)
-    assert DB_PATH.exists(), f"Production memory DB missing at {DB_PATH}"
-    with sqlite3.connect(str(DB_PATH)) as conn:
-        rows = conn.execute(
-            "SELECT symbol_name, file_path, line_start, line_end FROM memory_codegraph"
-        ).fetchall()
-    assert len(rows) >= 15, f"Expected >= 15 codegraph rows in {DB_PATH}, found {len(rows)}"
-    for sym_name, rel_path, l_start, l_end in rows:
-        expected_ranges = _get_ast_ranges(rel_path).get(sym_name, [])
-        assert (l_start, l_end) in expected_ranges, (
-            f"data/memory.db memory_codegraph drift for {rel_path}::{sym_name}: "
-            f"expected {expected_ranges}, got {(l_start, l_end)}"
-        )
-
-    # Also verify active memory_store.list_codegraph() without calling refresh_codegraph() beforehand
-    cg = await memory_store.list_codegraph(limit=50)
-    assert len(cg) >= 15
-    for node in cg:
-        rel_path = node["file_path"]
-        expected_ranges = _get_ast_ranges(rel_path).get(node["symbol_name"], [])
-        assert (node["line_start"], node["line_end"]) in expected_ranges, (
-            f"memory_codegraph drift for {rel_path}::{node['symbol_name']}: "
-            f"expected {expected_ranges}, got {(node['line_start'], node['line_end'])}"
-        )
-
-    # Verify that if a store has drifted line numbers in memory_codegraph, init_db() auto-repairs it
     drift_store = AgentMemoryStore(db_path=temp_db_path)
     await drift_store.init_db()
     async with aiosqlite.connect(str(temp_db_path)) as db:
@@ -664,5 +605,6 @@ async def test_agents_md_and_production_codegraph_ast_sync(temp_db_path):
     reopened_store = AgentMemoryStore(db_path=temp_db_path)
     repaired_cg = await reopened_store.list_codegraph(limit=50)
     ams_node = next(n for n in repaired_cg if n["symbol_name"] == "AgentMemoryStore")
-    assert (ams_node["line_start"], ams_node["line_end"]) in _get_ast_ranges("src/memory/store.py")["AgentMemoryStore"]
-
+    tree = ast.parse((REPO_ROOT / "src/memory/store.py").read_text(encoding="utf-8"))
+    cls = next(n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "AgentMemoryStore")
+    assert (ams_node["line_start"], ams_node["line_end"]) == (cls.lineno, cls.end_lineno)

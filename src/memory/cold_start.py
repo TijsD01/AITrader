@@ -62,8 +62,10 @@ class ColdStartEngine:
         l3_text = (
             f"**Persona**: {l3.get('persona_name')}\n"
             f"**Mandate**: {l3.get('core_profile')}\n"
-            f"**Rules**:\n" + "\n".join(wisdom_lines[:3])
+            f"**Rules**:\n" + "\n".join(wisdom_lines[-3:])
         )
+        if l3.get("risk_rules"):
+            l3_text += "\n**Risk Rules**: " + "; ".join(l3["risk_rules"])
 
         # 4. Select L2 Active Scenario (match query ticker/entity tokens; never inject an unrelated ticker's deliberation)
         matched_sc = None
