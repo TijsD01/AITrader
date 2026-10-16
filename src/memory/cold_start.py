@@ -1,7 +1,8 @@
 import time
 import logging
+import datetime
 from typing import Dict, Any, List, Optional
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, func
 
 from src.memory.models import ColdStartLoadout
 from src.memory.store import memory_store
@@ -50,7 +51,7 @@ class ColdStartEngine:
 
         # 2. Build "What Had Happened" history recap
         what_happened_text = await ColdStartEngine._build_history_recap(
-            portfolio_state, include_lessons=include_lessons
+            portfolio_state, include_lessons=include_lessons, ticker=query
         )
 
         # 3. Format L3 Core Profile (deduplicating wisdom lines)
@@ -225,7 +226,11 @@ class ColdStartEngine:
             }
 
     @staticmethod
-    async def _build_history_recap(portfolio_state: Dict[str, Any], include_lessons: bool = True) -> str:
+    async def _build_history_recap(
+        portfolio_state: Dict[str, Any],
+        include_lessons: bool = True,
+        ticker: Optional[str] = None,
+    ) -> str:
         """Constructs concise narrative of recent trades, triggers, and post-mortems."""
         lines = []
 
@@ -248,27 +253,54 @@ class ColdStartEngine:
             from src.db.session import AsyncSessionLocal
             from src.db.models import Trade, TradeLesson
             async with AsyncSessionLocal() as session:
-                trade_res = await session.execute(select(Trade).order_by(desc(Trade.executed_at)).limit(3))
+                cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=30)
+                trade_res = await session.execute(
+                    select(Trade).where(Trade.executed_at >= cutoff).order_by(desc(Trade.executed_at))
+                )
                 trades = trade_res.scalars().all()
-                if trades:
-                    lines.append("• **Recent Executed Trades**:")
-                    for tr in trades:
-                        details = []
-                        if tr.realized_pnl_eur is not None:
-                            pct_str = f" ({tr.realized_pnl_pct:+.2f}%)" if tr.realized_pnl_pct is not None else ""
-                            details.append(f"PnL: €{tr.realized_pnl_eur:+.2f}{pct_str}")
-                        if getattr(tr, "fee_eur", None):
-                            details.append(f"Fee: €{tr.fee_eur:.2f}")
-                        detail_str = f" ({', '.join(details)})" if details else ""
+
+                if not trades:
+                    lines.append("• **Last 30d**: no trades.")
+                else:
+                    closed = [tr for tr in trades if tr.realized_pnl_eur is not None]
+                    if not closed:
+                        lines.append(f"• **Last 30d**: {len(trades)} trades, none closed.")
+                    else:
+                        wins = [tr.realized_pnl_eur for tr in closed if tr.realized_pnl_eur > 0]
+                        losses = [tr.realized_pnl_eur for tr in closed if tr.realized_pnl_eur < 0]
+                        winrate = (len(wins) / len(closed)) * 100
+                        total_pnl = sum(tr.realized_pnl_eur for tr in closed)
+                        avg_parts = []
+                        if wins:
+                            avg_parts.append(f"avg win €{sum(wins) / len(wins):+.2f}")
+                        if losses:
+                            avg_parts.append(f"avg loss €{sum(losses) / len(losses):+.2f}")
+                        avg_str = f", {' vs '.join(avg_parts)}" if avg_parts else ""
                         lines.append(
-                            f"  - {tr.order_type} {tr.shares}x {tr.ticker} @ {tr.price_native} {tr.currency}{detail_str}"
+                            f"• **Last 30d**: {len(closed)} closed trades, winrate {winrate:.0f}%, PnL €{total_pnl:+.2f}{avg_str}"
                         )
 
+                    if ticker and ticker.strip():
+                        t_upper = ticker.strip().upper()
+                        t_trades = [tr for tr in trades if (tr.ticker or "").upper() == t_upper][:8]
+                        if t_trades:
+                            lines.append(f"• **{t_upper} last 30d**:")
+                            for tr in t_trades:
+                                pnl_str = f" (PnL €{tr.realized_pnl_eur:+.2f})" if tr.realized_pnl_eur is not None else ""
+                                lines.append(
+                                    f"  - {tr.order_type} {tr.shares:g}x @ {tr.price_native:.2f} {tr.currency}{pnl_str}"
+                                )
+
                 if include_lessons:
-                    lesson_res = await session.execute(select(TradeLesson).order_by(desc(TradeLesson.created_at)).limit(2))
-                    lessons = lesson_res.scalars().all()
+                    newest = select(TradeLesson).order_by(desc(TradeLesson.created_at)).limit(3)
+                    lessons = []
+                    if ticker and ticker.strip():
+                        own = func.upper(TradeLesson.ticker) == ticker.strip().upper()
+                        lessons = (await session.execute(newest.where(own))).scalars().all()
+                        newest = newest.where(~own)
+                    lessons = (list(lessons) + list((await session.execute(newest)).scalars().all()))[:3]
                     if lessons:
-                        lines.append("• **Recent Trade Post-Mortems & Lessons**:")
+                        lines.append("• **Lessons**:")
                         for les in lessons:
                             lines.append(f"  - [{les.ticker} {les.outcome}]: {les.lesson}")
         except Exception as e:

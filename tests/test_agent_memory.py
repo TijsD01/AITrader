@@ -275,9 +275,11 @@ async def test_history_recap_uses_lesson_and_handles_null_pnl_pct():
         await session.commit()
 
     try:
-        recap = await ColdStartEngine._build_history_recap({"available": True, "total_equity_eur": 100.0})
+        recap = await ColdStartEngine._build_history_recap(
+            {"available": True, "total_equity_eur": 100.0}, ticker="RECAP.AS"
+        )
         assert "RECAP.AS" in recap
-        assert "PnL: €-3.50" in recap
+        assert "PnL €-3.50" in recap
         assert "unique-lesson-marker" in recap
     finally:
         # Remove the future-dated rows so they don't skew other tests (e.g. learner calibration)
@@ -285,6 +287,57 @@ async def test_history_recap_uses_lesson_and_handles_null_pnl_pct():
         async with AsyncSessionLocal() as session:
             await session.execute(delete(Trade).where(Trade.ticker == "RECAP.AS"))
             await session.execute(delete(TradeLesson).where(TradeLesson.ticker == "RECAP.AS"))
+            await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_history_recap_30d_window_and_ticker_filter():
+    import datetime
+    from sqlalchemy import delete
+    from src.db.session import AsyncSessionLocal
+    from src.db.models import Trade
+
+    now = datetime.datetime.utcnow()
+    async with AsyncSessionLocal() as session:
+        session.add(Trade(
+            ticker="WIN30.AS", order_type="SELL", shares=1.0, currency="EUR",
+            price_native=10.0, price_eur=10.0, total_eur=10.0, fee_eur=0.0,
+            realized_pnl_eur=5.0, realized_pnl_pct=50.0,
+            executed_at=now - datetime.timedelta(days=2),
+        ))
+        session.add(Trade(
+            ticker="WIN30.AS", order_type="BUY", shares=1.0, currency="EUR",
+            price_native=10.0, price_eur=10.0, total_eur=10.0, fee_eur=0.0,
+            realized_pnl_eur=None, realized_pnl_pct=None,
+            executed_at=now - datetime.timedelta(days=3),
+        ))
+        session.add(Trade(
+            ticker="WIN30.AS", order_type="SELL", shares=1.0, currency="EUR",
+            price_native=77.77, price_eur=77.77, total_eur=77.77, fee_eur=0.0,
+            realized_pnl_eur=99.0, realized_pnl_pct=99.0,
+            executed_at=now - datetime.timedelta(days=40),
+        ))
+        session.add(Trade(
+            ticker="OTH30.AS", order_type="SELL", shares=1.0, currency="EUR",
+            price_native=10.0, price_eur=10.0, total_eur=10.0, fee_eur=0.0,
+            realized_pnl_eur=-2.0, realized_pnl_pct=-20.0,
+            executed_at=now - datetime.timedelta(days=1),
+        ))
+        await session.commit()
+
+    try:
+        recap = await ColdStartEngine._build_history_recap(
+            {"available": True, "total_equity_eur": 100.0}, ticker="WIN30.AS"
+        )
+        assert "WIN30.AS last 30d" in recap
+        assert "PnL €+5.00" in recap
+        assert "77.77" not in recap
+        assert "OTH30" not in recap
+        assert "Last 30d" in recap
+        assert "winrate" in recap
+    finally:
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(Trade).where(Trade.ticker.in_(["WIN30.AS", "OTH30.AS"])))
             await session.commit()
 
 
