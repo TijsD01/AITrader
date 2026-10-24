@@ -10,7 +10,7 @@ from src.db.models import Position, Trade, PortfolioSnapshot, SystemConfig, Orde
 from src.db.session import AsyncSessionLocal
 from src.data.currency import currency_service
 from src.data.market import market_data_provider
-from src.trading.risk import risk_guardrail, get_effective_deployable_cash, allocate_pending_triggers, evaluate_trigger_condition, is_trigger_expired, validate_trigger_levels, compute_trailing_stop, check_market_regime, whole_share_count, new_entry_allocation, risk_capped_allocation, plan_pending_triggers
+from src.trading.risk import risk_guardrail, get_effective_deployable_cash, allocate_pending_triggers, evaluate_trigger_condition, is_trigger_expired, validate_trigger_levels, compute_trailing_stop, check_market_regime, affordable_share_count, fit_allocation_to_share, new_entry_allocation, risk_capped_allocation, plan_pending_triggers
 from src.data.market_hours import check_market_hours
 from src.trading.base import BaseBroker
 
@@ -178,6 +178,12 @@ class PaperBroker(BaseBroker):
             if not is_manual:
                 allocation_eur = risk_capped_allocation(allocation_eur, price_native, stop_loss_native, total_eur)
 
+            # A share that costs more than the (capped) budget still gets bought when it fits the free cash (same rule as plan_buy)
+            if settings.WHOLE_SHARES_ONLY:
+                allocation_eur, _ = fit_allocation_to_share(
+                    allocation_eur, price_native, currency, stop_loss_native, available_cash, total_eur, automated=False
+                )
+
             # Validate risk guardrails
             valid, msg = risk_guardrail.validate_buy_order(
                 ticker=ticker,
@@ -208,7 +214,7 @@ class PaperBroker(BaseBroker):
 
             if settings.WHOLE_SHARES_ONLY:
                 # The broker only fills whole shares: take the count closest to the allocation
-                shares = float(whole_share_count(allocation_eur, price_eur, max_eur=max(available_cash, allocation_eur)))
+                shares = float(affordable_share_count(allocation_eur, price_eur, available_cash, total_eur))
                 if shares < 1:
                     msg = f"One share of {ticker} costs €{price_eur:.2f}, more than the €{allocation_eur:.2f} allocation."
                     logger.info(f"Buy order blocked: {msg}")
@@ -654,6 +660,14 @@ class PaperBroker(BaseBroker):
                         "message": f"Cannot arm trigger: {viability['reason']}"
                     }
 
+            # A share that costs more than the slot is reserved at its cost, so pending triggers never over-commit cash
+            if settings.WHOLE_SHARES_ONLY:
+                open_res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == False))
+                portfolio_eur = cash_eur + sum(p.current_price_eur * p.shares for p in open_res.scalars().all())
+                allocation_eur, _ = fit_allocation_to_share(
+                    allocation_eur, target_price, currency, sl, available_cash, portfolio_eur
+                )
+
             if allocation_eur > available_cash:
                 return {
                     "success": False,
@@ -735,7 +749,7 @@ class PaperBroker(BaseBroker):
         usable_cash, _ = get_effective_deployable_cash(cash_eur)
         portfolio_value = cash_eur + sum(p.current_price_eur * p.shares for p in positions)
         # Same ranking adjust_triggers_dynamically applies before the dashboard shows or a trigger fires
-        allocations = allocate_pending_triggers(usable_cash, len(positions), pending)
+        allocations = allocate_pending_triggers(usable_cash, len(positions), pending, portfolio_value_eur=portfolio_value)
         return plan_pending_triggers(pending, usable_cash, portfolio_value, allocations)
 
     async def get_trigger_plan(self, trigger_id: int) -> Dict[str, Any]:
@@ -795,7 +809,10 @@ class PaperBroker(BaseBroker):
             cash_eur = snapshot.cash_eur if snapshot else settings.INITIAL_PAPER_CAPITAL
             usable_cash, _ = get_effective_deployable_cash(cash_eur)
 
-            allocations = allocate_pending_triggers(usable_cash, current_open, pending)
+            allocations = allocate_pending_triggers(
+                usable_cash, current_open, pending,
+                portfolio_value_eur=cash_eur + sum(p.current_price_eur * p.shares for p in open_positions)
+            )
 
             adjusted = []
             for t in pending:
