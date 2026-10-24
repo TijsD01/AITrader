@@ -109,6 +109,7 @@ class Settings(BaseSettings):
     LEARNER_MIN_TRADES: int = 20            # Closed trades required between automatic learner recalibrations
     WHOLE_SHARES_ONLY: bool = True          # Buy whole shares only: IBKR's API rejects fractional quantities (paper mirrors live)
     WHOLE_SHARE_ROUND_UP_PCT: float = 10.0  # May round up to one extra share if that costs at most this % above the allocation
+    MAX_POSITION_PCT: float = 60.0          # A position may grow past its slot (e.g. one share costs more) up to this % of portfolio value
 
     # Interactive Brokers (IBKR) Config (Supports EU & US equities)
     IBKR_HOST: str = "172.17.0.2"
