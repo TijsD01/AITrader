@@ -561,14 +561,6 @@ def fit_allocation_to_share(
         return allocation_eur, shares  # the usual rounding: keep the allocation as it was
     return max(allocation_eur, math.ceil(shares * price_eur * 100 - 1e-6) / 100.0), shares
 
-def free_cash_from_summary(summary: Dict[str, Any]) -> float:
-    """Cash a new buy may use: usable capital minus what pending triggers have reserved."""
-    reserved = summary.get("reserved_triggers_eur", 0.0) or 0.0
-    usable = summary.get("usable_capital_eur")
-    if usable is None:
-        usable = (summary.get("available_cash_eur", 0.0) or 0.0) + reserved
-    return round(max(0.0, usable - reserved), 2)
-
 def regime_index_for_ticker(ticker: str, currency: Optional[str] = None) -> str:
     """The market index whose trend decides whether new entries in this ticker are allowed."""
     from src.trading.fees import is_european_ticker

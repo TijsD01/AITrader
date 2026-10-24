@@ -15,7 +15,7 @@ from sqlalchemy import select
 from config.settings import settings
 from src.db.session import AsyncSessionLocal
 from src.db.models import Position, OrderTrigger, SystemConfig
-from src.trading.risk import check_market_regime, plan_buy, free_cash_from_summary
+from src.trading.risk import check_market_regime, plan_buy
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +150,7 @@ async def _hard_block(
             try:
                 from src.trading.broker import get_active_broker
                 summary = await get_active_broker().get_portfolio_summary()
-                free_cash_eur = free_cash_from_summary(summary)
+                free_cash_eur = summary.get("available_cash_eur", 0.0)
                 portfolio_value_eur = portfolio_value_eur or summary.get("total_value_eur", 0.0)
             except Exception as e:
                 logger.warning(f"Free cash unavailable for the one-share check of {ticker}: {e}")

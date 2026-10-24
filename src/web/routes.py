@@ -12,7 +12,7 @@ from config.settings import settings, update_env_file
 from src.db.session import AsyncSessionLocal, set_kill_switch
 from src.db.models import Position, Trade, PortfolioSnapshot, AnalysisReport, WatchlistItem, SystemConfig, MarketDigest, TradeLesson
 from src.trading.broker import active_broker as paper_broker, get_active_broker, active_broker, live_broker, check_broker_status
-from src.trading.risk import derive_trigger_levels, entry_allocation_from_summary, free_cash_from_summary
+from src.trading.risk import derive_trigger_levels, entry_allocation_from_summary
 from src.trading.trigger_gate import (
     TriggerGateResult, normalize_ticker, invalid_ticker_result, precheck_manual_trigger,
     get_trigger_min_score, evaluate_manual_trigger
@@ -364,7 +364,7 @@ async def create_trigger(req: CreateTriggerRequest):
     gate = await evaluate_manual_trigger(
         ticker, data, report, target_price, alloc_eur, await get_trigger_min_score(), force=req.force,
         stop_loss=sl, portfolio_value_eur=summary.get("total_value_eur", 0.0),
-        free_cash_eur=free_cash_from_summary(summary)
+        free_cash_eur=summary.get("available_cash_eur", 0.0)
     )
     if not gate.allowed:
         raise _trigger_blocked_error(gate, report)
@@ -413,7 +413,7 @@ async def _arm_from_ai(req: CreateTriggerFromAIRequest, job: Dict[str, Any]):
     gate = await evaluate_manual_trigger(
         ticker, data, report, trigger_price, alloc_eur, await get_trigger_min_score(), force=req.force,
         stop_loss=sl, portfolio_value_eur=summary.get("total_value_eur", 0.0),
-        free_cash_eur=free_cash_from_summary(summary)
+        free_cash_eur=summary.get("available_cash_eur", 0.0)
     )
     if not gate.allowed:
         raise _trigger_blocked_error(gate, report)

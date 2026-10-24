@@ -937,11 +937,12 @@ class LiveBroker(BaseBroker):
                     "message": f"Insufficient available cash (€{available_cash:.2f} available, required €{allocation_eur:.2f})."
                 }
 
+            open_res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == True))
+            open_now = open_res.scalars().all()
+
             # Without an explicit allocation, take the slot the dynamic re-allocation would give it
             if allocation_eur is None or allocation_eur <= 0:
-                pos_count_res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == True))
-                current_open = len(pos_count_res.scalars().all())
-                calc_alloc = new_entry_allocation(usable_cash, pending_alloc, current_open, ticker=ticker, currency=currency)
+                calc_alloc = new_entry_allocation(usable_cash, pending_alloc, len(open_now), ticker=ticker, currency=currency)
                 if calc_alloc > 0:
                     allocation_eur = calc_alloc
 
@@ -970,8 +971,7 @@ class LiveBroker(BaseBroker):
 
             # A share that costs more than the slot is reserved at its cost, so pending triggers never over-commit cash
             if settings.WHOLE_SHARES_ONLY:
-                open_res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == True))
-                portfolio_eur = cash_eur + sum(p.current_price_eur * p.shares for p in open_res.scalars().all())
+                portfolio_eur = cash_eur + sum(p.current_price_eur * p.shares for p in open_now)
                 allocation_eur, _ = fit_allocation_to_share(
                     allocation_eur, target_price, currency, stop_loss, available_cash, portfolio_eur
                 )
