@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from sqlalchemy import select, desc, func
 
 from config.settings import settings, update_env_file
-from src.db.session import AsyncSessionLocal
+from src.db.session import AsyncSessionLocal, set_kill_switch
 from src.db.models import Position, Trade, PortfolioSnapshot, AnalysisReport, WatchlistItem, SystemConfig, MarketDigest, TradeLesson
 from src.trading.broker import active_broker as paper_broker, get_active_broker, active_broker, live_broker, check_broker_status
 from src.trading.risk import derive_trigger_levels, entry_allocation_from_summary
@@ -245,7 +245,7 @@ async def _analyze(req: AnalyzeRequest):
 # 4. Market Screener
 @router.get("/api/screener")
 async def get_screener_candidates(market: str = "ALL"):
-    return await asyncio.to_thread(market_scanner.scan_universe, market=market, limit=12)
+    return await asyncio.to_thread(market_scanner.scan_universe, market=market, limit=12, extra_tickers=await market_scanner.load_watchlist_tickers())
 
 # 5. Trading Actions
 def _calculate_safe_allocation(
@@ -842,7 +842,7 @@ async def calibrate_learning_parameters():
 @router.post("/api/killswitch")
 async def toggle_killswitch(active: bool):
     """Emergency halt switch to immediately block or resume all automated buying."""
-    settings.KILL_SWITCH_ACTIVE = active
+    await set_kill_switch(active)
     return {
         "success": True,
         "kill_switch_active": settings.KILL_SWITCH_ACTIVE,
