@@ -15,7 +15,7 @@ from sqlalchemy import select
 from config.settings import settings
 from src.db.session import AsyncSessionLocal
 from src.db.models import Position, OrderTrigger, SystemConfig
-from src.trading.risk import check_market_regime, plan_buy
+from src.trading.risk import check_market_regime, plan_buy, free_cash_from_summary
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +132,7 @@ def evaluate_trigger_verdict(report: Dict[str, Any], trigger_min_score: int, for
 
 async def _hard_block(
     ticker: str, data: Dict[str, Any], trigger_price: float, allocation_eur: float, verdict: TriggerGateResult,
-    stop_loss: Optional[float] = None, portfolio_value_eur: float = 0.0
+    stop_loss: Optional[float] = None, portfolio_value_eur: float = 0.0, free_cash_eur: Optional[float] = None
 ) -> Optional[TriggerGateResult]:
     """Rules 5-6: the market regime filter and the one-share check (after the risk cap). Never overridable."""
     def blocked(code: str, message: str) -> TriggerGateResult:
@@ -145,7 +145,18 @@ async def _hard_block(
 
     if settings.WHOLE_SHARES_ONLY and trigger_price and trigger_price > 0:
         # Sized like the buy itself: risk cap, then whole shares
-        plan = await asyncio.to_thread(plan_buy, allocation_eur, trigger_price, currency, stop_loss, portfolio_value_eur)
+        if free_cash_eur is None:
+            # One share may cost more than the slot: it only has to fit the cash no pending trigger has reserved
+            try:
+                from src.trading.broker import get_active_broker
+                summary = await get_active_broker().get_portfolio_summary()
+                free_cash_eur = free_cash_from_summary(summary)
+                portfolio_value_eur = portfolio_value_eur or summary.get("total_value_eur", 0.0)
+            except Exception as e:
+                logger.warning(f"Free cash unavailable for the one-share check of {ticker}: {e}")
+        plan = await asyncio.to_thread(
+            plan_buy, allocation_eur, trigger_price, currency, stop_loss, portfolio_value_eur, free_cash_eur
+        )
         if plan["shares"] < 1:
             return blocked(
                 "SHARE_TOO_EXPENSIVE",
@@ -163,7 +174,8 @@ async def evaluate_manual_trigger(
     trigger_min_score: int,
     force: bool = False,
     stop_loss: Optional[float] = None,
-    portfolio_value_eur: float = 0.0
+    portfolio_value_eur: float = 0.0,
+    free_cash_eur: Optional[float] = None
 ) -> TriggerGateResult:
     """
     Rules 1-6 for a manually armed trigger: the verdict rules (evaluate_trigger_verdict), then the market
@@ -173,7 +185,7 @@ async def evaluate_manual_trigger(
     verdict = evaluate_trigger_verdict(report, trigger_min_score, force=force)
     if not verdict.allowed and not verdict.overridable:
         return verdict
-    hard = await _hard_block(ticker, data, trigger_price, allocation_eur, verdict, stop_loss, portfolio_value_eur)
+    hard = await _hard_block(ticker, data, trigger_price, allocation_eur, verdict, stop_loss, portfolio_value_eur, free_cash_eur)
     return hard or verdict
 
 

@@ -281,11 +281,11 @@ async def test_trigger_falling_market_is_a_hard_block_even_with_force_and_a_soft
 
 async def test_trigger_share_that_does_not_fit_the_allocation_is_a_hard_block(monkeypatch):
     monkeypatch.setattr(settings, "WHOLE_SHARES_ONLY", True)
-    expensive = _stock("TGATEPRICEY", price=5000.0)
-    async with telegram_env("TGATEPRICEY", stock=expensive, report=_report(entry=4900.0, stop=4700.0, target=5500.0)) as env:
+    expensive = _stock("TGATEPRICEY", price=12000.0)
+    async with telegram_env("TGATEPRICEY", stock=expensive, report=_report(entry=11800.0, stop=11500.0, target=13000.0)) as env:
         for text in ("/trigger TGATEPRICEY", "/trigger TGATEPRICEY force"):
             reply = await env.send(text)
-            assert "TRIGGER NOT ARMED" in reply and "One share of TGATEPRICEY costs about €4900.00" in reply
+            assert "TRIGGER NOT ARMED" in reply and "One share of TGATEPRICEY costs about €11800.00" in reply
             assert "resend" not in reply
     env.create.assert_not_awaited()
 
@@ -484,10 +484,10 @@ async def test_analyze_does_not_arm_in_a_falling_market():
 
 async def test_analyze_does_not_arm_when_one_share_does_not_fit(monkeypatch):
     monkeypatch.setattr(settings, "WHOLE_SHARES_ONLY", True)
-    expensive = _stock("TGATEPRICEY", price=5000.0)
-    async with telegram_env("TGATEPRICEY", stock=expensive, report=_report(entry=4900.0, stop=4700.0, target=5500.0)) as env:
+    expensive = _stock("TGATEPRICEY", price=12000.0)
+    async with telegram_env("TGATEPRICEY", stock=expensive, report=_report(entry=11800.0, stop=11500.0, target=13000.0)) as env:
         reply = await env.send("/analyze TGATEPRICEY")
-    assert "<i>Not auto-armed:" in reply and "One share of TGATEPRICEY costs about €4900.00" in reply
+    assert "<i>Not auto-armed:" in reply and "One share of TGATEPRICEY costs about €11800.00" in reply
     env.create.assert_not_awaited()
 
 

@@ -105,12 +105,15 @@ def allocate_pending_triggers(
     usable_cash: float,
     current_positions_count: int,
     triggers: List[Any],
-    max_positions: Optional[int] = None
+    max_positions: Optional[int] = None,
+    portfolio_value_eur: float = 0.0
 ) -> Dict[int, float]:
     """
     Distributes usable cash across pending order triggers, highest consensus score first
     (oldest first on ties). Each funded trigger receives the per-slot allocation until
     cash or free position slots run out; the remaining triggers are left unfunded (€0).
+    In whole-share mode a trigger gets at least the cost of its one share when that exceeds the slot (see
+    affordable_share_count) and nothing when no share fits the cash still left.
     Returns {trigger_id: allocation_eur}; the total never exceeds usable_cash.
     """
     total_slots = max_positions if max_positions is not None else settings.MAX_POSITIONS
@@ -133,6 +136,13 @@ def allocate_pending_triggers(
             alloc = round(min(slot_alloc, remaining), 2)
             if alloc < 20.0:
                 alloc = 0.0
+            elif settings.WHOLE_SHARES_ONLY and getattr(t, "target_price", None):
+                # A share that costs more than the slot gets what it costs; a share that does not fit leaves the trigger unfunded
+                alloc, shares = fit_allocation_to_share(
+                    alloc, t.target_price, t.currency, getattr(t, "stop_loss", None), remaining, portfolio_value_eur
+                )
+                if shares < 1:
+                    alloc = 0.0
         allocations[t.id] = alloc
         remaining = round(remaining - alloc, 2)
     return allocations
@@ -416,7 +426,7 @@ def plan_buy(
     if not budget or budget <= 0 or price_eur <= 0:
         shares = 0.0
     elif settings.WHOLE_SHARES_ONLY:
-        shares = float(whole_share_count(budget, price_eur, max_eur=max(max_eur, budget) if max_eur is not None else None))
+        shares = float(affordable_share_count(budget, price_eur, max_eur if max_eur is not None else allocation_eur, portfolio_value_eur))
     else:
         shares = round(budget / price_eur, 4)
     return {
@@ -499,6 +509,65 @@ def whole_share_count(
     if up * price_eur <= ceiling + 1e-9 and (up * price_eur - allocation_eur) < (allocation_eur - down * price_eur):
         return up
     return down
+
+def affordable_share_count(
+    budget_eur: float,
+    price_eur: float,
+    free_cash_eur: float,
+    portfolio_value_eur: float = 0.0
+) -> int:
+    """
+    The whole-share count every sizing decision uses: whole_share_count for the budget, but at least one share
+    when the budget buys none and one share fits both the cash that is free for this buy and
+    MAX_POSITION_PCT % of the portfolio (and MAX_SINGLE_ORDER_EUR). Returns 0 when no budget was given.
+    """
+    if not budget_eur or budget_eur <= 0 or not price_eur or price_eur <= 0:
+        return 0
+    free = max(0.0, free_cash_eur or 0.0)
+    shares = whole_share_count(budget_eur, price_eur, max_eur=max(free, budget_eur))
+    if shares >= 1:
+        return shares
+    if price_eur > free + 1e-9:
+        return 0
+    if portfolio_value_eur and portfolio_value_eur > 0 and price_eur > portfolio_value_eur * settings.MAX_POSITION_PCT / 100.0 + 1e-9:
+        return 0
+    if settings.MAX_SINGLE_ORDER_EUR and price_eur > settings.MAX_SINGLE_ORDER_EUR + 0.01:
+        return 0
+    return 1
+
+def fit_allocation_to_share(
+    allocation_eur: float,
+    price_native: Optional[float],
+    currency: str,
+    stop_loss_native: Optional[float],
+    free_cash_eur: float,
+    portfolio_value_eur: float = 0.0,
+    automated: bool = True
+) -> Tuple[float, float]:
+    """
+    (allocation, shares) for a whole-share buy. When the planned shares cost more than the allocation
+    (the one-share minimum, not the usual round-up), the allocation is raised to their cost, rounded up to the cent,
+    so that reserving the allocation reserves the cash the buy will really spend. Returns the allocation
+    unchanged, with 0 shares, when nothing fits. Whole-share mode only.
+    """
+    import math
+    from src.data.currency import currency_service
+    plan = plan_buy(allocation_eur, price_native, currency, stop_loss_native, portfolio_value_eur, max_eur=free_cash_eur, automated=automated)
+    shares = plan["shares"]
+    if shares < 1:
+        return allocation_eur, 0.0
+    price_eur = currency_service.to_eur(price_native, currency)
+    if whole_share_count(plan["budget_eur"], price_eur, max_eur=max(free_cash_eur, plan["budget_eur"])) >= 1:
+        return allocation_eur, shares  # the usual rounding: keep the allocation as it was
+    return max(allocation_eur, math.ceil(shares * price_eur * 100 - 1e-6) / 100.0), shares
+
+def free_cash_from_summary(summary: Dict[str, Any]) -> float:
+    """Cash a new buy may use: usable capital minus what pending triggers have reserved."""
+    reserved = summary.get("reserved_triggers_eur", 0.0) or 0.0
+    usable = summary.get("usable_capital_eur")
+    if usable is None:
+        usable = (summary.get("available_cash_eur", 0.0) or 0.0) + reserved
+    return round(max(0.0, usable - reserved), 2)
 
 def regime_index_for_ticker(ticker: str, currency: Optional[str] = None) -> str:
     """The market index whose trend decides whether new entries in this ticker are allowed."""

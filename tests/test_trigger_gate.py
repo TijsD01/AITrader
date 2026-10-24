@@ -313,13 +313,13 @@ async def test_one_share_must_fit_the_allocation(monkeypatch):
     monkeypatch.setattr(settings, "WHOLE_SHARES_ONLY", True)
     with patch("src.trading.trigger_gate.check_market_regime", return_value=(True, "")):
         for force in (False, True):
-            res = await evaluate_manual_trigger("GATEX", _stock("GATEX"), _report(), 5000.0, 1000.0, 80, force=force)
+            res = await evaluate_manual_trigger("GATEX", _stock("GATEX"), _report(), 5000.0, 1000.0, 80, force=force, free_cash_eur=1000.0)
             assert not res.allowed and res.code == "SHARE_TOO_EXPENSIVE" and not res.overridable
             assert "5000.00" in res.message and "1000.00" in res.message
         # A share that fits, and the rule switched off
-        assert (await evaluate_manual_trigger("GATEX", _stock("GATEX"), _report(), 260.0, 1000.0, 80)).allowed
+        assert (await evaluate_manual_trigger("GATEX", _stock("GATEX"), _report(), 260.0, 1000.0, 80, free_cash_eur=1000.0)).allowed
         monkeypatch.setattr(settings, "WHOLE_SHARES_ONLY", False)
-        assert (await evaluate_manual_trigger("GATEX", _stock("GATEX"), _report(), 5000.0, 1000.0, 80)).allowed
+        assert (await evaluate_manual_trigger("GATEX", _stock("GATEX"), _report(), 5000.0, 1000.0, 80, free_cash_eur=1000.0)).allowed
 
 
 @pytest.mark.asyncio
@@ -327,7 +327,7 @@ async def test_share_price_is_converted_to_euro(monkeypatch):
     monkeypatch.setattr(settings, "WHOLE_SHARES_ONLY", True)
     with patch("src.trading.trigger_gate.check_market_regime", return_value=(True, "")), \
          patch("src.data.currency.currency_service.to_eur", return_value=2000.0) as to_eur:
-        res = await evaluate_manual_trigger("GATEX", _stock("GATEX", currency="USD"), _report(), 2160.0, 1000.0, 80)
+        res = await evaluate_manual_trigger("GATEX", _stock("GATEX", currency="USD"), _report(), 2160.0, 1000.0, 80, free_cash_eur=1000.0)
     to_eur.assert_called_once_with(2160.0, "USD")
     assert not res.allowed and res.code == "SHARE_TOO_EXPENSIVE"
     assert "2000.00" in res.message
@@ -575,9 +575,10 @@ async def test_falling_market_blocks_even_a_forced_trigger(path):
 @pytest.mark.parametrize("path", ENDPOINTS)
 async def test_share_costing_more_than_the_allocation_blocks_even_a_forced_trigger(path, monkeypatch):
     monkeypatch.setattr(settings, "WHOLE_SHARES_ONLY", True)
-    expensive = _report(entry=4900.0, stop=4700.0, target=5300.0)
+    # EUR 12,000 is above MAX_POSITION_PCT of the EUR 10,000 portfolio; a share above the slot alone no longer blocks
+    expensive = _report(entry=11800.0, stop=11500.0, target=13000.0)
     for force in (False, True):
-        with _api_env(_stock("GATESHARE", price=5000.0), expensive):
+        with _api_env(_stock("GATESHARE", price=12000.0), expensive):
             resp = await _post(path, ticker="GATESHARE", allocation_eur=1000.0, force=force)
         assert resp.status_code == 422
         detail = resp.json()["detail"]
@@ -591,7 +592,7 @@ async def test_manual_trigger_checks_the_share_at_the_price_the_user_chose(monke
     with _api_env(_stock("GATEMAN"), _report()):
         resp = await _post(
             "/api/triggers", ticker="GATEMAN", allocation_eur=500.0,
-            trigger_type="BREAKOUT_BUY", target_price=5000.0, stop_loss=4800.0, take_profit=5600.0
+            trigger_type="BREAKOUT_BUY", target_price=12000.0, stop_loss=11800.0, take_profit=13000.0
         )
     assert resp.status_code == 422
     assert resp.json()["detail"]["code"] == "SHARE_TOO_EXPENSIVE"
