@@ -194,7 +194,7 @@ async def test_trigger_arms_an_approved_buy_without_a_forced_note():
 
 
 @pytest.mark.parametrize("report, verdict, score", [
-    (_report(action="HOLD", score=62), "HOLD", "62/100"),
+    (_report(action="HOLD", score=72), "HOLD", "72/100"),
     (_report(action="BUY", score=70), "BUY", "70/100"),
 ])
 async def test_trigger_blocks_a_soft_block_and_hints_how_to_force(report, verdict, score):
@@ -207,7 +207,7 @@ async def test_trigger_blocks_a_soft_block_and_hints_how_to_force(report, verdic
 
 
 async def test_trigger_force_hint_keeps_the_price_the_user_asked_for():
-    async with telegram_env("TGATESOFT", report=_report(action="HOLD", score=62)) as env:
+    async with telegram_env("TGATESOFT", report=_report(action="HOLD", score=72)) as env:
         reply = await env.send("/trigger TGATESOFT 95")
     assert "<code>/trigger TGATESOFT 95.0 force</code>" in reply
     env.create.assert_not_awaited()
@@ -222,10 +222,10 @@ async def test_trigger_force_hint_keeps_the_price_the_user_asked_for():
     ("/trigger $TGATEFORCE $95 force", 95.0),
 ])
 async def test_trigger_force_overrides_a_hold_verdict(text, price):
-    async with telegram_env("TGATEFORCE", report=_report(action="HOLD", score=62)) as env:
+    async with telegram_env("TGATEFORCE", report=_report(action="HOLD", score=72)) as env:
         reply = await env.send(text)
     assert "AI PRICE TRIGGER ARMED #42" in reply
-    assert "Forced: armed against the committee verdict (HOLD, score 62/100, trigger threshold 80)" in reply
+    assert "Forced: armed against the committee verdict (HOLD, score 72/100, trigger threshold 80)" in reply
     assert env.create.call_args.kwargs["target_price"] == price
 
 
@@ -248,6 +248,14 @@ async def test_trigger_threshold_comes_from_the_gate_setting():
     env.create.assert_not_awaited()
 
 
+async def test_trigger_force_with_a_score_below_the_broker_minimum_is_refused_without_a_force_hint():
+    async with telegram_env("TGATEMIN", report=_report(action="BUY", score=50)) as env:
+        reply = await env.send("/trigger TGATEMIN force")
+    assert "TRIGGER NOT ARMED" in reply and "minimum consensus score" in reply
+    assert "force" not in reply.lower().replace("force does not override", "")
+    env.create.assert_not_awaited()
+
+
 @pytest.mark.parametrize("report, code_text", [
     (_report(action="SELL", score=90), "verdict is SELL"),
     (_report(action="BUY", score=95, approved=False), "Risk Officer vetoed"),
@@ -263,7 +271,7 @@ async def test_trigger_hard_verdict_blocks_cannot_be_forced(report, code_text):
 
 
 async def test_trigger_falling_market_is_a_hard_block_even_with_force_and_a_soft_verdict():
-    async with telegram_env("TGATEMKT", report=_report(action="HOLD", score=62), regime=REGIME_BLOCK) as env:
+    async with telegram_env("TGATEMKT", report=_report(action="HOLD", score=72), regime=REGIME_BLOCK) as env:
         for text in ("/trigger TGATEMKT", "/trigger TGATEMKT force"):
             reply = await env.send(text)
             assert "TRIGGER NOT ARMED" in reply and "200-day average" in reply
@@ -294,7 +302,7 @@ async def test_trigger_gate_judges_the_levels_and_allocation_that_get_armed():
     real = evaluate_manual_trigger
     gate = AsyncMock(side_effect=real)
     with patch.object(bot_module, "evaluate_manual_trigger", gate):
-        async with telegram_env("TGATELVL", report=_report(action="HOLD", score=62)) as env:
+        async with telegram_env("TGATELVL", report=_report(action="HOLD", score=72)) as env:
             await env.send("/trigger TGATELVL 95 force")
     args, kwargs = gate.call_args
     kwargs_armed = env.create.call_args.kwargs
@@ -530,7 +538,7 @@ async def buy_env(ticker, report):
             yield env
 
 
-@pytest.mark.parametrize("report, verdict", [(_report(action="HOLD", score=62), "HOLD"), (_report(action="BUY", score=70), "BUY")])
+@pytest.mark.parametrize("report, verdict", [(_report(action="HOLD", score=72), "HOLD"), (_report(action="BUY", score=70), "BUY")])
 async def test_buy_soft_block_needs_force_and_hints_it(report, verdict):
     async with buy_env("TGATEB1", report) as env:
         reply = await env.send("/buy TGATEB1 500")
@@ -540,7 +548,7 @@ async def test_buy_soft_block_needs_force_and_hints_it(report, verdict):
 
 @pytest.mark.parametrize("text", ["/buy TGATEB2 force", "/buy TGATEB2 force 250", "/buy TGATEB2 250 force"])
 async def test_buy_force_overrides_a_soft_block(text):
-    async with buy_env("TGATEB2", _report(action="HOLD", score=62)) as env:
+    async with buy_env("TGATEB2", _report(action="HOLD", score=72)) as env:
         reply = await env.send(text)
     assert "MANUAL BUY ORDER EXECUTED" in reply and "Forced" in reply
     env.buy.assert_awaited_once()
@@ -566,11 +574,12 @@ async def test_buy_approved_verdict_executes_without_force_and_rejects_bad_ticke
     assert env.buy.await_count == 1
 
 
-async def test_buy_forced_below_broker_minimum_explains_the_broker_rule():
+async def test_buy_forced_below_broker_minimum_is_refused_by_the_gate():
+    # The gate now stops it before the broker, so the broker-failure hint in the bot is no longer reachable
     async with buy_env("TGATEB5", _report(action="HOLD", score=50)) as env:
-        env.buy.return_value = {"success": False, "message": "Consensus score 50 is below minimum threshold (70)."}
         reply = await env.send("/buy TGATEB5 force")
-    assert "Buy Order Failed" in reply and "does not bypass" in reply
+    assert "BUY NOT EXECUTED" in reply and "minimum consensus score" in reply and "/buy TGATEB5" not in reply
+    env.buy.assert_not_awaited()
 
 
 # --- /sync and /shadow ---------------------------------------------------------------------------
