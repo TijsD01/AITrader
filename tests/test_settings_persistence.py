@@ -96,3 +96,18 @@ def test_update_env_file_strips_newlines(tmp_path):
     assert "FOO=barLIVE_TRADING_ENABLED=true" in lines
     assert "BAZEVIL=xy" in lines
     assert len(lines) == 2
+
+
+@pytest.mark.asyncio
+async def test_kill_switch_persists_to_system_config():
+    from src.db.session import set_kill_switch
+    original = settings.KILL_SWITCH_ACTIVE
+    try:
+        for state in (True, False):
+            assert await set_kill_switch(state) is state
+            assert settings.KILL_SWITCH_ACTIVE is state
+            async with AsyncSessionLocal() as session:
+                res = await session.execute(select(SystemConfig).where(SystemConfig.key == "KILL_SWITCH_ACTIVE"))
+                assert res.scalars().first().value == str(state).lower()
+    finally:
+        await set_kill_switch(original)

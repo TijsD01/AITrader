@@ -201,7 +201,8 @@ class TradingScheduler:
             logger.info(f"Triggering scheduled session: {market} {session}")
             
             # 1. Scan market universe (expanded candidate pool)
-            candidates = await asyncio.to_thread(market_scanner.scan_universe, market=market, limit=12)
+            extra = await market_scanner.load_watchlist_tickers()
+            candidates = await asyncio.to_thread(market_scanner.scan_universe, market=market, limit=12, extra_tickers=extra)
             summary = await paper_broker.get_portfolio_summary()
             reports = []
             executed_trades = []
@@ -518,8 +519,9 @@ class TradingScheduler:
                 trig_check = await db_session.execute(select(OrderTrigger.ticker).where(OrderTrigger.status == "PENDING"))
                 pending_tickers = set(t.upper() for t in trig_check.scalars().all())
 
+            extra = await market_scanner.load_watchlist_tickers()
             for mkt in active_markets:
-                candidates = await asyncio.to_thread(market_scanner.scan_universe, market=mkt, limit=10)
+                candidates = await asyncio.to_thread(market_scanner.scan_universe, market=mkt, limit=10, extra_tickers=extra)
                 actionable = [c for c in candidates if c["ticker"].upper() not in open_tickers and c["ticker"].upper() not in pending_tickers]
                 for cand in actionable[:3]:
                     tk = cand["ticker"].upper()

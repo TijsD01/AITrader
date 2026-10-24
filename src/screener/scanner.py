@@ -3,6 +3,7 @@ import time
 from typing import List, Dict, Any, Optional
 from config.default_universe import EU_STOCKS, US_STOCKS
 from src.data.market import market_data_provider
+from src.data.market_hours import is_eu_ticker
 
 logger = logging.getLogger(__name__)
 
@@ -12,12 +13,23 @@ _SCAN_TTL: float = 300.0
 
 class MarketScanner:
     @staticmethod
-    def scan_universe(market: str = "ALL", limit: int = 10) -> List[Dict[str, Any]]:
+    async def load_watchlist_tickers() -> List[str]:
+        """Active watchlist tickers, to pass to scan_universe as extra_tickers."""
+        from sqlalchemy import select
+        from src.db.session import AsyncSessionLocal
+        from src.db.models import WatchlistItem
+        async with AsyncSessionLocal() as session:
+            res = await session.execute(select(WatchlistItem.ticker).where(WatchlistItem.is_active.is_(True)))
+            return [t for t in res.scalars().all() if t]
+
+    @staticmethod
+    def scan_universe(market: str = "ALL", limit: int = 10, extra_tickers: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         """
         Scans liquid universes (EU, US, or ALL) and ranks candidates
         based on momentum, trend alignment, and technical pullback criteria.
         """
-        cache_key = f"{market.upper()}_{limit}"
+        extras = sorted({t.upper().strip() for t in (extra_tickers or []) if t and t.strip()})
+        cache_key = f"{market.upper()}_{limit}_{','.join(extras)}"
         now = time.time()
         if cache_key in _scan_cache:
             cached_time, cached_data = _scan_cache[cache_key]
@@ -29,6 +41,13 @@ class MarketScanner:
             pool.extend(EU_STOCKS)
         if market.upper() in ("US", "ALL"):
             pool.extend(US_STOCKS)
+        known = {i["ticker"].upper() for i in pool}
+        for t in extras:
+            if t in known:
+                continue
+            if market.upper() == "ALL" or (market.upper() == "EU") == is_eu_ticker(t):
+                pool.append({"ticker": t})
+                known.add(t)
 
         ranked_candidates: List[Dict[str, Any]] = []
 
