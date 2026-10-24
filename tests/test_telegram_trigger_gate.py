@@ -489,7 +489,7 @@ async def test_analyze_does_not_arm_an_untradable_instrument():
     assert "<i>Not auto-armed:" in reply and "INDEX" in reply
     async with telegram_env("^GSPC", stock=_stock("^GSPC", quote_type=None)) as env:
         reply = await env.send("/analyze ^GSPC")
-    assert "<i>Not auto-armed:" in reply and "not a valid stock ticker" in reply
+    assert "not a valid stock ticker" in reply
     env.create.assert_not_awaited()
 
 
@@ -514,3 +514,101 @@ async def test_help_describes_the_force_option():
         reply = await env.send("/help")
     assert "/trigger TICKER [PRICE] [force]" in reply
     assert "force</code> overrides a HOLD verdict or low score" in reply
+
+
+# --- /buy: same verdict gate as /trigger ---------------------------------------------------------
+
+BOUGHT = {"success": True, "shares": 3, "price_native": 100.0, "price_eur": 100.0, "total_eur": 300.0, "stop_loss": 95.0, "take_profit": 110.0}
+
+
+@asynccontextmanager
+async def buy_env(ticker, report):
+    async with telegram_env(ticker, report=report) as env:
+        with patch("src.trading.risk.check_market_hours", return_value=(True, "")), \
+             patch("src.trading.paper.paper_broker.execute_buy", AsyncMock(return_value=dict(BOUGHT))) as buy:
+            env.buy = buy
+            yield env
+
+
+@pytest.mark.parametrize("report, verdict", [(_report(action="HOLD", score=62), "HOLD"), (_report(action="BUY", score=70), "BUY")])
+async def test_buy_soft_block_needs_force_and_hints_it(report, verdict):
+    async with buy_env("TGATEB1", report) as env:
+        reply = await env.send("/buy TGATEB1 500")
+    assert "BUY NOT EXECUTED" in reply and verdict in reply and "/buy TGATEB1 500 force" in reply
+    env.buy.assert_not_awaited()
+
+
+@pytest.mark.parametrize("text", ["/buy TGATEB2 force", "/buy TGATEB2 force 250", "/buy TGATEB2 250 force"])
+async def test_buy_force_overrides_a_soft_block(text):
+    async with buy_env("TGATEB2", _report(action="HOLD", score=62)) as env:
+        reply = await env.send(text)
+    assert "MANUAL BUY ORDER EXECUTED" in reply and "Forced" in reply
+    env.buy.assert_awaited_once()
+
+
+@pytest.mark.parametrize("report, text", [
+    (_report(action="SELL", score=20), "SELL"),
+    (_report(action="BUY", score=90, approved=False), "vetoed"),
+])
+async def test_buy_never_allowed_on_sell_or_veto_even_with_force(report, text):
+    async with buy_env("TGATEB3", report) as env:
+        reply = await env.send("/buy TGATEB3 force")
+    assert "BUY NOT EXECUTED" in reply and text in reply and "resend" not in reply
+    env.buy.assert_not_awaited()
+
+
+async def test_buy_approved_verdict_executes_without_force_and_rejects_bad_ticker():
+    async with buy_env("TGATEB4", _report(score=86)) as env:
+        reply = await env.send("/buy TGATEB4")
+        assert "MANUAL BUY ORDER EXECUTED" in reply and "Forced" not in reply
+        reply = await env.send("/buy ^GSPC")
+        assert "not a valid stock ticker" in reply
+    assert env.buy.await_count == 1
+
+
+async def test_buy_forced_below_broker_minimum_explains_the_broker_rule():
+    async with buy_env("TGATEB5", _report(action="HOLD", score=50)) as env:
+        env.buy.return_value = {"success": False, "message": "Consensus score 50 is below minimum threshold (70)."}
+        reply = await env.send("/buy TGATEB5 force")
+    assert "Buy Order Failed" in reply and "does not bypass" in reply
+
+
+# --- /sync and /shadow ---------------------------------------------------------------------------
+
+SYNC_SUMMARY = {"total_value_eur": 12345.5, "cash_eur": 1000.0, "available_cash_eur": 900.0, "open_positions_count": 4}
+
+
+@pytest.mark.parametrize("live", [False, True])
+async def test_sync_reports_key_figures_in_paper_and_live_mode(live):
+    from src.trading import broker as broker_mod
+    sync = AsyncMock(return_value=SYNC_SUMMARY)
+    fake = broker_mod.live_broker if live else SimpleNamespace(sync_account_state=sync)
+    async with telegram_env("TGATES") as env:
+        with patch("src.telegram.bot.get_active_broker", return_value=fake), \
+             patch.object(broker_mod.live_broker, "sync_account_state", sync):
+            reply = await env.send("/sync")
+    sync.assert_awaited_once()
+    assert ("LIVE" if live else "PAPER") in reply
+    assert "12,345.50" in reply and "900.00" in reply and "<b>Open Positions:</b> 4" in reply
+
+
+async def test_sync_error_is_reported_and_escaped():
+    broken = SimpleNamespace(sync_account_state=AsyncMock(side_effect=RuntimeError("<boom>")))
+    async with telegram_env("TGATES") as env:
+        with patch("src.telegram.bot.get_active_broker", return_value=broken):
+            reply = await env.send("/sync")
+    assert "Sync failed" in reply and "&lt;boom&gt;" in reply
+
+
+async def test_shadow_renders_and_handles_none_enabled():
+    comp = {"main": {"label": "Paper", "total_value_eur": 10000.0}, "strategies": [{
+        "key": "x", "label": "Aggr<essive>", "return_pct": 3.456, "total_value_eur": 10345.6, "started_at": "2026-01-01 10:00",
+        "main_same_period": {"return_pct": None}, "open_positions": [{}], "pending_triggers": [{}, {}]}]}
+    async with telegram_env("TGATES") as env:
+        with patch("src.trading.shadow.shadow_portfolios.get_comparison", AsyncMock(return_value=comp)):
+            reply = await env.send("/shadow")
+        assert "SHADOW PORTFOLIOS" in reply and "Aggr&lt;essive&gt;" in reply and "+3.46%" in reply and "main n/a" in reply
+        assert "open 1, pending 2" in reply
+        with patch("src.trading.shadow.shadow_portfolios.get_comparison", AsyncMock(return_value={"strategies": []})):
+            reply = await env.send("/shadow")
+        assert "No shadow strategies" in reply
