@@ -487,7 +487,7 @@ async def test_telegram_buy_command():
 
     # 1. Missing args
     await bot._handle_update({"message": {"chat": {"id": 12345}, "text": "/buy"}})
-    assert "Usage: <code>/buy TICKER [AMOUNT_EUR]</code>" in replies[-1][1]
+    assert "Usage: <code>/buy TICKER [AMOUNT_EUR] [force]</code>" in replies[-1][1]
 
     # 2. Market closed check
     with patch("src.trading.risk.check_market_hours", return_value=(False, "US Market is closed.")):

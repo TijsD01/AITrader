@@ -673,19 +673,28 @@ class TelegramAssistant:
 
         elif command in ("buy", "order_buy"):
             try:
-                if len(parts) < 2:
-                    await self._reply_chat(chat_id, "⚠️ Usage: <code>/buy TICKER [AMOUNT_EUR]</code> (e.g. <code>/buy NVDA</code> or <code>/buy ASML.AS 500</code>)")
+                buy_usage = "<code>/buy TICKER [AMOUNT_EUR] [force]</code>"
+                if len(parts) < 2 or parts[1].lower() == "force":
+                    await self._reply_chat(chat_id, f"⚠️ Usage: {buy_usage} (e.g. <code>/buy NVDA</code> or <code>/buy ASML.AS 500</code>)")
                     return
 
-                target_ticker = parts[1].upper().lstrip("$")
+                # "force" may be the 3rd or 4th word: /buy NVDA force, /buy NVDA 500 force
+                force = any(p.lower() == "force" for p in parts[2:4])
+                amount_args = [p for p in parts[2:4] if p.lower() != "force"]
+
+                target_ticker = normalize_ticker(parts[1])
+                if not target_ticker:
+                    await self._reply_chat(chat_id, f"⚠️ {html.escape(invalid_ticker_result(parts[1]).message)} Usage: {buy_usage}")
+                    return
+
                 explicit_amount = None
-                if len(parts) >= 3:
+                if amount_args:
                     try:
-                        explicit_amount = float(parts[2].replace(",", ".").lstrip("$€£"))
+                        explicit_amount = float(amount_args[0].replace(",", ".").lstrip("$€£"))
                     except ValueError:
                         explicit_amount = None
                     if explicit_amount is None or not math.isfinite(explicit_amount) or explicit_amount <= 0:
-                        await self._reply_chat(chat_id, "⚠️ Invalid amount. Usage: <code>/buy TICKER [AMOUNT_EUR]</code> (amount must be a number greater than 0, e.g. <code>/buy ASML.AS 500</code>)")
+                        await self._reply_chat(chat_id, f"⚠️ Invalid amount. Usage: {buy_usage} (amount must be a number greater than 0, e.g. <code>/buy ASML.AS 500</code>)")
                         return
 
                 from src.trading.risk import check_market_hours
@@ -713,6 +722,20 @@ class TelegramAssistant:
                     return
 
                 report = await investment_committee.evaluate_ticker(data, summary.get("total_value_eur", 10000.0))
+
+                # Same verdict gate as /trigger: SELL and Risk Officer veto never, HOLD / low score only with force
+                gate = evaluate_trigger_verdict(report, await get_trigger_min_score(), force=force)
+                if not gate.allowed:
+                    reply = f"🛑 <b>BUY NOT EXECUTED:</b> {target_ticker}\n\n{html.escape(gate.message)}"
+                    if gate.overridable:
+                        amount_part = f" {explicit_amount:g}" if explicit_amount else ""
+                        reply += (
+                            f"\n\n💡 <i>To buy anyway, against the committee's verdict, resend "
+                            f"<code>/buy {target_ticker}{amount_part} force</code>.</i>"
+                        )
+                    await self._reply_chat(chat_id, reply)
+                    return
+
                 risk_cfg = report.get("risk", {})
                 alloc_eur = entry_allocation_from_summary(summary, target_ticker, data.get("currency"), requested_alloc=explicit_amount)
 
@@ -745,8 +768,19 @@ class TelegramAssistant:
                         f"<b>Take Profit:</b> <code>{tp_str}</code>\n\n"
                         f"🛡️ <i>Position is now open with automated trailing risk management.</i>"
                     )
+                    if gate.code == "OK_FORCED":
+                        reply += (
+                            f"\n\n⚠️ <i>Forced: bought against the committee verdict ({html.escape(gate.action or 'no verdict')}, "
+                            f"score {gate.consensus_score}/100).</i>"
+                        )
                 else:
                     reply = f"❌ <b>Buy Order Failed:</b> {html.escape(buy_res.get('message', 'Unknown error'))}"
+                    score = gate.consensus_score or 0
+                    if score < settings.MIN_CONSENSUS_SCORE:
+                        reply += (
+                            f"\n\n💡 <i>The broker's own safety rule also requires a committee score of at least "
+                            f"{settings.MIN_CONSENSUS_SCORE}/100 (this one scored {score}); <code>force</code> does not bypass it.</i>"
+                        )
                 await self._reply_chat(chat_id, reply)
             except Exception as e:
                 logger.error(f"Error handling /buy: {e}", exc_info=True)
@@ -758,7 +792,10 @@ class TelegramAssistant:
                     await self._reply_chat(chat_id, "⚠️ Usage: <code>/sell TICKER [REASON]</code> (e.g. <code>/sell NVDA</code> or <code>/close ASML.AS Take Profit</code>)")
                     return
 
-                target_ticker = parts[1].upper().lstrip("$")
+                target_ticker = normalize_ticker(parts[1])
+                if not target_ticker:
+                    await self._reply_chat(chat_id, f"⚠️ {html.escape(invalid_ticker_result(parts[1]).message)} Usage: <code>/sell TICKER [REASON]</code>")
+                    return
                 reason = " ".join(parts[2:]) if len(parts) >= 3 else "Manual Close via Telegram"
 
                 from src.trading.risk import check_market_hours
@@ -977,7 +1014,10 @@ class TelegramAssistant:
                     await self._reply_chat(chat_id, "⚠️ Usage: <code>/analyze TICKER</code> (e.g. <code>/analyze NVDA</code>)")
                     return
                 
-                target_ticker = parts[1].upper().lstrip("$")
+                target_ticker = normalize_ticker(parts[1])
+                if not target_ticker:
+                    await self._reply_chat(chat_id, f"⚠️ {html.escape(invalid_ticker_result(parts[1]).message)} Usage: <code>/analyze TICKER</code>")
+                    return
                 await self._reply_chat(chat_id, f"⏳ Convening Multi-Agent Investment Committee for <b>{target_ticker}</b>...")
                 
                 data = await asyncio.to_thread(market_data_provider.get_stock_data, target_ticker)
@@ -1336,6 +1376,59 @@ class TelegramAssistant:
             except Exception as e:
                 logger.error(f"Error handling /compare: {e}", exc_info=True)
                 await self._reply_chat(chat_id, f"❌ Error comparing reviews: {html.escape(str(e))}")
+
+        elif command in ("sync", "refresh", "resync"):
+            try:
+                broker = get_active_broker()
+                mode = "LIVE" if broker is live_broker else "PAPER"
+                await self._reply_chat(chat_id, "⏳ Syncing positions and cash...")
+                summary = await broker.sync_account_state() or {}
+                await self._reply_chat(
+                    chat_id,
+                    f"🔄 <b>SYNC COMPLETE ({mode})</b>\n\n"
+                    f"<b>Total Value:</b> €{summary.get('total_value_eur') or 0.0:,.2f}\n"
+                    f"<b>Cash:</b> €{summary.get('cash_eur') or 0.0:,.2f} (available €{summary.get('available_cash_eur') or 0.0:,.2f})\n"
+                    f"<b>Open Positions:</b> {summary.get('open_positions_count', len(summary.get('positions') or []))}"
+                )
+            except Exception as e:
+                logger.error(f"Error handling /sync: {e}", exc_info=True)
+                await self._reply_chat(chat_id, f"❌ Sync failed: {html.escape(str(e))}")
+
+        elif command in ("shadow", "shadows"):
+            try:
+                from src.trading.shadow import shadow_portfolios
+                main_is_live = settings.TRADING_MODE.upper() == "LIVE" and settings.LIVE_TRADING_ENABLED
+                try:
+                    main_summary = await get_active_broker().get_portfolio_summary()
+                except Exception as e:
+                    logger.warning(f"/shadow: main portfolio summary unavailable: {e}")
+                    main_summary = {}
+                comp = await shadow_portfolios.get_comparison(main_summary, main_is_live)
+                strategies = comp.get("strategies") or []
+                if not strategies:
+                    await self._reply_chat(chat_id, "👥 <b>SHADOW PORTFOLIOS</b>\n\nNo shadow strategies are enabled.")
+                    return
+
+                def pct(v):
+                    return "n/a" if v is None else f"{v:+.2f}%"
+
+                main = comp.get("main") or {}
+                lines = ["👥 <b>SHADOW PORTFOLIOS</b>", ""]
+                if main.get("total_value_eur") is not None:
+                    lines.append(f"<b>Main ({html.escape(str(main.get('label', '')))}):</b> €{main['total_value_eur']:,.2f}")
+                    lines.append("")
+                for s in strategies:
+                    mp = s.get("main_same_period") or {}
+                    lines.append(
+                        f"<b>{html.escape(str(s.get('label') or s.get('key')))}</b>: {pct(s.get('return_pct'))} "
+                        f"(€{s.get('total_value_eur', 0.0):,.2f}) vs main {pct(mp.get('return_pct'))}\n"
+                        f"  open {len(s.get('open_positions') or [])}, pending {len(s.get('pending_triggers') or [])}, "
+                        f"since {html.escape(str(s.get('started_at') or '?'))}"
+                    )
+                await self._reply_chat(chat_id, "\n".join(lines))
+            except Exception as e:
+                logger.error(f"Error handling /shadow: {e}", exc_info=True)
+                await self._reply_chat(chat_id, f"❌ Error loading shadow portfolios: {html.escape(str(e))}")
 
         else:
             reply = (
