@@ -429,7 +429,7 @@ class TelegramAssistant:
 
         commands = [
             {"command": "portfolio", "description": "Check cash, equity, and open positions"},
-            {"command": "buy", "description": "Execute paper buy (e.g. /buy NVDA 500)"},
+            {"command": "buy", "description": "Manual buy (e.g. /buy NVDA 500, add force to override HOLD)"},
             {"command": "sell", "description": "Close an open stock position (e.g. /sell NVDA)"},
             {"command": "review", "description": "Instant Market Review & Advice (e.g. /review us)"},
             {"command": "compare", "description": "Past-week reviews comparison & performance"},
@@ -444,6 +444,9 @@ class TelegramAssistant:
             {"command": "status", "description": "System health and scheduler status"},
             {"command": "stop", "description": "Pause automated buying"},
             {"command": "resume", "description": "Enable automated buying"},
+            {"command": "killswitch", "description": "Emergency circuit breaker to halt all trading"},
+            {"command": "sync", "description": "Sync live account positions & cash with the broker"},
+            {"command": "shadow", "description": "Shadow portfolio performance"},
             {"command": "help", "description": "Show all available bot commands"},
         ]
         set_url = f"{self.base_url}/setMyCommands"
@@ -608,7 +611,7 @@ class TelegramAssistant:
                 "👋 <b>Welcome to your Multi-Agent Investment Bot!</b>\n\n"
                 "Available commands:\n"
                 "📊 <code>/portfolio</code> - Check cash, equity, and open positions\n"
-                "🟢 <code>/buy TICKER [AMOUNT]</code> - Manually execute a buy order (e.g. <code>/buy NVDA 500</code>)\n"
+                "🟢 <code>/buy TICKER [AMOUNT] [force]</code> - Manually execute a buy order (e.g. <code>/buy NVDA 500</code>); <code>force</code> overrides a HOLD verdict or low trigger score, never a SELL or Risk Officer veto\n"
                 "🔴 <code>/sell TICKER</code> - Close an open stock position (e.g. <code>/sell NVDA</code>)\n"
                 "🔔 <code>/review [eu|us] [open|close]</code> - Instant Market Review & Daily Advice\n"
                 "📜 <code>/compare</code> - Past-week reviews comparison & pick follow-through\n"
@@ -624,12 +627,21 @@ class TelegramAssistant:
                 "🛑 <code>/stop</code> - Pause automated buying\n"
                 "▶️ <code>/resume</code> - Enable automated buying\n"
                 "🚨 <code>/killswitch</code> - Emergency circuit breaker to halt all trading\n"
+                "🔄 <code>/sync</code> - Sync live account positions & cash with the broker\n"
+                "👥 <code>/shadow</code> - Shadow portfolio performance\n"
                 "❓ <code>/help</code> - Show this menu of available commands"
             )
             await self._reply_chat(chat_id, reply)
 
         elif command in ("killswitch", "emergency_stop", "halt"):
-            settings.KILL_SWITCH_ACTIVE = not settings.KILL_SWITCH_ACTIVE
+            from src.db.session import set_kill_switch
+            try:
+                await set_kill_switch(not settings.KILL_SWITCH_ACTIVE)
+            except Exception as e:
+                logger.error(f"Error handling /killswitch: {e}", exc_info=True)
+                state = "ACTIVE" if settings.KILL_SWITCH_ACTIVE else "OFF"
+                await self._reply_chat(chat_id, f"❌ Could not change the kill switch (still {state}): {html.escape(str(e))}")
+                return
             status_text = (
                 "🚨 <b>EMERGENCY KILL SWITCH ACTIVATED!</b>\nAll order triggers & new buys are immediately blocked."
                 if settings.KILL_SWITCH_ACTIVE
@@ -657,12 +669,16 @@ class TelegramAssistant:
                 total_return = summary.get('total_return_pct', 0.0) or 0.0
                 pnl_sign = "+" if unrealized_pnl >= 0 else ""
                 ret_sign = "+" if total_return >= 0 else ""
+                mode_label = "LIVE" if (settings.TRADING_MODE.upper() == "LIVE" and settings.LIVE_TRADING_ENABLED) else "PAPER"
                 reply = (
-                    f"💼 <b>PORTFOLIO SUMMARY</b>\n\n"
+                    f"💼 <b>PORTFOLIO SUMMARY</b> ({mode_label})\n\n"
                     f"• Total Value: <b>€{summary.get('total_value_eur', 0.0):,.2f}</b>\n"
                     f"• Cash Balance: €{summary.get('cash_eur', 0.0):,.2f}\n"
+                    f"• Available Cash: €{(summary.get('available_cash_eur', 0.0) or 0.0):,.2f}\n"
+                    f"• Reserved by Pending Triggers: €{(summary.get('reserved_triggers_eur', 0.0) or 0.0):,.2f}\n"
                     f"• Equity in Stocks: €{summary.get('equity_eur', 0.0):,.2f}\n"
-                    f"• Unrealized PnL: {pnl_sign}€{unrealized_pnl:,.2f} ({ret_sign}{total_return}%)\n\n"
+                    f"• Unrealized PnL: {pnl_sign}€{unrealized_pnl:,.2f}\n"
+                    f"• Total Return: {ret_sign}{total_return}%\n\n"
                     f"<b>Open Holdings ({summary.get('open_positions_count', len(positions))}):</b>\n"
                     f"{pos_text}"
                 )
@@ -673,19 +689,28 @@ class TelegramAssistant:
 
         elif command in ("buy", "order_buy"):
             try:
-                if len(parts) < 2:
-                    await self._reply_chat(chat_id, "⚠️ Usage: <code>/buy TICKER [AMOUNT_EUR]</code> (e.g. <code>/buy NVDA</code> or <code>/buy ASML.AS 500</code>)")
+                buy_usage = "<code>/buy TICKER [AMOUNT_EUR] [force]</code>"
+                if len(parts) < 2 or parts[1].lower() == "force":
+                    await self._reply_chat(chat_id, f"⚠️ Usage: {buy_usage} (e.g. <code>/buy NVDA</code> or <code>/buy ASML.AS 500</code>)")
                     return
 
-                target_ticker = parts[1].upper().lstrip("$")
+                # "force" may be the 3rd or 4th word: /buy NVDA force, /buy NVDA 500 force
+                force = any(p.lower() == "force" for p in parts[2:4])
+                amount_args = [p for p in parts[2:4] if p.lower() != "force"]
+
+                target_ticker = normalize_ticker(parts[1])
+                if not target_ticker:
+                    await self._reply_chat(chat_id, f"⚠️ {html.escape(invalid_ticker_result(parts[1]).message)} Usage: {buy_usage}")
+                    return
+
                 explicit_amount = None
-                if len(parts) >= 3:
+                if amount_args:
                     try:
-                        explicit_amount = float(parts[2].replace(",", ".").lstrip("$€£"))
+                        explicit_amount = float(amount_args[0].replace(",", ".").lstrip("$€£"))
                     except ValueError:
                         explicit_amount = None
                     if explicit_amount is None or not math.isfinite(explicit_amount) or explicit_amount <= 0:
-                        await self._reply_chat(chat_id, "⚠️ Invalid amount. Usage: <code>/buy TICKER [AMOUNT_EUR]</code> (amount must be a number greater than 0, e.g. <code>/buy ASML.AS 500</code>)")
+                        await self._reply_chat(chat_id, f"⚠️ Invalid amount. Usage: {buy_usage} (amount must be a number greater than 0, e.g. <code>/buy ASML.AS 500</code>)")
                         return
 
                 from src.trading.risk import check_market_hours
@@ -713,6 +738,20 @@ class TelegramAssistant:
                     return
 
                 report = await investment_committee.evaluate_ticker(data, summary.get("total_value_eur", 10000.0))
+
+                # Same verdict gate as /trigger: SELL and Risk Officer veto never, HOLD / low score only with force
+                gate = evaluate_trigger_verdict(report, await get_trigger_min_score(), force=force)
+                if not gate.allowed:
+                    reply = f"🛑 <b>BUY NOT EXECUTED:</b> {target_ticker}\n\n{html.escape(gate.message)}"
+                    if gate.overridable:
+                        amount_part = f" {explicit_amount:g}" if explicit_amount else ""
+                        reply += (
+                            f"\n\n💡 <i>To buy anyway, against the committee's verdict, resend "
+                            f"<code>/buy {target_ticker}{amount_part} force</code>.</i>"
+                        )
+                    await self._reply_chat(chat_id, reply)
+                    return
+
                 risk_cfg = report.get("risk", {})
                 alloc_eur = entry_allocation_from_summary(summary, target_ticker, data.get("currency"), requested_alloc=explicit_amount)
 
@@ -745,6 +784,11 @@ class TelegramAssistant:
                         f"<b>Take Profit:</b> <code>{tp_str}</code>\n\n"
                         f"🛡️ <i>Position is now open with automated trailing risk management.</i>"
                     )
+                    if gate.code == "OK_FORCED":
+                        reply += (
+                            f"\n\n⚠️ <i>Forced: bought against the committee verdict ({html.escape(gate.action or 'no verdict')}, "
+                            f"score {gate.consensus_score}/100).</i>"
+                        )
                 else:
                     reply = f"❌ <b>Buy Order Failed:</b> {html.escape(buy_res.get('message', 'Unknown error'))}"
                 await self._reply_chat(chat_id, reply)
@@ -758,7 +802,10 @@ class TelegramAssistant:
                     await self._reply_chat(chat_id, "⚠️ Usage: <code>/sell TICKER [REASON]</code> (e.g. <code>/sell NVDA</code> or <code>/close ASML.AS Take Profit</code>)")
                     return
 
-                target_ticker = parts[1].upper().lstrip("$")
+                target_ticker = normalize_ticker(parts[1])
+                if not target_ticker:
+                    await self._reply_chat(chat_id, f"⚠️ {html.escape(invalid_ticker_result(parts[1]).message)} Usage: <code>/sell TICKER [REASON]</code>")
+                    return
                 reason = " ".join(parts[2:]) if len(parts) >= 3 else "Manual Close via Telegram"
 
                 from src.trading.risk import check_market_hours
@@ -794,9 +841,12 @@ class TelegramAssistant:
                 from src.db.session import AsyncSessionLocal
                 from src.db.models import Trade
                 from sqlalchemy import select, desc
+                is_live = settings.TRADING_MODE.upper() == "LIVE" and settings.LIVE_TRADING_ENABLED
+                # Older paper rows may have is_live NULL
+                mode_filter = Trade.is_live == True if is_live else Trade.is_live.isnot(True)
                 async with AsyncSessionLocal() as session:
                     res = await session.execute(
-                        select(Trade).order_by(desc(Trade.executed_at)).limit(8)
+                        select(Trade).where(mode_filter).order_by(desc(Trade.executed_at)).limit(8)
                     )
                     trades = res.scalars().all()
                 if not trades:
@@ -808,7 +858,7 @@ class TelegramAssistant:
                         pnl_str = ""
                         if t.order_type == "SELL" and t.realized_pnl_eur is not None:
                             sign = "+" if t.realized_pnl_eur >= 0 else ""
-                            pnl_str = f" | PnL: <b>{sign}€{t.realized_pnl_eur:.2f} ({sign}{t.realized_pnl_pct or 0.0:+.1f}%)</b>"
+                            pnl_str = f" | PnL: <b>{sign}€{t.realized_pnl_eur:.2f} ({(t.realized_pnl_pct or 0.0):+.1f}%)</b>"
                         dt_str = t.executed_at.strftime("%b %d %H:%M") if t.executed_at else ""
                         lines.append(
                             f"• {icon} <b>{t.ticker}</b> ({t.shares} shs @ {t.price_native} {t.currency})\n"
@@ -977,7 +1027,10 @@ class TelegramAssistant:
                     await self._reply_chat(chat_id, "⚠️ Usage: <code>/analyze TICKER</code> (e.g. <code>/analyze NVDA</code>)")
                     return
                 
-                target_ticker = parts[1].upper().lstrip("$")
+                target_ticker = normalize_ticker(parts[1])
+                if not target_ticker:
+                    await self._reply_chat(chat_id, f"⚠️ {html.escape(invalid_ticker_result(parts[1]).message)} Usage: <code>/analyze TICKER</code>")
+                    return
                 await self._reply_chat(chat_id, f"⏳ Convening Multi-Agent Investment Committee for <b>{target_ticker}</b>...")
                 
                 data = await asyncio.to_thread(market_data_provider.get_stock_data, target_ticker)
@@ -1148,11 +1201,26 @@ class TelegramAssistant:
                     else:
                         session.add(SystemConfig(key="AUTO_BUY_ENABLED", value=val_str))
                     await session.commit()
+                    all_cfg = {c.key: c.value for c in (await session.execute(select(SystemConfig))).scalars().all()}
                 settings.AUTO_BUY_ENABLED = enable
+                min_score, trig_score = settings.MIN_CONSENSUS_SCORE, settings.TRIGGER_MIN_SCORE
+                try:
+                    min_score = int(all_cfg.get("MIN_CONSENSUS_SCORE", min_score))
+                    trig_score = int(all_cfg.get("TRIGGER_MIN_SCORE", trig_score))
+                except ValueError:
+                    pass
                 if enable:
-                    reply = f"▶️ <b>Automated buying has been ENABLED.</b>\nHigh conviction opportunities (Score ≥ {settings.MIN_CONSENSUS_SCORE}) will execute automatically."
+                    reply = (
+                        "▶️ <b>Automated buying has been ENABLED.</b>\n"
+                        f"Pending triggers will fill automatically when their limit price is hit and the committee consensus score is ≥ {min_score}. "
+                        f"The scanner arms new triggers at score ≥ {trig_score}."
+                    )
                 else:
-                    reply = "🛑 <b>Automated buying has been PAUSED.</b>\nThe committee will continue to advise, but no orders will execute automatically."
+                    reply = (
+                        "🛑 <b>Automated buying has been PAUSED.</b>\n"
+                        "Pending triggers will not fill. The scanner keeps arming new triggers "
+                        f"(score ≥ {trig_score}) and the committee keeps advising. Manual <code>/buy</code> still works."
+                    )
                 await self._reply_chat(chat_id, reply)
             except Exception as e:
                 action_word = "enabling" if enable else "pausing"
@@ -1184,6 +1252,15 @@ class TelegramAssistant:
                         except ValueError:
                             pass
 
+                mode_label = "LIVE" if (settings.TRADING_MODE.upper() == "LIVE" and settings.LIVE_TRADING_ENABLED) else "PAPER"
+                try:
+                    from src.trading.broker import check_broker_status
+                    bs = await check_broker_status()
+                    broker_line = f"{'🟢' if bs.get('connected') else '🔴'} {html.escape(str(bs.get('status', 'UNKNOWN')))}"
+                except Exception as be:
+                    logger.warning(f"Broker status check failed in /status: {be}")
+                    broker_line = "❓ UNKNOWN"
+
                 market_info = get_market_statuses()
                 eu_status = market_info.get("eu_market", {}).get("status", "CLOSED")
                 eu_badge = "🟢 OPEN" if eu_status == "OPEN" else "🔴 CLOSED"
@@ -1195,7 +1272,10 @@ class TelegramAssistant:
                 reply = (
                     "✅ <b>SYSTEM OPERATIONAL</b>\n\n"
                     f"• Base Currency: {settings.BASE_CURRENCY}\n"
-                    f"• AI Provider: {settings.LLM_PROVIDER.upper()} (Zero Cost Plan)\n"
+                    f"• AI Provider: {settings.LLM_PROVIDER.upper()}\n"
+                    f"• Trading Mode: {mode_label}\n"
+                    f"• Broker: {broker_line}\n"
+                    f"• Kill Switch: {'🚨 ACTIVE' if settings.KILL_SWITCH_ACTIVE else 'off'}\n"
                     f"• Auto-Buy Mode: {'ENABLED' if auto_buy else 'PAUSED'}\n"
                     f"• Auto-Arm Trigger Threshold: Score ≥ {trig_score}\n"
                     f"• Min Consensus Score: Score ≥ {min_score}\n"
@@ -1336,6 +1416,59 @@ class TelegramAssistant:
             except Exception as e:
                 logger.error(f"Error handling /compare: {e}", exc_info=True)
                 await self._reply_chat(chat_id, f"❌ Error comparing reviews: {html.escape(str(e))}")
+
+        elif command in ("sync", "refresh", "resync"):
+            try:
+                broker = get_active_broker()
+                mode = "LIVE" if broker is live_broker else "PAPER"
+                await self._reply_chat(chat_id, "⏳ Syncing positions and cash...")
+                summary = await broker.sync_account_state() or {}
+                await self._reply_chat(
+                    chat_id,
+                    f"🔄 <b>SYNC COMPLETE ({mode})</b>\n\n"
+                    f"<b>Total Value:</b> €{summary.get('total_value_eur') or 0.0:,.2f}\n"
+                    f"<b>Cash:</b> €{summary.get('cash_eur') or 0.0:,.2f} (available €{summary.get('available_cash_eur') or 0.0:,.2f})\n"
+                    f"<b>Open Positions:</b> {summary.get('open_positions_count', len(summary.get('positions') or []))}"
+                )
+            except Exception as e:
+                logger.error(f"Error handling /sync: {e}", exc_info=True)
+                await self._reply_chat(chat_id, f"❌ Sync failed: {html.escape(str(e))}")
+
+        elif command in ("shadow", "shadows"):
+            try:
+                from src.trading.shadow import shadow_portfolios
+                main_is_live = settings.TRADING_MODE.upper() == "LIVE" and settings.LIVE_TRADING_ENABLED
+                try:
+                    main_summary = await get_active_broker().get_portfolio_summary()
+                except Exception as e:
+                    logger.warning(f"/shadow: main portfolio summary unavailable: {e}")
+                    main_summary = {}
+                comp = await shadow_portfolios.get_comparison(main_summary, main_is_live)
+                strategies = comp.get("strategies") or []
+                if not strategies:
+                    await self._reply_chat(chat_id, "👥 <b>SHADOW PORTFOLIOS</b>\n\nNo shadow strategies are enabled.")
+                    return
+
+                def pct(v):
+                    return "n/a" if v is None else f"{v:+.2f}%"
+
+                main = comp.get("main") or {}
+                lines = ["👥 <b>SHADOW PORTFOLIOS</b>", ""]
+                if main.get("total_value_eur") is not None:
+                    lines.append(f"<b>Main ({html.escape(str(main.get('label', '')))}):</b> €{main['total_value_eur']:,.2f}")
+                    lines.append("")
+                for s in strategies:
+                    mp = s.get("main_same_period") or {}
+                    lines.append(
+                        f"<b>{html.escape(str(s.get('label') or s.get('key')))}</b>: {pct(s.get('return_pct'))} "
+                        f"(€{s.get('total_value_eur', 0.0):,.2f}) vs main {pct(mp.get('return_pct'))}\n"
+                        f"  open {len(s.get('open_positions') or [])}, pending {len(s.get('pending_triggers') or [])}, "
+                        f"since {html.escape(str(s.get('started_at') or '?'))}"
+                    )
+                await self._reply_chat(chat_id, "\n".join(lines))
+            except Exception as e:
+                logger.error(f"Error handling /shadow: {e}", exc_info=True)
+                await self._reply_chat(chat_id, f"❌ Error loading shadow portfolios: {html.escape(str(e))}")
 
         else:
             reply = (

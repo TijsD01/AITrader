@@ -42,3 +42,19 @@ async def test_fastapi_endpoints():
         set_resp = await ac.get("/api/settings")
         assert set_resp.status_code == 200
         assert "auto_buy_enabled" in set_resp.json()
+
+
+def test_scan_universe_includes_watchlist_extras(monkeypatch):
+    from src.screener import scanner as sc
+    seen = []
+    monkeypatch.setattr(sc.market_data_provider, "get_stock_data", lambda t: seen.append(t) and None)
+    sc._scan_cache.clear()
+    sc.MarketScanner.scan_universe("US", 5, extra_tickers=["zzzz", "ZZZZ", "AAPL", "FOO.AS"])
+    assert seen.count("ZZZZ") == 1       # added once, upper-cased
+    assert seen.count("AAPL") <= 1        # de-duplicated against fixed universe
+    assert "FOO.AS" not in seen           # EU ticker not in US scan
+    sc._scan_cache.clear()
+    seen.clear()
+    sc.MarketScanner.scan_universe("EU", 5, extra_tickers=["FOO.AS", "ZZZZ"])
+    assert "FOO.AS" in seen and "ZZZZ" not in seen
+    sc._scan_cache.clear()

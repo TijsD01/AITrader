@@ -93,6 +93,7 @@ async def init_db():
         # Seed missing keys with settings defaults
         defaults_to_seed = {
             "AUTO_BUY_ENABLED": str(settings.AUTO_BUY_ENABLED).lower(),
+            "KILL_SWITCH_ACTIVE": str(settings.KILL_SWITCH_ACTIVE).lower(),
             "MIN_CONSENSUS_SCORE": str(settings.MIN_CONSENSUS_SCORE),
             "TRIGGER_MIN_SCORE": str(settings.TRIGGER_MIN_SCORE),
             "POSITION_SIZE_PCT": str(settings.POSITION_SIZE_PCT),
@@ -121,6 +122,8 @@ async def init_db():
         # Synchronize all persisted DB configurations into in-memory settings singleton
         if "AUTO_BUY_ENABLED" in db_configs:
             settings.AUTO_BUY_ENABLED = db_configs["AUTO_BUY_ENABLED"].strip().lower() == "true"
+        if "KILL_SWITCH_ACTIVE" in db_configs:
+            settings.KILL_SWITCH_ACTIVE = db_configs["KILL_SWITCH_ACTIVE"].strip().lower() == "true"
         if "MIN_CONSENSUS_SCORE" in db_configs:
             try:
                 settings.MIN_CONSENSUS_SCORE = int(db_configs["MIN_CONSENSUS_SCORE"])
@@ -182,3 +185,18 @@ async def init_db():
 
         await session.commit()
 
+
+
+async def set_kill_switch(active: bool) -> bool:
+    """Set the emergency kill switch in memory and persist it so it survives restarts."""
+    active = bool(active)
+    async with AsyncSessionLocal() as session:
+        res = await session.execute(select(SystemConfig).where(SystemConfig.key == "KILL_SWITCH_ACTIVE"))
+        cfg = res.scalars().first()
+        if cfg:
+            cfg.value = str(active).lower()
+        else:
+            session.add(SystemConfig(key="KILL_SWITCH_ACTIVE", value=str(active).lower()))
+        await session.commit()
+    settings.KILL_SWITCH_ACTIVE = active
+    return active

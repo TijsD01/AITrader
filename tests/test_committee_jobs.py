@@ -76,7 +76,7 @@ async def test_blocked_arm_job_carries_the_gate_detail():
         job = await _wait(client, resp.json()["job_id"])
         assert job["status_code"] == 422
         assert job["body"]["detail"]["overridable"] is True
-    await _run(_report(action="HOLD", score=50), calls)
+    await _run(_report(action="HOLD", score=72), calls)
 
 
 @pytest.mark.asyncio
@@ -100,4 +100,4 @@ async def test_forced_arm_reuses_the_report_of_the_blocked_run():
         async with AsyncSessionLocal() as session:  # the forced run armed a real paper trigger
             await session.execute(delete(OrderTrigger).where(OrderTrigger.ticker == "JOBX"))
             await session.commit()
-    await _run(_report(action="HOLD", score=50), calls)
+    await _run(_report(action="HOLD", score=72), calls)

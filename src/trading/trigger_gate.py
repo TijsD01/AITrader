@@ -108,6 +108,14 @@ def evaluate_trigger_verdict(report: Dict[str, Any], trigger_min_score: int, for
     if action.startswith(("SELL", "STRONG_SELL")):
         return result(False, "SELL_VERDICT", f"The committee's verdict is {action} (score {score}/100), so there is nothing to buy.")
 
+    # The broker (validate_buy_order) rejects any buy below MIN_CONSENSUS_SCORE, so such a trigger could never fill
+    if score < settings.MIN_CONSENSUS_SCORE:
+        return result(
+            False, "BELOW_MIN_CONSENSUS",
+            f"The committee's score of {score}/100 is below the minimum consensus score of {settings.MIN_CONSENSUS_SCORE} "
+            f"that every buy needs, so the order could never fill. Force does not override this."
+        )
+
     block = None
     if action not in _BUY_ACTIONS:
         verdict = action or "missing"
