@@ -791,12 +791,6 @@ class TelegramAssistant:
                         )
                 else:
                     reply = f"❌ <b>Buy Order Failed:</b> {html.escape(buy_res.get('message', 'Unknown error'))}"
-                    score = gate.consensus_score or 0
-                    if score < settings.MIN_CONSENSUS_SCORE:
-                        reply += (
-                            f"\n\n💡 <i>The broker's own safety rule also requires a committee score of at least "
-                            f"{settings.MIN_CONSENSUS_SCORE}/100 (this one scored {score}); <code>force</code> does not bypass it.</i>"
-                        )
                 await self._reply_chat(chat_id, reply)
             except Exception as e:
                 logger.error(f"Error handling /buy: {e}", exc_info=True)

@@ -185,11 +185,11 @@ def test_sell_verdict_is_a_hard_block(action):
 
 @pytest.mark.parametrize("action", ["HOLD", "WATCH", "", None])
 def test_hold_is_a_soft_block(action):
-    report = _report(score=62)
+    report = _report(score=72)
     report["action"] = action
     res = evaluate_trigger_verdict(report, 80)
     assert not res.allowed and res.code == "NOT_BUY_VERDICT" and res.overridable
-    assert "62/100" in res.message
+    assert "72/100" in res.message
     if action:
         assert action in res.message
 
@@ -202,17 +202,38 @@ def test_score_below_threshold_is_a_soft_block():
 
 
 def test_hold_with_a_low_score_reports_the_verdict_first():
-    res = evaluate_trigger_verdict(_report(action="HOLD", score=30), 80)
+    res = evaluate_trigger_verdict(_report(action="HOLD", score=71), 80)
     assert res.code == "NOT_BUY_VERDICT"
 
 
 def test_force_turns_soft_blocks_into_an_allowed_result():
-    for report in (_report(action="HOLD", score=62), _report(action="BUY", score=70), _report(action="HOLD", score=30)):
+    for report in (_report(action="HOLD", score=72), _report(action="BUY", score=70), _report(action="HOLD", score=71)):
         res = evaluate_trigger_verdict(report, 80, force=True)
         assert res.allowed and res.code == "OK_FORCED" and not res.overridable
         assert "against" in res.message.lower()
         assert res.action == report["action"] and res.consensus_score == report["consensus_score"]
-    assert "HOLD" in evaluate_trigger_verdict(_report(action="HOLD", score=62), 80, force=True).message
+    assert "HOLD" in evaluate_trigger_verdict(_report(action="HOLD", score=72), 80, force=True).message
+
+
+@pytest.mark.parametrize("action", ["BUY", "STRONG_BUY", "HOLD"])
+@pytest.mark.parametrize("force", [False, True])
+def test_score_below_min_consensus_is_a_hard_block(action, force, monkeypatch):
+    monkeypatch.setattr(settings, "MIN_CONSENSUS_SCORE", 70)
+    res = evaluate_trigger_verdict(_report(action=action, score=69), 60, force=force)
+    assert not res.allowed and res.code == "BELOW_MIN_CONSENSUS" and not res.overridable
+    assert "69/100" in res.message and "70" in res.message
+
+
+def test_score_exactly_at_min_consensus_is_not_hard_blocked(monkeypatch):
+    monkeypatch.setattr(settings, "MIN_CONSENSUS_SCORE", 70)
+    assert evaluate_trigger_verdict(_report(action="BUY", score=70), 60).code == "OK"
+    assert evaluate_trigger_verdict(_report(action="BUY", score=70), 80).code == "LOW_SCORE"
+    assert evaluate_trigger_verdict(_report(action="HOLD", score=70), 80, force=True).code == "OK_FORCED"
+
+
+def test_veto_and_sell_report_their_own_code_before_min_consensus():
+    assert evaluate_trigger_verdict(_report(action="BUY", score=40, approved=False), 80).code == "RISK_VETO"
+    assert evaluate_trigger_verdict(_report(action="SELL", score=40), 80).code == "SELL_VERDICT"
 
 
 def test_force_does_not_change_a_clean_pass():
@@ -221,7 +242,7 @@ def test_force_does_not_change_a_clean_pass():
 
 
 def test_gate_result_detail_is_json_safe_and_complete():
-    res = evaluate_trigger_verdict(_report(action="HOLD", score=62), 80)
+    res = evaluate_trigger_verdict(_report(action="HOLD", score=72), 80)
     detail = res.to_detail()
     assert json.loads(json.dumps(detail)) == detail
     assert set(detail) == {"allowed", "code", "message", "overridable", "action", "consensus_score", "trigger_min_score"}
@@ -264,8 +285,8 @@ async def test_verdict_hard_blocks_skip_the_market_lookups():
 @pytest.mark.asyncio
 async def test_soft_block_is_overridable_only_with_force():
     with patch("src.trading.trigger_gate.check_market_regime", return_value=(True, "")):
-        blocked = await evaluate_manual_trigger("GATEX", _stock("GATEX"), _report(action="HOLD", score=62), 98.0, 500.0, 80)
-        forced = await evaluate_manual_trigger("GATEX", _stock("GATEX"), _report(action="HOLD", score=62), 98.0, 500.0, 80, force=True)
+        blocked = await evaluate_manual_trigger("GATEX", _stock("GATEX"), _report(action="HOLD", score=72), 98.0, 500.0, 80)
+        forced = await evaluate_manual_trigger("GATEX", _stock("GATEX"), _report(action="HOLD", score=72), 98.0, 500.0, 80, force=True)
     assert not blocked.allowed and blocked.code == "NOT_BUY_VERDICT" and blocked.overridable
     assert forced.allowed and forced.code == "OK_FORCED"
 
@@ -283,7 +304,7 @@ async def test_falling_market_is_a_hard_block_even_with_force():
 @pytest.mark.asyncio
 async def test_hard_block_wins_over_a_soft_block_so_overridable_is_truthful():
     with patch("src.trading.trigger_gate.check_market_regime", return_value=REGIME_BLOCK):
-        res = await evaluate_manual_trigger("GATEX", _stock("GATEX"), _report(action="HOLD", score=62), 98.0, 500.0, 80)
+        res = await evaluate_manual_trigger("GATEX", _stock("GATEX"), _report(action="HOLD", score=72), 98.0, 500.0, 80)
     assert res.code == "MARKET_REGIME" and not res.overridable
 
 
@@ -474,13 +495,13 @@ async def test_ticker_is_normalized_before_use(path):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", ENDPOINTS)
 async def test_hold_verdict_is_blocked_but_can_be_forced(path):
-    report = _report(action="HOLD", score=62, summary="Wait for a better entry")
+    report = _report(action="HOLD", score=72, summary="Wait for a better entry")
     with _api_env(_stock("GATEHOLD"), report):
         resp = await _post(path, ticker="GATEHOLD", allocation_eur=500.0)
     assert resp.status_code == 422
     detail = resp.json()["detail"]
     assert detail["code"] == "NOT_BUY_VERDICT" and detail["overridable"] is True and detail["allowed"] is False
-    assert detail["action"] == "HOLD" and detail["consensus_score"] == 62 and detail["trigger_min_score"] == 80
+    assert detail["action"] == "HOLD" and detail["consensus_score"] == 72 and detail["trigger_min_score"] == 80
     assert "HOLD" in detail["message"]
     assert detail["summary"] == "Wait for a better entry"
     assert await _pending("GATEHOLD") == []
@@ -539,7 +560,7 @@ async def test_hard_verdict_blocks_are_not_overridable(path, report, code):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", ENDPOINTS)
 async def test_falling_market_blocks_even_a_forced_trigger(path):
-    for report in (_report(), _report(action="HOLD", score=62)):
+    for report in (_report(), _report(action="HOLD", score=72)):
         for force in (False, True):
             with _api_env(_stock("GATEREG"), report, regime=REGIME_BLOCK):
                 resp = await _post(path, ticker="GATEREG", allocation_eur=500.0, force=force)
