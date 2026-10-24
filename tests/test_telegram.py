@@ -698,3 +698,57 @@ async def test_telegram_trigger_invalid_price_rejected(price):
         mock_data.assert_not_called()
     assert len(replies) == 1
     assert "Invalid price" in replies[0][1]
+
+
+@pytest.mark.asyncio
+async def test_telegram_trades_filters_live_mode_and_single_pnl_sign():
+    import datetime
+    from types import SimpleNamespace
+    bot = TelegramAssistant()
+    bot.token = "mock_token"
+    bot.base_url = "https://api.telegram.org/botmock_token"
+    replies = []
+    bot._reply_chat = AsyncMock(side_effect=lambda cid, txt: replies.append((cid, txt)))
+
+    trade = SimpleNamespace(
+        order_type="SELL", ticker="NVDA", shares=2, price_native=100.0, currency="USD",
+        total_eur=180.0, realized_pnl_eur=3.5, realized_pnl_pct=2.1,
+        executed_at=datetime.datetime(2026, 1, 2, 10, 0),
+    )
+    stmts = []
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        async def execute(self, stmt):
+            stmts.append(stmt)
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [trade]))
+
+    with patch("src.db.session.AsyncSessionLocal", lambda: FakeSession()), \
+         patch.object(settings, "TRADING_MODE", "LIVE"), \
+         patch.object(settings, "LIVE_TRADING_ENABLED", True):
+        await bot._handle_update({"message": {"chat": {"id": 12345}, "text": "/trades"}})
+
+    sql = str(stmts[0].compile(compile_kwargs={"literal_binds": True})).lower()
+    assert "is_live = 1" in sql or "is_live = true" in sql
+    assert "+2.1%" in replies[-1][1]
+    assert "++" not in replies[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_telegram_status_shows_mode_and_kill_switch():
+    bot = TelegramAssistant()
+    bot.token = "mock_token"
+    bot.base_url = "https://api.telegram.org/botmock_token"
+    replies = []
+    bot._reply_chat = AsyncMock(side_effect=lambda cid, txt: replies.append((cid, txt)))
+
+    with patch.object(settings, "KILL_SWITCH_ACTIVE", True), \
+         patch.object(settings, "TRADING_MODE", "PAPER"):
+        await bot._handle_update({"message": {"chat": {"id": 12345}, "text": "/status"}})
+    text = replies[-1][1]
+    assert "Trading Mode: PAPER" in text
+    assert "Kill Switch: 🚨 ACTIVE" in text
+    assert "Zero Cost" not in text
