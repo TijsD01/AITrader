@@ -629,7 +629,8 @@ class TelegramAssistant:
             await self._reply_chat(chat_id, reply)
 
         elif command in ("killswitch", "emergency_stop", "halt"):
-            settings.KILL_SWITCH_ACTIVE = not settings.KILL_SWITCH_ACTIVE
+            from src.db.session import set_kill_switch
+            await set_kill_switch(not settings.KILL_SWITCH_ACTIVE)
             status_text = (
                 "🚨 <b>EMERGENCY KILL SWITCH ACTIVATED!</b>\nAll order triggers & new buys are immediately blocked."
                 if settings.KILL_SWITCH_ACTIVE
