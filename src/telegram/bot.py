@@ -635,7 +635,13 @@ class TelegramAssistant:
 
         elif command in ("killswitch", "emergency_stop", "halt"):
             from src.db.session import set_kill_switch
-            await set_kill_switch(not settings.KILL_SWITCH_ACTIVE)
+            try:
+                await set_kill_switch(not settings.KILL_SWITCH_ACTIVE)
+            except Exception as e:
+                logger.error(f"Error handling /killswitch: {e}", exc_info=True)
+                state = "ACTIVE" if settings.KILL_SWITCH_ACTIVE else "OFF"
+                await self._reply_chat(chat_id, f"❌ Could not change the kill switch (still {state}): {html.escape(str(e))}")
+                return
             status_text = (
                 "🚨 <b>EMERGENCY KILL SWITCH ACTIVATED!</b>\nAll order triggers & new buys are immediately blocked."
                 if settings.KILL_SWITCH_ACTIVE
@@ -841,9 +847,12 @@ class TelegramAssistant:
                 from src.db.session import AsyncSessionLocal
                 from src.db.models import Trade
                 from sqlalchemy import select, desc
+                is_live = settings.TRADING_MODE.upper() == "LIVE" and settings.LIVE_TRADING_ENABLED
+                # Older paper rows may have is_live NULL
+                mode_filter = Trade.is_live == True if is_live else Trade.is_live.isnot(True)
                 async with AsyncSessionLocal() as session:
                     res = await session.execute(
-                        select(Trade).where(Trade.is_live == (settings.TRADING_MODE.upper() == "LIVE" and settings.LIVE_TRADING_ENABLED)).order_by(desc(Trade.executed_at)).limit(8)
+                        select(Trade).where(mode_filter).order_by(desc(Trade.executed_at)).limit(8)
                     )
                     trades = res.scalars().all()
                 if not trades:
