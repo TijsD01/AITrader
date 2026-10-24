@@ -363,7 +363,8 @@ async def create_trigger(req: CreateTriggerRequest):
 
     gate = await evaluate_manual_trigger(
         ticker, data, report, target_price, alloc_eur, await get_trigger_min_score(), force=req.force,
-        stop_loss=sl, portfolio_value_eur=summary.get("total_value_eur", 0.0)
+        stop_loss=sl, portfolio_value_eur=summary.get("total_value_eur", 0.0),
+        free_cash_eur=summary.get("available_cash_eur", 0.0)
     )
     if not gate.allowed:
         raise _trigger_blocked_error(gate, report)
@@ -411,7 +412,8 @@ async def _arm_from_ai(req: CreateTriggerFromAIRequest, job: Dict[str, Any]):
 
     gate = await evaluate_manual_trigger(
         ticker, data, report, trigger_price, alloc_eur, await get_trigger_min_score(), force=req.force,
-        stop_loss=sl, portfolio_value_eur=summary.get("total_value_eur", 0.0)
+        stop_loss=sl, portfolio_value_eur=summary.get("total_value_eur", 0.0),
+        free_cash_eur=summary.get("available_cash_eur", 0.0)
     )
     if not gate.allowed:
         raise _trigger_blocked_error(gate, report)

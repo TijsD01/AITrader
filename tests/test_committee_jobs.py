@@ -101,3 +101,27 @@ async def test_forced_arm_reuses_the_report_of_the_blocked_run():
             await session.execute(delete(OrderTrigger).where(OrderTrigger.ticker == "JOBX"))
             await session.commit()
     await _run(_report(action="HOLD", score=72), calls)
+
+
+@pytest.mark.asyncio
+async def test_opportunity_scan_skips_unaffordable_candidates():
+    """Expensive scanner picks must not eat a committee run: only stocks one share of which fits get evaluated."""
+    from src.scheduler.jobs import trading_scheduler
+    await init_db()
+    cands = [{"ticker": t, "price": p, "currency": "EUR"} for t, p in
+             [("BIGX", 900.0), ("CHEAP1", 20.0), ("CHEAP2", 30.0), ("CHEAP3", 40.0), ("CHEAP4", 50.0)]]
+    portfolio = {"available_cash_eur": 400.0, "total_value_eur": 500.0, "open_positions_count": 0}
+    fetch = MagicMock(return_value=STOCK)
+    committee = AsyncMock(return_value=_report(action="HOLD", score=50))
+    status = {"eu_market": {"is_open": True}, "us_market": {"is_open": False}}
+    with patch("src.data.market_hours.get_market_statuses", return_value=status), \
+         patch("src.scheduler.jobs.settings.WHOLE_SHARES_ONLY", True), \
+         patch("src.scheduler.jobs.market_scanner.load_watchlist_tickers", AsyncMock(return_value=[])), \
+         patch("src.scheduler.jobs.market_scanner.scan_universe", MagicMock(return_value=cands)), \
+         patch("src.scheduler.jobs.market_data_provider.get_stock_data", fetch), \
+         patch("src.scheduler.jobs.investment_committee.evaluate_ticker", committee), \
+         patch("src.scheduler.jobs.shadow_portfolios.follow_report", AsyncMock()), \
+         patch.object(paper_broker, "get_portfolio_summary", AsyncMock(return_value=portfolio)):
+        await trading_scheduler.scan_market_opportunities()
+    assert committee.await_count == 3
+    assert "BIGX" not in [c.args[0] for c in fetch.call_args_list]

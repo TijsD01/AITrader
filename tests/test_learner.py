@@ -2,6 +2,7 @@ import pytest
 import datetime
 from unittest.mock import patch, MagicMock
 
+from config.settings import settings
 from src.db.session import init_db, AsyncSessionLocal
 from src.db.models import Trade, Position, TradeLesson, SystemConfig, MarketDigest, AnalysisReport
 from src.trading.learner import trade_learner
@@ -95,16 +96,22 @@ async def test_autonomous_parameter_calibration():
         await session.commit()
 
     # Calibrate parameters
+    before_size = settings.POSITION_SIZE_PCT
     cal_res = await trade_learner.calibrate_internal_parameters()
     assert cal_res["success"] is True
     assert cal_res["consecutive_losses"] >= 3
     
     # Check that parameters became more defensive:
     # min_consensus_score raised to >= 75
-    # position_size_pct scaled down to <= 0.07
+    # position size is manual and untouched by calibration
     p = cal_res["calibrated_parameters"]
     assert p["min_consensus_score"] >= 75
-    assert p["position_size_pct"] <= 0.07
+    assert p["position_size_pct"] == before_size
+    async with AsyncSessionLocal() as session:
+        row = (await session.execute(select(SystemConfig).where(SystemConfig.key == "POSITION_SIZE_PCT"))).scalars().first()
+        assert row is None or row.value == str(before_size)
+    assert settings.POSITION_SIZE_PCT == before_size
+    assert not any("sizing" in a.lower() for a in cal_res["adjustments"])
     assert p["atr_stop_multiplier"] >= 1.75
 
 @pytest.mark.asyncio

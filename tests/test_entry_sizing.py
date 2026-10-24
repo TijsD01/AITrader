@@ -157,8 +157,11 @@ async def test_manual_trigger_gate_checks_the_share_after_the_risk_cap(two_slots
     report = {"action": "BUY", "consensus_score": 90, "risk": {"approved": True}}
     stock = {"ticker": "GATECAP", "price": 205.0, "currency": "EUR", "name": "Gate Cap"}
     with patch("src.trading.trigger_gate.check_market_regime", return_value=(True, "")):
-        # €250 fits one €200 share with a 4% stop, but not with a 50% stop (budget scaled to €20)
-        ok = await evaluate_manual_trigger("GATECAP", stock, report, 200.0, 250.0, 80, stop_loss=192.0, portfolio_value_eur=500.0)
-        capped = await evaluate_manual_trigger("GATECAP", stock, report, 200.0, 250.0, 80, stop_loss=100.0, portfolio_value_eur=500.0)
+        # €250 fits one €200 share with a 4% stop. A 50% stop scales the budget to €20, but the risk cap only
+        # trims: one share is still bought as long as it fits the free cash
+        ok = await evaluate_manual_trigger("GATECAP", stock, report, 200.0, 250.0, 80, stop_loss=192.0, portfolio_value_eur=500.0, free_cash_eur=500.0)
+        capped = await evaluate_manual_trigger("GATECAP", stock, report, 200.0, 250.0, 80, stop_loss=100.0, portfolio_value_eur=500.0, free_cash_eur=500.0)
+        no_cash = await evaluate_manual_trigger("GATECAP", stock, report, 200.0, 250.0, 80, stop_loss=100.0, portfolio_value_eur=500.0, free_cash_eur=150.0)
     assert ok.allowed
-    assert not capped.allowed and capped.code == "SHARE_TOO_EXPENSIVE" and "20.00" in capped.message
+    assert capped.allowed
+    assert not no_cash.allowed and no_cash.code == "SHARE_TOO_EXPENSIVE" and "20.00" in no_cash.message

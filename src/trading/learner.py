@@ -318,7 +318,6 @@ Recent Portfolio Performance:
 Current Active Parameters:
 - MIN_CONSENSUS_SCORE: {curr_min_score} (Allowed range: 68 - 85)
 - TRIGGER_MIN_SCORE: {curr_trig_score} (Allowed range: 72 - 88)
-- POSITION_SIZE_PCT: {curr_size_pct} (Allowed range: 0.03 - 0.10)
 - ATR_STOP_MULTIPLIER: {curr_atr_mult} (Allowed range: 1.75 - 2.75)
 - TAKE_PROFIT_RR: {curr_tp_rr} (Allowed range: 1.5 - 3.0)
 - BREAKEVEN_TRIGGER_PCT: {curr_be_pct} (Allowed range: 0.015 - 0.05)
@@ -327,7 +326,7 @@ Current Active Parameters:
 Calibration Directives:
 1. If the trade suffered from gap down, slippage, or premature stop-out below technical support (e.g. BMW.DE), widen ATR_STOP_MULTIPLIER (e.g. 2.3x - 2.6x) to provide sufficient volatility buffer.
 2. If previous trades achieved unrealized gains before reversing into stop-outs (e.g. DTE.DE / MBG.DE / SU.PA), tighten BREAKEVEN_TRIGGER_PCT (e.g. 0.02 - 0.025 / 2.0% - 2.5%) so trailing stops ratchet to breakeven earlier.
-3. If under a losing streak or low win rate, increase MIN_CONSENSUS_SCORE (e.g. 80-82) and TRIGGER_MIN_SCORE (e.g. 82-85) to enforce higher selectivity, and keep POSITION_SIZE_PCT defensive (0.04).
+3. If under a losing streak or low win rate, increase MIN_CONSENSUS_SCORE (e.g. 80-82) and TRIGGER_MIN_SCORE (e.g. 82-85) to enforce higher selectivity.
 4. If technical momentum failed despite high score, increase WEIGHT_RISK (e.g. 0.25 - 0.30) and reduce WEIGHT_TECHNICAL.
 5. Provide actionable, concise bullet points in "adjustment_reasons" explaining each parameter change.
 
@@ -335,7 +334,6 @@ Return valid JSON with exactly these keys:
 {{
   "MIN_CONSENSUS_SCORE": int,
   "TRIGGER_MIN_SCORE": int,
-  "POSITION_SIZE_PCT": float,
   "ATR_STOP_MULTIPLIER": float,
   "TAKE_PROFIT_RR": float,
   "BREAKEVEN_TRIGGER_PCT": float,
@@ -351,7 +349,6 @@ Return valid JSON with exactly these keys:
                     if llm_res and isinstance(llm_res, dict) and "adjustment_reasons" in llm_res:
                         new_min_score = max(68, min(85, int(llm_res.get("MIN_CONSENSUS_SCORE", curr_min_score))))
                         new_trig_score = max(72, min(88, int(llm_res.get("TRIGGER_MIN_SCORE", curr_trig_score))))
-                        new_size_pct = round(max(0.03, min(0.10, float(llm_res.get("POSITION_SIZE_PCT", curr_size_pct)))), 3)
                         new_atr_mult = round(max(1.75, min(2.75, float(llm_res.get("ATR_STOP_MULTIPLIER", curr_atr_mult)))), 2)
                         new_tp_rr = round(max(1.5, min(3.0, float(llm_res.get("TAKE_PROFIT_RR", curr_tp_rr)))), 2)
                         new_be_pct = round(max(0.015, min(0.05, float(llm_res.get("BREAKEVEN_TRIGGER_PCT", curr_be_pct)))), 3)
@@ -370,7 +367,7 @@ Return valid JSON with exactly these keys:
                         calibrated_params = {
                             "min_consensus_score": new_min_score,
                             "trigger_min_score": new_trig_score,
-                            "position_size_pct": new_size_pct,
+                            "position_size_pct": curr_size_pct,  # position size is set manually, never calibrated
                             "atr_stop_multiplier": new_atr_mult,
                             "take_profit_rr": new_tp_rr,
                             "breakeven_trigger_pct": new_be_pct,
@@ -380,7 +377,7 @@ Return valid JSON with exactly these keys:
                             "weight_risk": w_risk,
                             "MIN_CONSENSUS_SCORE": new_min_score,
                             "TRIGGER_MIN_SCORE": new_trig_score,
-                            "POSITION_SIZE_PCT": new_size_pct,
+                            "POSITION_SIZE_PCT": curr_size_pct,  # position size is set manually, never calibrated
                             "ATR_STOP_MULTIPLIER": new_atr_mult,
                             "TAKE_PROFIT_RR": new_tp_rr,
                             "BREAKEVEN_TRIGGER_PCT": new_be_pct,
@@ -401,7 +398,6 @@ Return valid JSON with exactly these keys:
             if not agent_calibrated:
                 new_min_score = curr_min_score
                 new_trig_score = curr_trig_score
-                new_size_pct = curr_size_pct
                 new_atr_mult = curr_atr_mult
                 new_tp_rr = curr_tp_rr
                 new_be_pct = curr_be_pct
@@ -416,14 +412,6 @@ Return valid JSON with exactly these keys:
                     new_min_score = max(70, min(74, curr_min_score - 2))
                     new_trig_score = max(76, min(80, curr_trig_score - 2))
                     adjustment_reasons.append(f"High win rate ({win_rate*100:.1f}%): Normalized min consensus score to {new_min_score}.")
-
-                # B. Position Sizing Adjustment (Drawdown Protection)
-                if consecutive_losses >= 2 or win_rate < 0.45:
-                    new_size_pct = round(max(0.04, min(0.05, curr_size_pct * 0.9)), 3)
-                    adjustment_reasons.append(f"Capital preservation mode: Scaled back base sizing to {new_size_pct*100:.1f}%.")
-                elif win_rate >= 0.65 and consecutive_losses == 0:
-                    new_size_pct = round(min(settings.MAX_POSITION_SIZE_PCT, max(0.08, curr_size_pct * 1.1)), 3)
-                    adjustment_reasons.append(f"Performance favorable ({win_rate*100:.1f}%): Position sizing restored to {new_size_pct*100:.1f}%.")
 
                 # C. Stop Loss ATR Multiplier & Slippage Adjustment
                 recent_stop_outs = [t for t in losses[:5] if "stop" in (t.rationale or "").lower()]
@@ -444,7 +432,7 @@ Return valid JSON with exactly these keys:
                 calibrated_params = {
                     "min_consensus_score": new_min_score,
                     "trigger_min_score": new_trig_score,
-                    "position_size_pct": new_size_pct,
+                    "position_size_pct": curr_size_pct,  # position size is set manually, never calibrated
                     "atr_stop_multiplier": new_atr_mult,
                     "take_profit_rr": new_tp_rr,
                     "breakeven_trigger_pct": new_be_pct,
@@ -454,7 +442,7 @@ Return valid JSON with exactly these keys:
                     "weight_risk": w_risk,
                     "MIN_CONSENSUS_SCORE": new_min_score,
                     "TRIGGER_MIN_SCORE": new_trig_score,
-                    "POSITION_SIZE_PCT": new_size_pct,
+                    "POSITION_SIZE_PCT": curr_size_pct,  # position size is set manually, never calibrated
                     "ATR_STOP_MULTIPLIER": new_atr_mult,
                     "TAKE_PROFIT_RR": new_tp_rr,
                     "BREAKEVEN_TRIGGER_PCT": new_be_pct,
@@ -468,7 +456,6 @@ Return valid JSON with exactly these keys:
             updated_db_records = {
                 "MIN_CONSENSUS_SCORE": str(calibrated_params["MIN_CONSENSUS_SCORE"]),
                 "TRIGGER_MIN_SCORE": str(calibrated_params["TRIGGER_MIN_SCORE"]),
-                "POSITION_SIZE_PCT": str(calibrated_params["POSITION_SIZE_PCT"]),
                 "ATR_STOP_MULTIPLIER": str(calibrated_params["ATR_STOP_MULTIPLIER"]),
                 "TAKE_PROFIT_RR": str(calibrated_params["TAKE_PROFIT_RR"]),
                 "BREAKEVEN_TRIGGER_PCT": str(calibrated_params["BREAKEVEN_TRIGGER_PCT"]),
@@ -494,7 +481,6 @@ Return valid JSON with exactly these keys:
             # Synchronize in-memory settings
             settings.MIN_CONSENSUS_SCORE = calibrated_params["MIN_CONSENSUS_SCORE"]
             settings.TRIGGER_MIN_SCORE = calibrated_params["TRIGGER_MIN_SCORE"]
-            settings.POSITION_SIZE_PCT = calibrated_params["POSITION_SIZE_PCT"]
 
             logger.info(f"Calibration completed: {calibrated_params}")
             return {

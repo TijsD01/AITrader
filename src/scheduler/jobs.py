@@ -49,6 +49,17 @@ class TradingScheduler:
             return True
         return plan_buy(allocation_eur, price_native, currency, stop_loss_native, portfolio_value_eur, max_eur=max_eur)["shares"] >= 1
 
+    @staticmethod
+    def _is_affordable(price_native: Optional[float], currency: str, summary: Dict[str, Any]) -> bool:
+        """True when one share fits both the free unreserved cash and the max position size (whole-share mode only)."""
+        if not settings.WHOLE_SHARES_ONLY or not price_native:
+            return True
+        from src.data.currency import currency_service
+        price_eur = currency_service.to_eur(price_native, currency or "EUR")
+        limit = min(summary.get("available_cash_eur", 0.0),
+                    summary.get("total_value_eur", 0.0) * settings.MAX_POSITION_PCT / 100.0)
+        return price_eur <= limit
+
     async def _scheduled_market_session(self, market: str, session: str):
         """Safeguard for scheduled cron jobs: only run on weekdays."""
         now = datetime.datetime.now(ZoneInfo(settings.TIMEZONE))
@@ -290,6 +301,9 @@ class TradingScheduler:
                         if not regime_ok:
                             logger.info(f"Skipping trigger for {ticker}: {regime_msg}")
                             report["status_type"] = "REGIME_FILTER"
+                        elif not self._is_affordable(data.get("price"), data.get("currency"), curr_summary):
+                            logger.info(f"Skipping trigger for {ticker}: one share is above free cash or the max position size.")
+                            report["status_type"] = "SHARE_TOO_EXPENSIVE"
                         elif available_cash < 20.0:
                             logger.info(f"Skipping trigger for {ticker}: insufficient available cash (€{available_cash:.2f}).")
                             report["status_type"] = "INSUFFICIENT_CASH"
@@ -523,7 +537,14 @@ class TradingScheduler:
             for mkt in active_markets:
                 candidates = await asyncio.to_thread(market_scanner.scan_universe, market=mkt, limit=10, extra_tickers=extra)
                 actionable = [c for c in candidates if c["ticker"].upper() not in open_tickers and c["ticker"].upper() not in pending_tickers]
-                for cand in actionable[:3]:
+                summary0 = await paper_broker.get_portfolio_summary()
+                affordable = []
+                for c in actionable:
+                    if self._is_affordable(c.get("price"), c.get("currency"), summary0):
+                        affordable.append(c)
+                    else:
+                        logger.info(f"Opportunity Scanner skipped {c['ticker']}: one share is above free cash or the max position size.")
+                for cand in affordable[:3]:
                     tk = cand["ticker"].upper()
                     data = await asyncio.to_thread(market_data_provider.get_stock_data, tk)
                     if not data:

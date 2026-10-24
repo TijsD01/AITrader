@@ -158,7 +158,9 @@ async def test_paper_trigger_buy_is_capped_by_the_risk_budget(monkeypatch):
         await session.execute(delete(OrderTrigger).where(OrderTrigger.id == trigger_id))
         await session.commit()
     # A 50% stop at 0.5% risk allows 1% of the portfolio value
-    assert seen["allocation_eur"] == pytest.approx(seen["portfolio_total_eur"] * 0.01, abs=0.01)
+    # The risk cap trims the budget but never below the one share (EUR 100) that the free cash allows
+    cap = seen["portfolio_total_eur"] * 0.01
+    assert seen["allocation_eur"] in (pytest.approx(cap, abs=0.01), pytest.approx(100.0, abs=0.01))
 
 
 # --- Sentiment ---------------------------------------------------------------------------
