@@ -175,8 +175,8 @@ class TradingScheduler:
                         await self.run_market_session(market="EU", session="OPEN")
 
                 # 2. US Market Check
-                us_open = now.replace(hour=settings.US_OPEN_HOUR, minute=settings.US_OPEN_MINUTE, second=0, microsecond=0)
-                us_close = now.replace(hour=settings.US_CLOSE_HOUR, minute=settings.US_CLOSE_MINUTE, second=0, microsecond=0)
+                from src.data.market_hours import us_session_local
+                us_open, us_close = us_session_local(now)
                 if us_open <= now <= us_close:
                     res = await session.execute(
                         select(MarketDigest).where(

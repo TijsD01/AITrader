@@ -25,6 +25,14 @@ US_OPEN_LOCAL = datetime.time(9, 30)
 US_CLOSE_LOCAL = datetime.time(16, 0)
 
 
+def us_session_local(now: datetime.datetime) -> Tuple[datetime.datetime, datetime.datetime]:
+    """US session (09:30-16:00 New York) for now's date, expressed in now's timezone."""
+    ny = ZoneInfo(US_EXCHANGE_TZ)
+    open_dt = datetime.datetime.combine(now.date(), US_OPEN_LOCAL, tzinfo=ny).astimezone(now.tzinfo)
+    close_dt = datetime.datetime.combine(now.date(), US_CLOSE_LOCAL, tzinfo=ny).astimezone(now.tzinfo)
+    return open_dt, close_dt
+
+
 def _eu_session() -> Tuple[datetime.time, datetime.time]:
     return (
         datetime.time(settings.EU_OPEN_HOUR, settings.EU_OPEN_MINUTE),
@@ -101,8 +109,7 @@ def get_market_statuses(now: datetime.datetime = None) -> Dict[str, Any]:
     us_is_open = (us_now.weekday() < 5) and (US_OPEN_LOCAL <= us_now.time() <= US_CLOSE_LOCAL)
 
     # Express the US session in the configured (CET) timezone for today's DST state.
-    us_open_cet = datetime.datetime.combine(us_now.date(), US_OPEN_LOCAL, tzinfo=us_now.tzinfo).astimezone(tz)
-    us_close_cet = datetime.datetime.combine(us_now.date(), US_CLOSE_LOCAL, tzinfo=us_now.tzinfo).astimezone(tz)
+    us_open_cet, us_close_cet = us_session_local(now)
 
     return {
         "current_time_cet": now.strftime("%Y-%m-%d %H:%M:%S CET"),

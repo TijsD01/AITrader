@@ -133,10 +133,6 @@ class Settings(BaseSettings):
     EU_OPEN_MINUTE: int = 0
     EU_CLOSE_HOUR: int = 17
     EU_CLOSE_MINUTE: int = 30
-    US_OPEN_HOUR: int = 15
-    US_OPEN_MINUTE: int = 30
-    US_CLOSE_HOUR: int = 22
-    US_CLOSE_MINUTE: int = 0
 
 settings = Settings()
 

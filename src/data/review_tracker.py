@@ -9,6 +9,7 @@ from config.settings import settings
 from src.db.session import AsyncSessionLocal
 from src.db.models import MarketDigest, PortfolioSnapshot
 from src.data.market import market_data_provider
+from src.data.market_hours import us_session_local
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +41,13 @@ class ReviewTracker:
         weekday = now_dt.weekday()  # Monday=0, Friday=4, Saturday=5, Sunday=6
 
         eu_open_min = (settings.EU_OPEN_HOUR * 60) + settings.EU_OPEN_MINUTE      # 09:00 = 540
-        us_open_min = (settings.US_OPEN_HOUR * 60) + settings.US_OPEN_MINUTE      # 15:30 = 930
+        # US times follow New York, so they shift by 1h in the DST mismatch weeks (March / late October)
+        us_open_dt, us_close_dt = us_session_local(now_dt)
+        us_open_str = us_open_dt.strftime("%H:%M")
+        us_close_str = us_close_dt.strftime("%H:%M")
+        us_open_min = us_open_dt.hour * 60 + us_open_dt.minute                     # 15:30 = 930 normally
         eu_close_min = (settings.EU_CLOSE_HOUR * 60) + settings.EU_CLOSE_MINUTE    # 17:30 = 1050
-        us_close_min = (settings.US_CLOSE_HOUR * 60) + settings.US_CLOSE_MINUTE    # 22:00 = 1320
+        us_close_min = us_close_dt.hour * 60 + us_close_dt.minute                  # 22:00 = 1320 normally
 
         # On weekends (Sat/Sun) or Friday after US Close: Next session is Monday European Open!
         if weekday >= 5 or (weekday == 4 and time_minutes >= us_close_min):
@@ -71,9 +76,9 @@ class ReviewTracker:
                 "market": "US",
                 "session": "OPEN",
                 "title": "US Market Open",
-                "time_str": f"{settings.US_OPEN_HOUR:02d}:{settings.US_OPEN_MINUTE:02d} CET",
+                "time_str": f"{us_open_str} CET",
                 "flag": "🇺🇸",
-                "formatted": f"🇺🇸 US Market Open at {settings.US_OPEN_HOUR:02d}:{settings.US_OPEN_MINUTE:02d} CET"
+                "formatted": f"🇺🇸 US Market Open at {us_open_str} CET"
             }
         elif time_minutes < eu_close_min:
             return {
@@ -89,9 +94,9 @@ class ReviewTracker:
                 "market": "US",
                 "session": "CLOSE",
                 "title": "US Market Close",
-                "time_str": f"{settings.US_CLOSE_HOUR:02d}:{settings.US_CLOSE_MINUTE:02d} CET",
+                "time_str": f"{us_close_str} CET",
                 "flag": "🇺🇸",
-                "formatted": f"🇺🇸 US Market Close at {settings.US_CLOSE_HOUR:02d}:{settings.US_CLOSE_MINUTE:02d} CET"
+                "formatted": f"🇺🇸 US Market Close at {us_close_str} CET"
             }
         else:
             return {

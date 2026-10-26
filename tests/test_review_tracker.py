@@ -435,3 +435,14 @@ async def test_run_market_session_candidate_selection_anti_overlap():
             await session.commit()
 
 
+
+
+def test_next_session_us_times_follow_new_york_dst():
+    """EU is on winter time from 2026-10-25, US only from 2026-11-01: US opens 14:30 CET that week."""
+    tz = ZoneInfo(settings.TIMEZONE)
+    s = ReviewTracker.get_next_session_info(datetime.datetime(2026, 10, 26, 10, 0, tzinfo=tz))
+    assert s["market"] == "US" and "14:30 CET" in s["formatted"]
+    s = ReviewTracker.get_next_session_info(datetime.datetime(2026, 10, 26, 18, 0, tzinfo=tz))
+    assert s["market"] == "US" and "21:00 CET" in s["formatted"]
+    s = ReviewTracker.get_next_session_info(datetime.datetime(2026, 11, 2, 10, 0, tzinfo=tz))
+    assert "15:30 CET" in s["formatted"]
