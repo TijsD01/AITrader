@@ -1,10 +1,5 @@
-import logging
-import math
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from config.settings import settings
-from src.agents.base import llm_client
-
-logger = logging.getLogger(__name__)
 
 class RiskManagerAgent:
     name: str = "Chief Risk Officer (Capital Preservation)"
@@ -23,13 +18,7 @@ class RiskManagerAgent:
         support = technical_rep.get("support_level") or t["support_20d"]
         resistance = technical_rep.get("resistance_level") or t["resistance_20d"]
 
-        # 1. Fetch trade learning context and dynamic calibrated parameters
-        try:
-            from src.trading.learner import trade_learner
-            learning_context = await trade_learner.get_learning_context_for_agents()
-        except Exception:
-            learning_context = ""
-
+        # 1. Fetch dynamic calibrated parameters
         atr_mult = 1.75
         tp_rr_target = 2.1
         base_size_pct = settings.POSITION_SIZE_PCT
@@ -42,49 +31,11 @@ class RiskManagerAgent:
                 cfgs = {c.key: c.value for c in cfg_res.scalars().all()}
                 atr_mult = float(cfgs.get("ATR_STOP_MULTIPLIER", 1.75))
                 tp_rr_target = float(cfgs.get("TAKE_PROFIT_RR", 2.1))
-                be_pct = float(cfgs.get("BREAKEVEN_TRIGGER_PCT", 0.025))
         except Exception:
-            be_pct = 0.025
+            pass
 
-        system_prompt = (
-            "You are the Chief Risk Officer of an institutional hedge fund. "
-            "Your sole focus is capital preservation, strict stop-loss rules, position sizing, "
-            "and calculating high-conviction entry price triggers (limit pullback or breakout orders). "
-            "Incorporate lessons learned from past winning and losing trades into your risk assessment. "
-            f"Calculate exact stop-loss, take-profit, and AI entry trigger price levels with a minimum 1:{tp_rr_target} risk-to-reward."
-        )
-
-        user_prompt = f"""
-Ticker: {ticker}
-Current Price: {price}
-14-Day ATR: {atr}
-Key Technical Support: {support}
-Key Technical Resistance: {resistance}
-EMA 20: {t.get('ema20')}
-Fundamental Health: {fundamental_rep.get('health')}
-Beta: {stock_data['fundamentals'].get('beta', 1.0)}
-Portfolio Equity: €{portfolio_equity_eur}
-
-{learning_context}
-
-Active Risk Parameters: Target R:R 1:{tp_rr_target}, Base Sizing {base_size_pct*100:.1f}%, ATR Buffer {atr_mult}x, Trailing Breakeven at +{be_pct*100:.1f}%.
-
-Return JSON with exactly these keys:
-{{
-  "approved": boolean,
-  "entry_trigger_price": float (optimal AI entry price - either pullback support or breakout resistance),
-  "trigger_type": "LIMIT_PULLBACK" or "BREAKOUT_BUY",
-  "trigger_rationale": string,
-  "stop_loss_price": float,
-  "take_profit_price": float,
-  "risk_reward_ratio": float,
-  "recommended_size_pct": float (decimal fraction between 0.02 and 0.12, e.g. 0.08 for 8%),
-  "risk_flags": [list of strings],
-  "risk_summary": string
-}}
-"""
-        # Deterministic Risk Math & AI Trigger Calculation (always computed: it is the fallback and the
-        # default for any key the LLM omits or gets wrong)
+        # Deterministic Risk Math & AI Trigger Calculation. No LLM here: agy gave levels that varied run to run
+        # on the same data and took 50-100s (it hit the 90s timeout in ~98% of runs).
         # AI Entry Trigger Determination (computed first: stop, target, R:R and fees are all anchored on the entry)
         # If stock is within 1% of 20d resistance with bullish momentum, set a breakout trigger
         ema20 = t.get("ema20", price)
@@ -215,7 +166,7 @@ Return JSON with exactly these keys:
                 f"Est. IBKR round-trip commission: €{rt_fee_eur:.2f} ({rt_drag_pct:.1f}% drag on est. €{est_alloc_eur:.0f} size)."
             )
 
-        fallback = {
+        return {
             "approved": approved,
             "entry_trigger_price": round(entry_trigger_price, 2),
             "trigger_type": trigger_type,
@@ -228,140 +179,4 @@ Return JSON with exactly these keys:
             "fee_drag_pct": rt_drag_pct,
             "risk_flags": risk_flags,
             "risk_summary": summary
-        }
-
-        if not llm_client.has_active_key():
-            return fallback
-
-        res = await llm_client.generate_json(system_prompt, user_prompt)
-        levels = RiskManagerAgent._validate_llm_levels(res, price, base_size_pct)
-        if levels is None:
-            return fallback
-
-        # Overlay validated LLM output on the deterministic defaults so every key always exists
-        merged = dict(fallback)
-        merged.update(levels)
-        merged["risk_flags"] = list(res["risk_flags"]) if isinstance(res.get("risk_flags"), list) else []
-        if isinstance(res.get("risk_summary"), str) and res["risk_summary"].strip():
-            merged["risk_summary"] = res["risk_summary"]
-        else:
-            merged["risk_summary"] = (
-                f"Risk Officer {'approved' if merged['approved'] else 'rejected'} {merged['trigger_type']} entry at "
-                f"{merged['entry_trigger_price']} with stop {merged['stop_loss_price']} and target {merged['take_profit_price']}."
-            )
-
-        # Economic viability & fee drag check on LLM response (anchored on the LLM's entry)
-        try:
-            llm_entry = merged["entry_trigger_price"]
-            llm_size = merged["recommended_size_pct"]
-            llm_tp = merged["take_profit_price"]
-            llm_alloc_eur = calculate_position_allocation(
-                available_cash=portfolio_equity_eur if portfolio_equity_eur > 0 else 100.0,
-                current_positions_count=0,
-                recommended_size_pct=llm_size,
-                full_budget_utilization=settings.FULL_BUDGET_UTILIZATION,
-                ticker=ticker,
-                currency=curr_code
-            )
-            if llm_alloc_eur <= 0:
-                llm_alloc_eur = 100.0
-
-            llm_price_eur = currency_service.to_eur(llm_entry, curr_code)
-            llm_shares = round(llm_alloc_eur / llm_price_eur, 4) if llm_price_eur > 0 else 1.0
-
-            llm_rt = calculate_round_trip_fee(
-                ticker=ticker,
-                shares=llm_shares,
-                entry_price=llm_entry,
-                exit_price=llm_tp,
-                currency=curr_code
-            )
-            merged["estimated_fee_eur"] = llm_rt["round_trip_fee_eur"]
-            merged["fee_drag_pct"] = llm_rt["round_trip_drag_pct"]
-
-            llm_viability = evaluate_trade_economic_viability(
-                ticker=ticker,
-                allocation_eur=llm_alloc_eur,
-                price_native=llm_entry,
-                currency=curr_code,
-                stop_loss_native=merged["stop_loss_price"],
-                take_profit_native=llm_tp,
-                broker=settings.LIVE_BROKER if settings.TRADING_MODE == "LIVE" else "paper",
-                pricing_tier=getattr(settings, "IBKR_PRICING_TIER", "tiered"),
-                max_fee_drag_pct=max_drag,
-                max_profit_erosion_pct=getattr(settings, "MAX_PROFIT_EROSION_PCT", 48.0)
-            )
-            if not llm_viability["viable"]:
-                merged["approved"] = False
-                merged["risk_flags"].append(llm_viability["reason"])
-                merged["risk_summary"] = f"Risk Officer REJECTED trade: {llm_viability['reason']}"
-        except Exception as e:
-            logger.warning(f"Error checking fee viability in LLM risk path: {e}")
-
-        return merged
-
-    @staticmethod
-    def _validate_llm_levels(res: Any, price: float, base_size_pct: float) -> Optional[Dict[str, Any]]:
-        """
-        Validates and normalises the LLM risk response. Returns the cleaned core keys, or None if
-        anything is invalid (caller then uses the deterministic rule path).
-        """
-        if not isinstance(res, dict) or res.get("stop_loss_price") is None:
-            return None
-        try:
-            price = float(price)
-            stop = float(res["stop_loss_price"])
-            entry = float(res["entry_trigger_price"]) if res.get("entry_trigger_price") is not None else price
-            if res.get("take_profit_price") is not None:
-                target = float(res["take_profit_price"])
-            else:
-                target = entry * (1.0 + settings.DEFAULT_TAKE_PROFIT_PCT)
-            size = float(res["recommended_size_pct"]) if res.get("recommended_size_pct") is not None else float(base_size_pct)
-        except (TypeError, ValueError):
-            return None
-        if not all(math.isfinite(v) for v in (price, stop, entry, target, size)):
-            return None
-        if not (0 < stop < entry < target):
-            return None
-
-        trigger_type = str(res.get("trigger_type") or "LIMIT_PULLBACK").strip().upper().replace(" ", "_")
-        if trigger_type == "LIMIT_PULLBACK":
-            if entry > price:
-                return None
-        elif trigger_type == "BREAKOUT_BUY":
-            if entry < price:
-                return None
-        else:
-            return None
-
-        # Normalize recommended_size_pct: if > 1.0 (e.g. 8.5 for 8.5%), divide by 100
-        if size > 1.0:
-            size = size / 100.0
-        size = max(0.02, min(0.12, size))
-
-        raw_approved = res.get("approved", True)
-        if isinstance(raw_approved, str):
-            norm = raw_approved.strip().lower()
-            if norm in ("true", "yes", "y", "1", "approved"):
-                approved = True
-            else:
-                approved = False  # "false", "no", "rejected", or anything unrecognised: be conservative
-        elif raw_approved is None:
-            approved = True
-        else:
-            approved = bool(raw_approved)
-
-        rationale = res.get("trigger_rationale")
-        if not isinstance(rationale, str) or not rationale.strip():
-            rationale = f"{trigger_type.replace('_', ' ').title()} entry at {round(entry, 2)} near key technical levels."
-
-        return {
-            "approved": approved,
-            "entry_trigger_price": round(entry, 2),
-            "trigger_type": trigger_type,
-            "trigger_rationale": rationale,
-            "stop_loss_price": round(stop, 2),
-            "take_profit_price": round(target, 2),
-            "risk_reward_ratio": round((target - entry) / (entry - stop), 2),
-            "recommended_size_pct": round(size, 4),
         }

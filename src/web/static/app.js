@@ -740,6 +740,9 @@ function resumePendingJob() {
   else analyzeDirect(job.ticker, job);
 }
 
+// Last finished debate, so "Arm trigger" for that ticker reuses its committee report (server enforces max age)
+let lastDebateJob = null;
+
 async function analyzeDirect(ticker, resume = null) {
   switchTab('debate');
   document.getElementById('analyzeInput').value = ticker;
@@ -750,13 +753,14 @@ async function analyzeDirect(ticker, resume = null) {
   btn.disabled = true;
 
   try {
-    const { status, data } = await runJob('/api/analyze', { ticker: ticker }, { kind: 'analyze', ticker }, resume);
+    const { status, data, jobId } = await runJob('/api/analyze', { ticker: ticker }, { kind: 'analyze', ticker }, resume);
 
     if (status !== 200) {
       showToast((data && data.detail) || 'Analysis failed', true);
       return;
     }
 
+    lastDebateJob = jobId ? { ticker: data.ticker || ticker, jobId } : null;
     renderDebateReport(data);
     outputArea.classList.remove('hidden');
     showToast(`Committee completed review for ${ticker}!`);
@@ -1886,7 +1890,7 @@ let triggerArmBusy = false;
 
 // Shared by the Triggers tab input and the Trigger buttons on advice cards.
 // Resolves true when a trigger was armed.
-async function armTriggerFlow(rawTicker, { button = null, announce = false, resume = null } = {}) {
+async function armTriggerFlow(rawTicker, { button = null, announce = false, resume = null, reportJobId = null } = {}) {
   clearTriggerFeedback();
   const typed = String(rawTicker || '').trim();
   if (!typed) {
@@ -1916,7 +1920,7 @@ async function armTriggerFlow(rawTicker, { button = null, announce = false, resu
   if (announce) showToast(`Analysing ${ticker} and arming an entry trigger...`, 'info');
 
   try {
-    let out = await postArmTrigger(ticker, false, null, resume);
+    let out = await postArmTrigger(ticker, false, reportJobId, resume);
     // Soft block (HOLD verdict, low score): the user may override it explicitly
     if (!out.ok && out.status === 422 && out.error.overridable) {
       const err = out.error;
@@ -1977,7 +1981,8 @@ function confirmArmTrigger(ticker) {
 }
 
 async function armAITrigger(ticker) {
-  await armTriggerFlow(ticker, { announce: true });
+  const reportJobId = lastDebateJob && lastDebateJob.ticker === ticker ? lastDebateJob.jobId : null;
+  await armTriggerFlow(ticker, { announce: true, reportJobId });
 }
 
 async function cancelTrigger(triggerId, ticker = '') {

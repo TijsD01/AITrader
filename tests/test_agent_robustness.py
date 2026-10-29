@@ -34,8 +34,7 @@ def test_extract_json_returns_only_dicts():
 async def test_risk_rule_path_anchors_stop_and_target_on_pullback_entry():
     # Support sits just under the price, so the pullback entry lands on support and the
     # old price-anchored stop would have been ~0.1% below (or above) the entry.
-    with patch("src.agents.risk_manager.llm_client.has_active_key", return_value=False):
-        rep = await RiskManagerAgent.evaluate_risk(_stock(), {"bias": "NEUTRAL"}, {"health": "STRONG"}, 10000.0)
+    rep = await RiskManagerAgent.evaluate_risk(_stock(), {"bias": "NEUTRAL"}, {"health": "STRONG"}, 10000.0)
     entry, stop, tp = rep["entry_trigger_price"], rep["stop_loss_price"], rep["take_profit_price"]
     assert rep["trigger_type"] == "LIMIT_PULLBACK"
     assert entry <= 100.0
@@ -45,35 +44,13 @@ async def test_risk_rule_path_anchors_stop_and_target_on_pullback_entry():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("llm_res", [
-    {"stop_loss_price": "abc"},
-    {"stop_loss_price": 105.0},                                                    # stop above entry
-    {"stop_loss_price": 95.0, "entry_trigger_price": 99.0, "take_profit_price": 98.0},   # tp below entry
-    {"stop_loss_price": 95.0, "entry_trigger_price": 101.0, "trigger_type": "LIMIT_PULLBACK", "take_profit_price": 110.0},
-    {"stop_loss_price": 95.0, "entry_trigger_price": 99.0, "trigger_type": "BREAKOUT_BUY", "take_profit_price": 110.0},
-    {"stop_loss_price": 95.0, "entry_trigger_price": 99.0, "trigger_type": "MOON", "take_profit_price": 110.0},
-    ["not", "a", "dict"],
-])
-async def test_risk_llm_invalid_levels_fall_back_to_rules(llm_res):
-    with patch("src.agents.risk_manager.llm_client.has_active_key", return_value=True), \
-         patch("src.agents.risk_manager.llm_client.generate_json", new=AsyncMock(return_value=llm_res)):
+async def test_risk_never_calls_the_llm():
+    gen = AsyncMock()
+    with patch("src.agents.base.llm_client.has_active_key", return_value=True), \
+         patch("src.agents.base.llm_client.generate_json", gen):
         rep = await RiskManagerAgent.evaluate_risk(_stock(), {"bias": "NEUTRAL"}, {"health": "STRONG"}, 10000.0)
+    gen.assert_not_awaited()
     assert rep["stop_loss_price"] < rep["entry_trigger_price"] < rep["take_profit_price"]
-    assert "risk_summary" in rep and "Trade structure" in rep["risk_summary"]
-
-
-@pytest.mark.asyncio
-async def test_risk_llm_valid_response_is_normalised():
-    llm_res = {"approved": "false", "stop_loss_price": "95", "entry_trigger_price": 99.0,
-               "trigger_type": "LIMIT_PULLBACK", "take_profit_price": 110, "recommended_size_pct": 50}
-    with patch("src.agents.risk_manager.llm_client.has_active_key", return_value=True), \
-         patch("src.agents.risk_manager.llm_client.generate_json", new=AsyncMock(return_value=llm_res)):
-        rep = await RiskManagerAgent.evaluate_risk(_stock(), {"bias": "NEUTRAL"}, {"health": "STRONG"}, 10000.0)
-    assert rep["approved"] is False
-    assert rep["stop_loss_price"] == 95.0 and rep["take_profit_price"] == 110.0
-    assert rep["recommended_size_pct"] == 0.12  # 50 -> 0.5 -> clamped to 0.12
-    for key in ("risk_summary", "risk_flags", "trigger_rationale", "risk_reward_ratio"):
-        assert key in rep
 
 
 @pytest.mark.asyncio

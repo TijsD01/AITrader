@@ -57,7 +57,7 @@ class CreateTriggerFromAIRequest(BaseModel):
     ticker: str
     allocation_eur: Optional[float] = None
     force: bool = False  # arm despite a soft block (HOLD verdict, low score); hard blocks stay blocked
-    report_job_id: Optional[str] = None  # reuse the committee report of this earlier arm job instead of re-running it
+    report_job_id: Optional[str] = None  # reuse the committee report of this recent arm or analyze job instead of re-running it
 
 class SettingsUpdateRequest(BaseModel):
     auto_buy_enabled: Optional[bool] = None
@@ -179,6 +179,7 @@ async def get_recommendations(limit: int = 15):
 # shortcut: in-memory only, a server restart loses jobs (the client gets a 404), upgrade to a DB table if that bites.
 _jobs: Dict[str, Dict[str, Any]] = {}
 _JOB_TTL_SECONDS = 3600
+_REPORT_REUSE_SECONDS = 900  # older verdicts are re-run before arming
 
 async def _run_job(job: Dict[str, Any], coro) -> None:
     try:
@@ -210,9 +211,9 @@ async def get_job(job_id: str):
 # 3. On-Demand Analysis
 @router.post("/api/analyze")
 async def analyze_ticker(req: AnalyzeRequest):
-    return _start_job("analyze", req.ticker.strip().upper(), lambda job: _analyze(req))
+    return _start_job("analyze", req.ticker.strip().upper(), lambda job: _analyze(req, job))
 
-async def _analyze(req: AnalyzeRequest):
+async def _analyze(req: AnalyzeRequest, job: Dict[str, Any]):
     ticker = req.ticker.strip().upper()
     data = await asyncio.to_thread(market_data_provider.get_stock_data, ticker)
     if not data:
@@ -220,6 +221,7 @@ async def _analyze(req: AnalyzeRequest):
 
     summary = await paper_broker.get_portfolio_summary()
     report = await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
+    job["report"] = report  # lets "Arm trigger" on the debate card skip a second committee run
 
     # Persist report
     async with AsyncSessionLocal() as session:
@@ -397,7 +399,8 @@ async def _arm_from_ai(req: CreateTriggerFromAIRequest, job: Dict[str, Any]):
     ticker, data, summary, available_cash = await _precheck_trigger(req.ticker)
 
     prev = _jobs.get(req.report_job_id or "")
-    if prev and prev["kind"] == "arm" and prev["ticker"] == job["ticker"] and prev["report"]:
+    if (prev and prev["kind"] in ("arm", "analyze") and prev["ticker"] == job["ticker"] and prev["report"]
+            and prev["finished_at"] and time.time() - prev["finished_at"] < _REPORT_REUSE_SECONDS):
         report = prev["report"]
     else:
         report = await investment_committee.evaluate_ticker(data, summary["total_value_eur"])

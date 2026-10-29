@@ -109,6 +109,31 @@ async def test_forced_arm_reuses_the_report_of_the_blocked_run():
 
 
 @pytest.mark.asyncio
+async def test_arm_reuses_a_recent_debate_report_but_not_a_stale_one():
+    from src.web import routes
+
+    async def calls(client, committee):
+        analyze_id = (await client.post("/api/analyze", json={"ticker": "JOBX"})).json()["job_id"]
+        await _wait(client, analyze_id)
+        body = {"ticker": "JOBX", "allocation_eur": 500.0, "report_job_id": analyze_id}
+        # HOLD verdict: the arm is soft-blocked (422), so no trigger is created
+        arm = await client.post("/api/triggers/from-ai", json=body)
+        assert (await _wait(client, arm.json()["job_id"]))["status_code"] == 422
+        assert committee.await_count == 1
+        routes._jobs[analyze_id]["finished_at"] -= routes._REPORT_REUSE_SECONDS + 1
+        arm = await client.post("/api/triggers/from-ai", json=body)
+        assert (await _wait(client, arm.json()["job_id"]))["status_code"] == 422
+        assert committee.await_count == 2
+
+    session = MagicMock()
+    db = session.return_value.__aenter__.return_value
+    db.add, db.commit = MagicMock(), AsyncMock()
+    with patch("src.web.routes.AsyncSessionLocal", session), \
+         patch("src.trading.shadow.shadow_portfolios.follow_report", AsyncMock()):
+        await _run(_report(action="HOLD", score=72), calls)
+
+
+@pytest.mark.asyncio
 async def test_opportunity_scan_sends_expensive_candidates_to_committee():
     """Affordability is checked after the verdict, so an expensive pick still reaches the committee and the shadow."""
     from src.scheduler.jobs import trading_scheduler

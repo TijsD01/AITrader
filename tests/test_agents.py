@@ -9,7 +9,6 @@ from src.agents.committee import investment_committee
 @pytest.mark.asyncio
 async def test_specialist_agents_and_committee():
     with patch("src.agents.base.llm_client.has_active_key", return_value=False), \
-         patch("src.agents.risk_manager.llm_client.has_active_key", return_value=False), \
          patch("src.agents.committee.llm_client.has_active_key", return_value=False):
         # Mock stock profile
         mock_stock = {

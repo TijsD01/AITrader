@@ -310,11 +310,10 @@ async def test_risk_manager_veto_on_unviable_fees():
     mock_tech = {"bias": "BULLISH", "confidence": 85, "analysis_summary": "Strong momentum"}
     mock_fund = {"valuation": "UNDERVALUED", "health": "STRONG", "analysis_summary": "Good fundamentals"}
 
-    with patch("src.agents.risk_manager.llm_client.has_active_key", return_value=False):
-        # Portfolio equity of only €30 -> cannot support minimum viable order size
-        risk_rep = await RiskManagerAgent.evaluate_risk(mock_stock, mock_tech, mock_fund, portfolio_equity_eur=30.0)
-        assert risk_rep["approved"] is False
-        assert "REJECTED" in risk_rep["risk_summary"]
+    # Portfolio equity of only €30 -> cannot support minimum viable order size
+    risk_rep = await RiskManagerAgent.evaluate_risk(mock_stock, mock_tech, mock_fund, portfolio_equity_eur=30.0)
+    assert risk_rep["approved"] is False
+    assert "REJECTED" in risk_rep["risk_summary"]
 
 @pytest.mark.asyncio
 async def test_investment_committee_downgrades_to_hold_on_risk_veto():
@@ -340,7 +339,6 @@ async def test_investment_committee_downgrades_to_hold_on_risk_veto():
     }
 
     with patch("src.agents.base.llm_client.has_active_key", return_value=False), \
-         patch("src.agents.risk_manager.llm_client.has_active_key", return_value=False), \
          patch("src.agents.committee.llm_client.has_active_key", return_value=False):
         
         # When equity is €30, fee drag will trigger risk veto

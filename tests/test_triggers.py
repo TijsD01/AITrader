@@ -43,7 +43,6 @@ async def test_ai_trigger_price_calculation():
     }
 
     with patch("src.agents.base.llm_client.has_active_key", return_value=False), \
-         patch("src.agents.risk_manager.llm_client.has_active_key", return_value=False), \
          patch("src.agents.committee.llm_client.has_active_key", return_value=False):
         report = await investment_committee.evaluate_ticker(mock_stock_data, portfolio_equity_eur=10000.0)
         assert "entry_trigger_price" in report
