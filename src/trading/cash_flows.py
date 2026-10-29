@@ -8,7 +8,8 @@ table, so the gain shown is value minus everything that was put in.
 A snapshot pair counts as a deposit (or withdrawal) when cash and total account value both jump the
 same way: a deposit raises cash and total alike, while a fill only swaps cash for shares (total about
 flat) and a market move changes shares, not cash. That holds for fills the bot never recorded too,
-such as an IBKR stop that closed a position between syncs.
+such as an IBKR stop that closed a position between syncs. Cash the bot's own booked trades moved
+between the two snapshots is taken out first, so a deposit next to a buy is still found at its full size.
 """
 import asyncio
 import datetime
@@ -19,7 +20,7 @@ from sqlalchemy import select, func
 
 from config.settings import settings
 from src.db import session as db_session
-from src.db.models import CashFlow, PortfolioSnapshot, SystemConfig
+from src.db.models import CashFlow, PortfolioSnapshot, SystemConfig, Trade
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +31,15 @@ TOTAL_CONFIRM_RATIO = 0.5
 _scan_lock = asyncio.Lock()
 
 
-def detect_flow(prev: PortfolioSnapshot, curr: PortfolioSnapshot, min_eur: Optional[float] = None) -> Optional[float]:
-    """Returns the deposit (positive) or withdrawal (negative) between two snapshots, or None."""
+def detect_flow(
+    prev: PortfolioSnapshot, curr: PortfolioSnapshot, min_eur: Optional[float] = None, traded_cash_eur: float = 0.0
+) -> Optional[float]:
+    """
+    Returns the deposit (positive) or withdrawal (negative) between two snapshots, or None.
+    traded_cash_eur: net cash the bot's booked trades took out between the snapshots (buys minus sells).
+    """
     min_eur = settings.CASH_FLOW_MIN_EUR if min_eur is None else min_eur
-    d_cash = (curr.cash_eur or 0.0) - (prev.cash_eur or 0.0)
+    d_cash = (curr.cash_eur or 0.0) - (prev.cash_eur or 0.0) + traded_cash_eur
     d_total = (curr.total_value_eur or 0.0) - (prev.total_value_eur or 0.0)
     if abs(d_cash) < max(min_eur, 0.01):
         return None
@@ -73,10 +79,18 @@ async def scan_live_cash_flows() -> int:
             if not new_snaps:
                 return 0
 
+            trade_res = await session.execute(
+                select(Trade).where(Trade.is_live == True, Trade.executed_at > (prev or new_snaps[0]).timestamp)
+            )
+            trades = trade_res.scalars().all()
             found = 0
             for snap in new_snaps:
                 if prev is not None:
-                    amount = detect_flow(prev, snap)
+                    traded = sum(
+                        (t.total_eur or 0.0) + (t.fee_eur or 0.0) if t.order_type == "BUY" else -((t.total_eur or 0.0) - (t.fee_eur or 0.0))
+                        for t in trades if prev.timestamp < t.executed_at <= snap.timestamp
+                    )
+                    amount = detect_flow(prev, snap, traded_cash_eur=traded)
                     if amount is not None:
                         session.add(CashFlow(
                             timestamp=snap.timestamp,

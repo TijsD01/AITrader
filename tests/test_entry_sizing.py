@@ -87,6 +87,8 @@ def test_slot_risk_cap_skipped_when_the_buy_takes_all_free_cash(two_slots):
     assert risk_capped_allocation(240.0, 100.0, 93.0, 600.0) < 240.0
     assert risk_capped_allocation(240.0, 100.0, 93.0, 600.0, free_cash_eur=240.0) == 240.0
     assert risk_capped_allocation(240.0, 100.0, 93.0, 600.0, free_cash_eur=480.0) < 240.0  # cash left for another slot
+    # From LAST_SLOT_FULL_CASH_MAX_EUR (2000) on, the last slot is risk-capped like the others
+    assert risk_capped_allocation(5000.0, 100.0, 93.0, 10000.0, free_cash_eur=5000.0) < 5000.0
     plan = plan_buy(240.0, 206.0, "EUR", 191.6, 600.0, max_eur=240.0)
     assert (plan["budget_eur"], plan["risk_capped"], plan["shares"]) == (240.0, False, 1.0)
 
@@ -174,3 +176,18 @@ async def test_manual_trigger_gate_checks_the_share_after_the_risk_cap(two_slots
     assert ok.allowed
     assert capped.allowed
     assert not no_cash.allowed and no_cash.code == "SHARE_TOO_EXPENSIVE" and "20.00" in no_cash.message
+
+
+def test_eur_capital_cap_counts_invested_money():
+    from src.trading.risk import get_effective_deployable_cash
+    # Cap €2,000 with €1,500 already in positions: only €500 more may go in, however much cash there is
+    assert get_effective_deployable_cash(3000.0, 100.0, 2000.0, invested_eur=1500.0)[0] == 500.0
+    assert get_effective_deployable_cash(3000.0, 100.0, 2000.0, invested_eur=2500.0)[0] == 0.0
+    assert get_effective_deployable_cash(3000.0, 100.0, None, invested_eur=2500.0)[0] == 3000.0
+
+
+def test_main_return_after_deposit_is_not_inflated():
+    from src.trading.shadow import _main_return_pct
+    # €500 start, €500 deposit, €50 gain = 5%, not 10%
+    assert _main_return_pct(1050.0, 500.0, 500.0) == 5.0
+    assert _main_return_pct(525.0, 500.0, 0.0) == 5.0

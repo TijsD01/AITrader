@@ -48,6 +48,12 @@ MAIN_KEY = "MAIN"
 SNAPSHOT_INTERVAL = datetime.timedelta(minutes=55)
 
 
+def _main_return_pct(value: float, start: float, flows: float) -> float:
+    """Main bot gain over everything put in: a deposit adds to the base, so it neither counts as gain nor inflates the %."""
+    base = start + flows
+    return round((value - flows - start) / base * 100, 2) if base > 0 else 0.0
+
+
 def _utcnow() -> datetime.datetime:
     return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
@@ -213,8 +219,17 @@ class ShadowPortfolios:
 
     # ------------------------------------------------------------------ setup
 
-    def _initial_capital(self) -> float:
-        return settings.SHADOW_INITIAL_CAPITAL or settings.INITIAL_PAPER_CAPITAL
+    async def _initial_capital(self) -> float:
+        """SHADOW_INITIAL_CAPITAL when set, else the main account's current value, so both start equal."""
+        if settings.SHADOW_INITIAL_CAPITAL:
+            return settings.SHADOW_INITIAL_CAPITAL
+        try:
+            from src.trading.broker import get_active_broker
+            main_value = (await get_active_broker().get_portfolio_summary()).get("total_value_eur")
+        except Exception as e:
+            logger.warning(f"Shadow start capital: main account value unavailable ({e}), using INITIAL_PAPER_CAPITAL.")
+            main_value = None
+        return main_value or settings.INITIAL_PAPER_CAPITAL
 
     async def _main_params(self, session) -> Dict[str, Any]:
         """The main bot's current values for the parameters a shadow builds on (as the learner left them)."""
@@ -265,7 +280,7 @@ class ShadowPortfolios:
         for s in strategies:
             if s.key not in accounts:
                 main_params = main_params or await self._main_params(session)
-                cap = self._initial_capital()
+                cap = await self._initial_capital()
                 acc = ShadowAccount(strategy=s.key, cash_eur=cap, initial_capital_eur=cap,
                                     frozen_params=dict(main_params), started_at=_utcnow())
                 session.add(acc)
@@ -719,8 +734,7 @@ class ShadowPortfolios:
                 main_start = acc.main_value_at_start_eur
                 # Deposits into the main account after the shadow started are not main-bot gain
                 main_flows_since = sum(a for t, a in main_flows if since is None or t > since)
-                main_return = (round(((main_value - main_flows_since) / main_start - 1.0) * 100, 2)
-                               if main_value and main_start else None)
+                main_return = _main_return_pct(main_value, main_start, main_flows_since) if main_value and main_start else None
 
                 hist_res = await session.execute(select(ShadowSnapshot).where(
                     ShadowSnapshot.strategy.in_([s.key, MAIN_KEY]), ShadowSnapshot.timestamp >= since
@@ -731,7 +745,7 @@ class ShadowPortfolios:
                         if main_start:
                             flows = sum(a for t, a in main_flows if (since is None or t > since) and t <= snap.timestamp)
                             history["main"].append([snap.timestamp.strftime("%Y-%m-%d %H:%M"),
-                                                    round(((snap.total_value_eur - flows) / main_start - 1.0) * 100, 2)])
+                                                    _main_return_pct(snap.total_value_eur, main_start, flows)])
                     else:
                         history["shadow"].append([snap.timestamp.strftime("%Y-%m-%d %H:%M"), snap.return_pct])
 

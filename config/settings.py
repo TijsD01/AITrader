@@ -90,7 +90,8 @@ class Settings(BaseSettings):
     FULL_BUDGET_UTILIZATION: bool = True    # Fully deploy available capital across active slots
     LIVE_BROKER: str = "ibkr"               # "ibkr" (Interactive Brokers) or "alpaca"
     KILL_SWITCH_ACTIVE: bool = False        # Emergency trading halt
-    MAX_DAILY_LOSS_EUR: float = 500.0       # Daily drawdown stop (halts buys if exceeded)
+    MAX_DAILY_LOSS_EUR: float = 500.0       # Daily drawdown stop: past it the kill switch turns on (buys halt, stops keep working)
+    MAX_DAILY_LOSS_PCT: float = 3.0         # Same stop as % of account value; the lower of the two limits applies (0 = EUR only)
     MAX_SINGLE_ORDER_EUR: float = 10000.0   # Hard cap on any single order
 
     # Research-backed strategy controls (see analyse/onderzoekspapers.md in the project files)
@@ -98,11 +99,13 @@ class Settings(BaseSettings):
     REGIME_SMA_DAYS: int = 200              # Moving-average length for the regime filter
     REGIME_INDEX_EU: str = "^STOXX50E"      # Index that sets the regime for European tickers
     REGIME_INDEX_US: str = "^GSPC"          # Index that sets the regime for US tickers
-    RISK_PER_TRADE_PCT: float = 0.5         # Automated buys lose at most this % of portfolio value at the stop (0 = off)
+    RISK_PER_TRADE_PCT: float = 0.5         # "portfolio" mode: automated buys lose at most this % of portfolio value at the stop (0 = cap off in every mode)
     # What the risk cap measures against: "slot" = a trade with the default stop (DEFAULT_STOP_LOSS_PCT) keeps its full
-    # slot and a wider stop gets proportionally less (equals 0.5% of the portfolio at 8 slots); "portfolio" = at most
-    # RISK_PER_TRADE_PCT of the portfolio at the stop, also with fewer slots; "off" = no cap
+    # slot and a wider stop gets proportionally less, so the loss at the stop is slot x DEFAULT_STOP_LOSS_PCT
+    # (4% / MAX_POSITIONS of the portfolio: 0.5% at 8 slots, 1% at 4, 2% at 2; RISK_PER_TRADE_PCT is then only on/off);
+    # "portfolio" = at most RISK_PER_TRADE_PCT of the portfolio at the stop, also with fewer slots; "off" = no cap
     RISK_BUDGET_BASE: str = "slot"
+    LAST_SLOT_FULL_CASH_MAX_EUR: float = 2000.0  # Below this account value the last free slot skips the "slot" risk cap and gets all free cash
     TRAILING_STOP_ATR_MULT: float = 2.5     # Past the breakeven step, trail the stop at highest price minus N x ATR (0 = off)
     SENTIMENT_ANONYMIZE: bool = True        # Hide company name and ticker from the news-sentiment prompt
     SENTIMENT_VETO_SCORE: float = -0.4      # News sentiment at or below this blocks a buy; positive news adds nothing

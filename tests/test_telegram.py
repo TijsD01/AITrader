@@ -87,7 +87,8 @@ async def test_telegram_handle_slash_command():
     assert "/portfolio" in replies[2][1]
 
 @pytest.mark.asyncio
-async def test_telegram_calibrate_with_trades():
+async def test_telegram_calibrate_with_trades(monkeypatch):
+    monkeypatch.setattr(settings, "POSITION_SIZE_PCT", 0.06)  # /calibrate shows the manual setting
     bot = TelegramAssistant()
     bot.token = "123456789:ABCDEF_mock_token_for_test"
     bot.base_url = f"https://api.telegram.org/bot{bot.token}"
@@ -590,7 +591,8 @@ async def test_telegram_status_aliases():
         assert "European Markets" in replies[0][1]
 
 @pytest.mark.asyncio
-async def test_telegram_calibrate_string_types():
+async def test_telegram_calibrate_string_types(monkeypatch):
+    monkeypatch.setattr(settings, "POSITION_SIZE_PCT", 0.08)  # /calibrate shows the manual setting
     bot = TelegramAssistant()
     bot.token = "mock_token"
     bot.base_url = "https://api.telegram.org/botmock_token"

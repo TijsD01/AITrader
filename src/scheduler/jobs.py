@@ -11,7 +11,7 @@ from config.settings import settings
 from src.screener.scanner import market_scanner
 from src.data.market import market_data_provider
 from src.agents.committee import investment_committee
-from src.trading.broker import active_broker as paper_broker, get_active_broker, active_broker
+from src.trading.broker import active_broker as paper_broker, get_active_broker, active_broker, live_broker
 from src.trading.risk import derive_trigger_levels, entry_allocation_from_summary, plan_buy
 from src.trading.shadow import shadow_portfolios
 from src.telegram.bot import telegram_bot
@@ -23,6 +23,16 @@ from src.trading.risk import check_market_regime
 from src.trading.trigger_gate import evaluate_trigger_verdict
 
 logger = logging.getLogger(__name__)
+
+
+async def _tickers_in_use(db_session) -> tuple:
+    """Open-position and pending-trigger tickers of the active mode only, so stale paper rows never block live buys."""
+    live = get_active_broker() is live_broker
+    pos = await db_session.execute(select(Position.ticker).where(Position.status == "OPEN", Position.is_live == live))
+    trig = await db_session.execute(
+        select(OrderTrigger.ticker).where(OrderTrigger.status == "PENDING", OrderTrigger.is_live == live)
+    )
+    return {t.upper() for t in pos.scalars().all()}, {t.upper() for t in trig.scalars().all()}
 
 class TradingScheduler:
     def __init__(self):
@@ -222,15 +232,7 @@ class TradingScheduler:
             # Fetch existing open positions and pending triggers to enforce anti-overlap
             trigger_min_score = settings.TRIGGER_MIN_SCORE
             async with AsyncSessionLocal() as db_session:
-                pos_check = await db_session.execute(
-                    select(Position.ticker).where(Position.status == "OPEN")
-                )
-                open_tickers = set(t.upper() for t in pos_check.scalars().all())
-
-                trig_check = await db_session.execute(
-                    select(OrderTrigger.ticker).where(OrderTrigger.status == "PENDING")
-                )
-                pending_tickers = set(t.upper() for t in trig_check.scalars().all())
+                open_tickers, pending_tickers = await _tickers_in_use(db_session)
 
                 cfg_trig = await db_session.execute(
                     select(SystemConfig).where(SystemConfig.key == "TRIGGER_MIN_SCORE")
@@ -404,8 +406,8 @@ class TradingScheduler:
         async with self._monitor_lock:
             if settings.TRADING_MODE == "LIVE":
                 try:
-                    # Adopt fills the bot never booked so they get stops; never closes positions
-                    await paper_broker.sync_account_state(adopt_only=True)
+                    # Adopts fills the bot never booked and books exits the broker already made (stop/target legs)
+                    await paper_broker.sync_account_state()
                 except Exception as e:
                     logger.error(f"Periodic broker adoption failed: {e}")
             closed = await self._check_stops_and_targets()
@@ -527,24 +529,14 @@ class TradingScheduler:
                     except ValueError:
                         pass
 
-                pos_check = await db_session.execute(select(Position.ticker).where(Position.status == "OPEN"))
-                open_tickers = set(t.upper() for t in pos_check.scalars().all())
-
-                trig_check = await db_session.execute(select(OrderTrigger.ticker).where(OrderTrigger.status == "PENDING"))
-                pending_tickers = set(t.upper() for t in trig_check.scalars().all())
+                open_tickers, pending_tickers = await _tickers_in_use(db_session)
 
             extra = await market_scanner.load_watchlist_tickers()
             for mkt in active_markets:
                 candidates = await asyncio.to_thread(market_scanner.scan_universe, market=mkt, limit=10, extra_tickers=extra)
                 actionable = [c for c in candidates if c["ticker"].upper() not in open_tickers and c["ticker"].upper() not in pending_tickers]
-                summary0 = await paper_broker.get_portfolio_summary()
-                affordable = []
-                for c in actionable:
-                    if self._is_affordable(c.get("price"), c.get("currency"), summary0):
-                        affordable.append(c)
-                    else:
-                        logger.info(f"Opportunity Scanner skipped {c['ticker']}: one share is above free cash or the max position size.")
-                for cand in affordable[:3]:
+                # No pre-committee affordability filter: _fits_whole_share checks it after the verdict, and the shadow still sees it.
+                for cand in actionable[:3]:
                     tk = cand["ticker"].upper()
                     data = await asyncio.to_thread(market_data_provider.get_stock_data, tk)
                     if not data:

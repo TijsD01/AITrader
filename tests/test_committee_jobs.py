@@ -64,8 +64,13 @@ async def test_analyze_runs_as_a_job():
     session = MagicMock()
     db = session.return_value.__aenter__.return_value
     db.add, db.commit = MagicMock(), AsyncMock()
-    with patch("src.web.routes.AsyncSessionLocal", session):
+    follow = AsyncMock()
+    with patch("src.web.routes.AsyncSessionLocal", session), \
+         patch("src.trading.shadow.shadow_portfolios.follow_report", follow):
         await _run(_report(), calls)
+    # A pure analysis feeds the shadow portfolios but never counts as a main-bot action
+    follow.assert_awaited_once()
+    assert follow.await_args.kwargs["followed_main"] is False
 
 
 @pytest.mark.asyncio
@@ -104,8 +109,8 @@ async def test_forced_arm_reuses_the_report_of_the_blocked_run():
 
 
 @pytest.mark.asyncio
-async def test_opportunity_scan_skips_unaffordable_candidates():
-    """Expensive scanner picks must not eat a committee run: only stocks one share of which fits get evaluated."""
+async def test_opportunity_scan_sends_expensive_candidates_to_committee():
+    """Affordability is checked after the verdict, so an expensive pick still reaches the committee and the shadow."""
     from src.scheduler.jobs import trading_scheduler
     await init_db()
     cands = [{"ticker": t, "price": p, "currency": "EUR"} for t, p in
@@ -113,6 +118,7 @@ async def test_opportunity_scan_skips_unaffordable_candidates():
     portfolio = {"available_cash_eur": 400.0, "total_value_eur": 500.0, "open_positions_count": 0}
     fetch = MagicMock(return_value=STOCK)
     committee = AsyncMock(return_value=_report(action="HOLD", score=50))
+    follow = AsyncMock()
     status = {"eu_market": {"is_open": True}, "us_market": {"is_open": False}}
     with patch("src.data.market_hours.get_market_statuses", return_value=status), \
          patch("src.scheduler.jobs.settings.WHOLE_SHARES_ONLY", True), \
@@ -120,8 +126,38 @@ async def test_opportunity_scan_skips_unaffordable_candidates():
          patch("src.scheduler.jobs.market_scanner.scan_universe", MagicMock(return_value=cands)), \
          patch("src.scheduler.jobs.market_data_provider.get_stock_data", fetch), \
          patch("src.scheduler.jobs.investment_committee.evaluate_ticker", committee), \
-         patch("src.scheduler.jobs.shadow_portfolios.follow_report", AsyncMock()), \
+         patch("src.scheduler.jobs.shadow_portfolios.follow_report", follow), \
          patch.object(paper_broker, "get_portfolio_summary", AsyncMock(return_value=portfolio)):
         await trading_scheduler.scan_market_opportunities()
     assert committee.await_count == 3
-    assert "BIGX" not in [c.args[0] for c in fetch.call_args_list]
+    assert [c.args[0] for c in fetch.call_args_list] == ["BIGX", "CHEAP1", "CHEAP2"]
+    assert follow.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_tickers_in_use_only_counts_the_active_mode():
+    """A stale paper position/trigger must not block live buys, and a live one must not block paper buys."""
+    from src.db.models import Position
+    from src.scheduler.jobs import _tickers_in_use
+    from src.trading.broker import live_broker
+    await init_db()
+    async with AsyncSessionLocal() as session:
+        for live, tk in ((False, "MODEP"), (True, "MODEL")):
+            session.add(Position(ticker=tk, shares=1, entry_price_native=1, current_price_native=1,
+                                 highest_price_native=1, entry_price_eur=1, current_price_eur=1,
+                                 cost_basis_eur=1, status="OPEN", is_live=live))
+            session.add(OrderTrigger(ticker=tk, target_price=1, current_price_at_creation=1,
+                                     allocation_eur=1, status="PENDING", is_live=live))
+        await session.commit()
+    try:
+        for active, mine, other in ((live_broker, "MODEL", "MODEP"), (paper_broker, "MODEP", "MODEL")):
+            with patch("src.scheduler.jobs.get_active_broker", return_value=active):
+                async with AsyncSessionLocal() as session:
+                    open_t, pending_t = await _tickers_in_use(session)
+            assert mine in open_t and mine in pending_t
+            assert other not in open_t and other not in pending_t
+    finally:
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(Position).where(Position.ticker.in_(["MODEP", "MODEL"])))
+            await session.execute(delete(OrderTrigger).where(OrderTrigger.ticker.in_(["MODEP", "MODEL"])))
+            await session.commit()

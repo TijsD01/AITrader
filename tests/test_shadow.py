@@ -376,10 +376,27 @@ async def test_deposit_into_the_live_account_does_not_lift_the_main_return(shado
                              timestamp=acc.started_at + datetime.timedelta(minutes=5)))
         await session.commit()
     try:
-        # €2,000 deposited and €100 earned: the main bot is up 1%, not 21%
+        # €2,000 deposited and €100 earned on €12,000 put in: the main bot is up 0.83%, not 21%
         comparison = await shadow_portfolios.get_comparison({"total_value_eur": 12100.0, "trading_mode": "LIVE"}, True)
-        assert comparison["strategies"][0]["main_same_period"]["return_pct"] == 1.0
+        assert comparison["strategies"][0]["main_same_period"]["return_pct"] == 0.83
     finally:
         async with AsyncSessionLocal() as session:
             await session.execute(delete(CashFlow))
             await session.commit()
+
+
+async def test_shadow_starts_with_the_main_account_value(shadows, monkeypatch):
+    enable, reset_all = shadows
+    enable(["baseline"])
+    await reset_all()
+    monkeypatch.setattr(settings, "SHADOW_INITIAL_CAPITAL", None)
+
+    class _Main:
+        async def get_portfolio_summary(self):
+            return {"total_value_eur": 500.26}
+
+    monkeypatch.setattr("src.trading.broker.get_active_broker", lambda: _Main())
+    async with AsyncSessionLocal() as session:
+        accounts = await shadow_portfolios._ensure_accounts(session, get_strategies())
+    assert accounts["baseline"].cash_eur == accounts["baseline"].initial_capital_eur == 500.26
+    await shadow_portfolios.reset("baseline")

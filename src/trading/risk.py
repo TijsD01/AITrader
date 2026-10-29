@@ -8,10 +8,12 @@ logger = logging.getLogger(__name__)
 def get_effective_deployable_cash(
     cash_eur: float,
     max_capital_usage_pct: Optional[float] = None,
-    max_deployable_capital_eur: Optional[float] = None
+    max_deployable_capital_eur: Optional[float] = None,
+    invested_eur: float = 0.0
 ) -> Tuple[float, float]:
     """
     Calculates the portion of total account cash allowed to be traded versus kept in reserve.
+    The EUR cap limits the total in the market: cash already invested (cost basis of open positions) counts against it.
     Returns (usable_cash, protected_reserve).
     """
     if cash_eur <= 0.0:
@@ -23,7 +25,7 @@ def get_effective_deployable_cash(
     usable = cash_eur * usage_pct
     cap = max_deployable_capital_eur if max_deployable_capital_eur is not None else settings.MAX_DEPLOYABLE_CAPITAL_EUR
     if cap is not None and cap > 0:
-        usable = min(usable, cap)
+        usable = min(usable, max(0.0, cap - invested_eur))
     usable = round(max(0.0, min(cash_eur, usable)), 2)
     reserve = round(max(0.0, cash_eur - usable), 2)
     return usable, reserve
@@ -393,15 +395,17 @@ def risk_capped_allocation(
     "slot" keeps the full slot for a stop up to DEFAULT_STOP_LOSS_PCT away and scales a wider stop down,
     so every trade risks the same share of its slot; "portfolio" applies RISK_PER_TRADE_PCT of the
     portfolio (apply_risk_budget); "off" (or RISK_PER_TRADE_PCT = 0) leaves the allocation as is.
-    In "slot" mode a buy that already takes all free cash (free_cash_eur, e.g. the last free slot) keeps it:
-    the cash the cap would cut off has no other slot to go to.
+    In "slot" mode a buy that already takes all free cash (free_cash_eur, e.g. the last free slot) keeps it while
+    the portfolio is below LAST_SLOT_FULL_CASH_MAX_EUR: in a small account the cut-off cash has no other slot to go to,
+    in a large one a single uncapped position would risk too much.
     """
     base = (settings.RISK_BUDGET_BASE or "slot").strip().lower()
     if base == "off" or not settings.RISK_PER_TRADE_PCT or settings.RISK_PER_TRADE_PCT <= 0:
         return allocation_eur
     if base == "portfolio":
         return apply_risk_budget(allocation_eur, price_native, stop_loss_native, portfolio_value_eur)
-    if free_cash_eur is not None and free_cash_eur > 0 and abs(allocation_eur - free_cash_eur) <= 0.01:
+    if free_cash_eur is not None and free_cash_eur > 0 and abs(allocation_eur - free_cash_eur) <= 0.01 \
+            and portfolio_value_eur < settings.LAST_SLOT_FULL_CASH_MAX_EUR:
         return allocation_eur
     if not price_native or price_native <= 0 or not stop_loss_native:
         return allocation_eur

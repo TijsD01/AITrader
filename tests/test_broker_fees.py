@@ -215,7 +215,7 @@ async def test_live_execution_fee_accounting():
 
         mock_quote = {"price": 100.0, "currency": "USD", "name": "NVIDIA Corp"}
         with patch("src.trading.live.market_data_provider.get_stock_data", return_value=mock_quote), \
-             patch.object(live_broker, "_dispatch_real_order", return_value="ibkr_2001"), \
+             patch.object(live_broker, "_dispatch_real_order", side_effect=lambda **kw: ("ibkr_2001", kw["shares"], kw["price"])), \
              patch.object(live_broker, "_dispatch_real_close", return_value="ibkr_exit_2002"):
             # Execute BUY of €100
             buy_res = await live_broker.execute_buy(
@@ -279,6 +279,20 @@ def test_uk_stamp_duty_sdr():
     )
     assert "SDRT" not in fee_sell["breakdown"]
     assert fee_sell["fee_native"] < fee_buy["fee_native"]
+
+
+def test_french_ftt_on_paris_buy():
+    """Verify Paris (.PA) equities incur 0.4% FTT on BUY only, and the round trip includes it."""
+    buy = calculate_broker_fee("MC.PA", 10.0, 100.0, "EUR", "ibkr", "tiered", "BUY")
+    sell = calculate_broker_fee("MC.PA", 10.0, 100.0, "EUR", "ibkr", "tiered", "SELL")
+    # €1000 order: €1.25 min comm + €0.65 exch/clr + €4.00 FTT
+    assert buy["fee_native"] == 5.90 and "FTT" in buy["breakdown"]
+    assert sell["fee_native"] == 1.90 and "FTT" not in sell["breakdown"]
+    assert calculate_broker_fee("MC.PA", 10.0, 100.0, "EUR", "ibkr", "fixed", "BUY")["fee_native"] == 7.00
+    # Amsterdam is not taxed
+    assert calculate_broker_fee("ASML.AS", 10.0, 100.0, "EUR", "ibkr", "tiered", "BUY")["fee_native"] == 1.90
+    rt = calculate_round_trip_fee("MC.PA", 10.0, 100.0, currency="EUR", broker="ibkr", pricing_tier="tiered")
+    assert rt["round_trip_fee_eur"] == 7.80
 
 @pytest.mark.asyncio
 async def test_risk_manager_veto_on_unviable_fees():

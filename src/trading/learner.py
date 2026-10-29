@@ -213,11 +213,13 @@ class TradeLearner:
         closed since the last calibration: a few outcomes are mostly noise, and tuning on them overfits.
         Manual calibration (dashboard, Telegram) always runs.
         """
+        # Calibrate on the active mode's trades only: paper fills would tune the live bot on simulated prices
+        live = settings.TRADING_MODE.upper() == "LIVE" and settings.LIVE_TRADING_ENABLED
         async with AsyncSessionLocal() as session:
             if automatic and settings.LEARNER_MIN_TRADES > 1:
                 last_res = await session.execute(select(SystemConfig).where(SystemConfig.key == "LAST_CALIBRATION_TIMESTAMP"))
                 last_row = last_res.scalars().first()
-                since_query = select(func.count(Trade.id)).where(Trade.order_type == "SELL")
+                since_query = select(func.count(Trade.id)).where(Trade.order_type == "SELL", Trade.is_live == live)
                 if last_row and last_row.value:
                     try:
                         since_query = since_query.where(Trade.executed_at > datetime.datetime.fromisoformat(last_row.value))
@@ -231,11 +233,16 @@ class TradeLearner:
 
             # 1. Fetch recent closed trades and lessons (last 20)
             res = await session.execute(
-                select(Trade).where(Trade.order_type == "SELL").order_by(desc(Trade.executed_at)).limit(20)
+                select(Trade).where(Trade.order_type == "SELL", Trade.is_live == live).order_by(desc(Trade.executed_at)).limit(20)
             )
             closed_trades = res.scalars().all()
             if not closed_trades:
                 return {"success": False, "message": "No closed trades available for calibration."}
+            # Manual /calibrate too: a handful of trades is noise, not a signal to retune on
+            if len(closed_trades) < min(settings.LEARNER_MIN_TRADES, 20):
+                msg = f"Calibration needs {min(settings.LEARNER_MIN_TRADES, 20)} closed {'live' if live else 'paper'} trades ({len(closed_trades)} so far)."
+                logger.info(msg)
+                return {"success": False, "skipped": True, "message": msg, "adjustments": []}
 
             total_trades = len(closed_trades)
             wins = [t for t in closed_trades if (t.realized_pnl_pct or 0.0) > 0.3]
@@ -277,7 +284,6 @@ class TradeLearner:
 
             curr_min_score = int(configs.get("MIN_CONSENSUS_SCORE", settings.MIN_CONSENSUS_SCORE))
             curr_trig_score = int(configs.get("TRIGGER_MIN_SCORE", settings.TRIGGER_MIN_SCORE))
-            curr_size_pct = float(configs.get("POSITION_SIZE_PCT", settings.POSITION_SIZE_PCT))
             curr_atr_mult = float(configs.get("ATR_STOP_MULTIPLIER", "1.75"))
             curr_tp_rr = float(configs.get("TAKE_PROFIT_RR", "2.1"))
             curr_be_pct = float(configs.get("BREAKEVEN_TRIGGER_PCT", "0.025"))
@@ -367,7 +373,6 @@ Return valid JSON with exactly these keys:
                         calibrated_params = {
                             "min_consensus_score": new_min_score,
                             "trigger_min_score": new_trig_score,
-                            "position_size_pct": curr_size_pct,  # position size is set manually, never calibrated
                             "atr_stop_multiplier": new_atr_mult,
                             "take_profit_rr": new_tp_rr,
                             "breakeven_trigger_pct": new_be_pct,
@@ -377,7 +382,6 @@ Return valid JSON with exactly these keys:
                             "weight_risk": w_risk,
                             "MIN_CONSENSUS_SCORE": new_min_score,
                             "TRIGGER_MIN_SCORE": new_trig_score,
-                            "POSITION_SIZE_PCT": curr_size_pct,  # position size is set manually, never calibrated
                             "ATR_STOP_MULTIPLIER": new_atr_mult,
                             "TAKE_PROFIT_RR": new_tp_rr,
                             "BREAKEVEN_TRIGGER_PCT": new_be_pct,
@@ -432,7 +436,6 @@ Return valid JSON with exactly these keys:
                 calibrated_params = {
                     "min_consensus_score": new_min_score,
                     "trigger_min_score": new_trig_score,
-                    "position_size_pct": curr_size_pct,  # position size is set manually, never calibrated
                     "atr_stop_multiplier": new_atr_mult,
                     "take_profit_rr": new_tp_rr,
                     "breakeven_trigger_pct": new_be_pct,
@@ -442,7 +445,6 @@ Return valid JSON with exactly these keys:
                     "weight_risk": w_risk,
                     "MIN_CONSENSUS_SCORE": new_min_score,
                     "TRIGGER_MIN_SCORE": new_trig_score,
-                    "POSITION_SIZE_PCT": curr_size_pct,  # position size is set manually, never calibrated
                     "ATR_STOP_MULTIPLIER": new_atr_mult,
                     "TAKE_PROFIT_RR": new_tp_rr,
                     "BREAKEVEN_TRIGGER_PCT": new_be_pct,
@@ -512,7 +514,7 @@ Return valid JSON with exactly these keys:
 
             win_rate = configs.get("LEARNER_WIN_RATE", "50.0")
             min_score = configs.get("MIN_CONSENSUS_SCORE", str(settings.MIN_CONSENSUS_SCORE))
-            size_pct = configs.get("POSITION_SIZE_PCT", str(settings.POSITION_SIZE_PCT))
+            size_pct = settings.POSITION_SIZE_PCT  # capped on load, the raw DB row may be stale
             atr_mult = configs.get("ATR_STOP_MULTIPLIER", "1.75")
             tp_rr = configs.get("TAKE_PROFIT_RR", "2.1")
             be_pct = configs.get("BREAKEVEN_TRIGGER_PCT", "0.025")
@@ -569,7 +571,7 @@ Return valid JSON with exactly these keys:
                 "active_parameters": {
                     "min_consensus_score": int(configs.get("MIN_CONSENSUS_SCORE", settings.MIN_CONSENSUS_SCORE)),
                     "trigger_min_score": int(configs.get("TRIGGER_MIN_SCORE", settings.TRIGGER_MIN_SCORE)),
-                    "position_size_pct": float(configs.get("POSITION_SIZE_PCT", settings.POSITION_SIZE_PCT)),
+                    "position_size_pct": settings.POSITION_SIZE_PCT,
                     "atr_stop_multiplier": float(configs.get("ATR_STOP_MULTIPLIER", 1.75)),
                     "take_profit_rr": float(configs.get("TAKE_PROFIT_RR", 2.1)),
                     "breakeven_trigger_pct": float(configs.get("BREAKEVEN_TRIGGER_PCT", 0.025)),

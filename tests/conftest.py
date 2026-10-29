@@ -8,7 +8,11 @@ TEST_DB_FILE = Path(__file__).resolve().parent.parent / "data" / "test_trading_b
 TEST_MEMORY_DB_FILE = Path(__file__).resolve().parent.parent / "data" / "test_memory.db"
 os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{TEST_DB_FILE}"
 
-from config.settings import settings
+from config.settings import settings, Settings
+# Start from the code defaults, not the real .env, so results don't depend on the owner's config
+for _name, _field in Settings.model_fields.items():
+    if not _field.is_required():
+        setattr(settings, _name, _field.get_default(call_default_factory=True))
 settings.DATABASE_URL = f"sqlite+aiosqlite:///{TEST_DB_FILE}"
 settings.TRADING_MODE = "PAPER"
 settings.LIVE_TRADING_ENABLED = False
@@ -70,6 +74,12 @@ def setup_test_db():
                 db_file.unlink()
             except Exception:
                 pass
+
+
+@pytest.fixture(autouse=True)
+def _no_real_env_writes(monkeypatch):
+    """POST /api/settings persists to .env; tests must never rewrite the real one."""
+    monkeypatch.setattr("src.web.routes.update_env_file", lambda *a, **k: None)
 
 
 @pytest.fixture(autouse=True)

@@ -42,7 +42,6 @@ class RiskManagerAgent:
                 cfgs = {c.key: c.value for c in cfg_res.scalars().all()}
                 atr_mult = float(cfgs.get("ATR_STOP_MULTIPLIER", 1.75))
                 tp_rr_target = float(cfgs.get("TAKE_PROFIT_RR", 2.1))
-                base_size_pct = float(cfgs.get("POSITION_SIZE_PCT", settings.POSITION_SIZE_PCT))
                 be_pct = float(cfgs.get("BREAKEVEN_TRIGGER_PCT", 0.025))
         except Exception:
             be_pct = 0.025
@@ -113,15 +112,15 @@ Return JSON with exactly these keys:
 
         entry = entry_trigger_price
 
-        # Dynamic Stop Loss using adapted ATR multiplier: Max of (Support level, Entry - atr_mult * ATR, Entry * (1 - DEFAULT_STOP_LOSS_PCT))
+        # Dynamic Stop Loss using adapted ATR multiplier: Max of (Support level, Entry - atr_mult * ATR).
+        # The ATR stop leads; a fixed % stop would override it and make ATR_STOP_MULTIPLIER do nothing.
         atr_stop = entry - (atr_mult * atr)
-        pct_stop = entry * (1.0 - settings.DEFAULT_STOP_LOSS_PCT)
         
         # Stop loss should never be closer than 2.5% (to avoid market noise) and never wider than 7%, relative to the entry
         min_stop_price = entry * 0.93
         max_stop_price = entry * 0.975
 
-        candidate_stop = max(support, atr_stop, pct_stop)
+        candidate_stop = max(support, atr_stop)
         stop_loss = max(min_stop_price, min(max_stop_price, candidate_stop))
         
         risk_per_share = entry - stop_loss

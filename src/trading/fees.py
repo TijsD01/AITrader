@@ -69,6 +69,10 @@ def calculate_broker_fee(
             # European & UK Equities on IBKR
             is_xetra = ticker.upper().endswith(".DE")
             is_uk = ticker.upper().endswith(".L") or curr == "GBP"
+            # French Financial Transaction Tax (TTF): 0.4% on BUY of French firms with market cap > €1bn
+            # shortcut: every .PA ticker is taxed (official list is ~100 firms >€1bn cap; also overcharges non-French .PA like AIR.PA), upgrade to the yearly DGFiP list when trading French small/mid caps
+            ftt = round(trade_value_native * 0.004, 2) if (ticker.upper().endswith(".PA") and action == "BUY") else 0.0
+            ftt_note = f" + €{ftt:.2f} FTT" if ftt > 0 else ""
             if tier == "tiered":
                 # IBKR Tiered: 0.05% of value, min €1.25 (£1.00 for UK), max €29.00
                 min_base = 1.00 if is_uk else 1.25
@@ -78,18 +82,18 @@ def calculate_broker_fee(
                 exchange_clearing = 0.95 if is_xetra else (0.35 if is_uk else 0.65)
                 # UK Stamp Duty Reserve Tax (SDRT): 0.5% on BUY only for UK equities (.L)
                 stamp_duty = round(trade_value_native * 0.005, 2) if (is_uk and action == "BUY") else 0.0
-                fee_native = round(base_comm + exchange_clearing + stamp_duty, 2)
+                fee_native = round(base_comm + exchange_clearing + stamp_duty + ftt, 2)
                 sdrt_note = f" + £{stamp_duty:.2f} SDRT" if stamp_duty > 0 else ""
                 curr_sym = "£" if is_uk else "€"
-                breakdown = f"IBKR EU Tiered ({curr_sym}{base_comm:.2f} comm + {curr_sym}{exchange_clearing:.2f} exch/clr{sdrt_note})"
+                breakdown = f"IBKR EU Tiered ({curr_sym}{base_comm:.2f} comm + {curr_sym}{exchange_clearing:.2f} exch/clr{sdrt_note}{ftt_note})"
             else:
                 # IBKR Fixed: 0.05% of value, min €3.00 (Euronext/LSE) or €4.00 (XETRA), max €29.00
                 min_fee = 4.00 if is_xetra else 3.00
                 stamp_duty = round(trade_value_native * 0.005, 2) if (is_uk and action == "BUY") else 0.0
-                fee_native = round(max(min_fee, min(29.0, trade_value_native * 0.0005)) + stamp_duty, 2)
+                fee_native = round(max(min_fee, min(29.0, trade_value_native * 0.0005)) + stamp_duty + ftt, 2)
                 sdrt_note = f" + £{stamp_duty:.2f} SDRT" if stamp_duty > 0 else ""
                 curr_sym = "£" if is_uk else "€"
-                breakdown = f"IBKR EU Fixed (min {curr_sym}{min_fee:.2f} or 0.05%{sdrt_note})"
+                breakdown = f"IBKR EU Fixed (min {curr_sym}{min_fee:.2f} or 0.05%{sdrt_note}{ftt_note})"
             fee_eur = currency_service.to_eur(fee_native, curr)
         else:
             # US Equities on IBKR (priced in USD)

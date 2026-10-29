@@ -80,6 +80,7 @@ async def telegram_env(ticker, report=None, stock=UNSET, cash=5000.0, regime=(Tr
             )),
             create=stack.enter_context(patch("src.trading.paper.paper_broker.create_price_trigger", AsyncMock(return_value=armed))),
             regime=stack.enter_context(patch("src.trading.trigger_gate.check_market_regime", return_value=regime)),
+            follow=stack.enter_context(patch("src.trading.shadow.shadow_portfolios.follow_report", AsyncMock())),
         )
         stack.enter_context(patch("src.trading.paper.paper_broker.get_portfolio_summary", AsyncMock(return_value=summary)))
         stack.enter_context(patch("src.telegram.bot.get_trigger_min_score", AsyncMock(return_value=threshold)))
@@ -386,6 +387,8 @@ async def test_analyze_auto_arms_an_approved_buy_at_the_threshold_and_names_the_
     kwargs = env.create.call_args.kwargs
     assert kwargs["ticker"] == "TGATEAUTO" and kwargs["target_price"] == 98.0
     env.bot.notify_trigger_armed.assert_awaited_once()
+    env.follow.assert_awaited_once()
+    assert env.follow.await_args.kwargs["followed_main"] is True
 
 
 async def test_analyze_uses_the_saved_threshold_not_a_hard_coded_80():
@@ -397,6 +400,8 @@ async def test_analyze_uses_the_saved_threshold_not_a_hard_coded_80():
         reply = await env.send("/analyze TGATEAUTO")
     assert "AUTOMATIC TRIGGER ARMED" not in reply and "Not auto-armed" not in reply
     env.create.assert_not_awaited()
+    # The shadow still sees a verdict the main bot did not act on
+    assert env.follow.await_args.kwargs["followed_main"] is False
 
 
 async def test_analyze_reads_the_threshold_from_the_database_setting(monkeypatch):

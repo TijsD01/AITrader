@@ -3,7 +3,7 @@ import datetime
 import asyncio
 import time
 from typing import Dict, Any, List, Optional, Tuple
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, func
 
 from config.settings import settings
 from src.db.models import Position, Trade, PortfolioSnapshot, SystemConfig, OrderTrigger
@@ -16,6 +16,9 @@ from src.trading.base import BaseBroker
 from src.trading.cash_flows import scan_live_cash_flows, net_cash_flows_eur
 
 logger = logging.getLogger(__name__)
+
+# A marketable DAY limit fills in seconds; an entry still open after this is cancelled instead of booked
+FILL_WAIT_SECONDS = 15.0
 
 
 def round_to_tick(price: float, increments: List[Tuple[float, float]]) -> float:
@@ -36,6 +39,8 @@ class LiveBroker(BaseBroker):
         self._refresh_lock = asyncio.Lock()
         self._ib: Optional[Any] = None
         self._ibkr_price_cache: Dict[str, Tuple[float, float]] = {}
+        # Last IBKR AvailableFunds: a cash account cannot spend unsettled cash, so buys never size past it
+        self._available_funds_eur: Optional[float] = None
         self._last_connection_check: float = 0.0
         self._connection_check_ttl: float = 15.0  # 15s cache to prevent socket churn
         self._last_connection_status: Optional[Dict[str, Any]] = None
@@ -133,7 +138,8 @@ class LiveBroker(BaseBroker):
                 from ib_async import Stock
                 ib = await self._get_ib()
                 if ib and ib.isConnected():
-                    ib.reqMarketDataType(3)  # 3 = Delayed (supports accounts without paid live subscriptions)
+                    # 3 = delayed only where the account has no real-time subscription; subscribed exchanges stream live
+                    ib.reqMarketDataType(3)
                     contracts = [
                         Stock(t.split(".")[0], "SMART", c.upper())
                         for t, c in needed
@@ -142,6 +148,9 @@ class LiveBroker(BaseBroker):
                     stream = [ib.reqMktData(c, "", False, False) for c in contracts]
                     await asyncio.sleep(1.0)
                     for (orig_ticker, _), tk in zip(needed, stream):
+                        # Delayed quotes (3/4, e.g. US without a subscription) lag ~15 min: leave them out so callers use yfinance
+                        if getattr(tk, "marketDataType", 1) in (3, 4):
+                            continue
                         p = tk.marketPrice()
                         if p != p or p <= 0:
                             p = tk.last if (tk.last == tk.last and tk.last > 0) else tk.close
@@ -163,10 +172,11 @@ class LiveBroker(BaseBroker):
         currency: str,
         stop_loss: Optional[float],
         take_profit: Optional[float]
-    ) -> Optional[str]:
+    ) -> Optional[Tuple[str, float, float]]:
         """
         Dispatches live bracket order to configured broker API (IBKR or Alpaca).
-        Returns broker order ID if connected, or None.
+        Returns (broker order ID, filled shares, average fill price), or None when not placed.
+        An IBKR entry that has not filled within FILL_WAIT_SECONDS is cancelled, so only filled shares get booked.
         """
         broker = settings.LIVE_BROKER.lower()
         if broker == "ibkr":
@@ -176,11 +186,7 @@ class LiveBroker(BaseBroker):
                 if ib and ib.isConnected():
                     contract = Stock(ticker.upper().split(".")[0], "SMART", currency.upper())
                     await ib.qualifyContractsAsync(contract)
-                    # Exchanges reject prices off their tick grid (Error 110); Euronext/Xetra ticks grow with the price
-                    details = (await ib.reqContractDetailsAsync(contract))[0]
-                    exchanges, rule_ids = details.validExchanges.split(","), details.marketRuleIds.split(",")
-                    rule_id = rule_ids[exchanges.index(contract.primaryExchange)] if contract.primaryExchange in exchanges else rule_ids[0]
-                    increments = [(r.lowEdge, r.increment) for r in await ib.reqMarketRuleAsync(int(rule_id))]
+                    increments = await self._tick_increments(ib, contract)
                     bracket = ib.bracketOrder(
                         action="BUY",
                         quantity=shares,
@@ -198,7 +204,8 @@ class LiveBroker(BaseBroker):
                         if rejection:
                             logger.error(f"IBKR rejected BUY {shares} {ticker}: {rejection}")
                             return None
-                        return f"ibkr_{placed[0].order.orderId}"
+                        filled, avg_price = await self._await_entry_fill(ib, placed[0])
+                        return f"ibkr_{placed[0].order.orderId}", filled, avg_price or price
             except Exception as e:
                 logger.info(f"IBKR gateway communication note: {e}")
         elif broker == "alpaca":
@@ -221,10 +228,75 @@ class LiveBroker(BaseBroker):
                         stop_loss=StopLossRequest(stop_price=stop_loss) if stop_loss else None
                     )
                     resp = client.submit_order(req)
-                    return f"alpaca_{resp.id}"
+                    return f"alpaca_{resp.id}", shares, price
             except Exception as e:
                 logger.info(f"Alpaca communication note: {e}")
         return None
+
+    @staticmethod
+    async def _tick_increments(ib: Any, contract: Any) -> List[Tuple[float, float]]:
+        """Price bands of the contract's market rule: exchanges reject prices off their tick grid (Error 110), and Euronext/Xetra ticks grow with the price."""
+        details = (await ib.reqContractDetailsAsync(contract))[0]
+        exchanges, rule_ids = details.validExchanges.split(","), details.marketRuleIds.split(",")
+        rule_id = rule_ids[exchanges.index(contract.primaryExchange)] if contract.primaryExchange in exchanges else rule_ids[0]
+        return [(r.lowEdge, r.increment) for r in await ib.reqMarketRuleAsync(int(rule_id))]
+
+    async def _move_broker_stop(self, ticker: str, currency: str, shares: float, stop: float) -> None:
+        """
+        Puts the bot's stop on the resting IBKR stop order (or places a GTC stop when the symbol has no SELL order),
+        so the position keeps its raised stop while the bot or gateway is offline.
+        """
+        if settings.LIVE_BROKER.lower() != "ibkr":
+            return
+        try:
+            from ib_async import Stock, StopOrder
+            ib = await self._get_ib()
+            if not (ib and ib.isConnected()):
+                return
+            symbol = ticker.upper().split(".")[0]
+            sells = [
+                t for t in ib.openTrades()
+                if t.contract.symbol.upper() == symbol and (t.contract.currency or "").upper() == currency.upper()
+                and t.order.action == "SELL"
+            ]
+            stops = [t for t in sells if t.order.orderType == "STP"]
+            if sells and not stops:
+                # A lone take-profit leg: a separate stop outside its OCA group could sell the shares twice
+                logger.warning(f"{ticker} has a SELL order at IBKR but no stop; broker stop not moved to {stop}.")
+                return
+            contract = stops[0].contract if stops else Stock(symbol, "SMART", currency.upper())
+            if not stops:
+                await ib.qualifyContractsAsync(contract)
+            price = round_to_tick(stop, await self._tick_increments(ib, contract))
+            if stops:
+                order = stops[0].order
+                if order.auxPrice == price:
+                    return
+                order.auxPrice = price
+            else:
+                order = StopOrder("SELL", shares, price, tif="GTC")
+            ib.placeOrder(contract, order)
+            logger.info(f"IBKR stop for {ticker} {'moved' if stops else 'placed'} at {price}.")
+        except Exception as e:
+            logger.warning(f"IBKR stop update for {ticker} failed: {e}")
+
+    @staticmethod
+    async def _await_entry_fill(ib: Any, trade: Any, timeout: float = FILL_WAIT_SECONDS) -> Tuple[float, float]:
+        """
+        Waits for a placed BUY to fill. Cancels any unfilled rest (the bracket legs follow the parent),
+        then returns (filled shares, average fill price) so only real fills get booked.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while trade.orderStatus.status != "Filled" and loop.time() < deadline:
+            await asyncio.sleep(0.2)
+        if trade.orderStatus.status != "Filled":
+            ib.cancelOrder(trade.order)
+            for _ in range(20):
+                if trade.orderStatus.status in ("Filled", "Cancelled", "ApiCancelled", "Inactive"):
+                    break
+                await asyncio.sleep(0.1)
+        return float(trade.orderStatus.filled or 0.0), float(trade.orderStatus.avgFillPrice or 0.0)
 
     @staticmethod
     async def _ibkr_order_rejection(trade: Any, timeout: float = 2.0) -> Optional[str]:
@@ -328,20 +400,62 @@ class LiveBroker(BaseBroker):
             return False, f"Current TRADING_MODE is '{settings.TRADING_MODE}', not 'LIVE'."
         return True, "Live execution armed."
 
-    async def get_daily_realized_loss_eur(self) -> float:
-        """Calculates total net realized loss from trades executed today."""
+    async def get_daily_loss_eur(self) -> float:
+        """
+        How far the account value fell since the start of today (UTC), deposits and withdrawals taken out,
+        as a positive loss (0 when up). A position that was already under water yesterday only counts today's move.
+        """
         today_start = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
+        live_snaps = select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True)
         async with AsyncSessionLocal() as session:
-            res = await session.execute(
-                select(Trade).where(
-                    Trade.executed_at >= today_start,
-                    Trade.order_type == "SELL",
-                    Trade.is_live == True
-                )
-            )
-            trades = res.scalars().all()
-            net_pnl = sum(t.realized_pnl_eur or 0.0 for t in trades)
-            return abs(net_pnl) if net_pnl < 0 else 0.0
+            # Start value: the last snapshot before today, else today's first one
+            base = (await session.execute(
+                live_snaps.where(PortfolioSnapshot.timestamp < today_start)
+                .order_by(desc(PortfolioSnapshot.timestamp), desc(PortfolioSnapshot.id)).limit(1)
+            )).scalars().first() or (await session.execute(
+                live_snaps.order_by(PortfolioSnapshot.timestamp, PortfolioSnapshot.id).limit(1)
+            )).scalars().first()
+            latest = (await session.execute(
+                live_snaps.order_by(desc(PortfolioSnapshot.timestamp), desc(PortfolioSnapshot.id)).limit(1)
+            )).scalars().first()
+            positions = (await session.execute(
+                select(Position).where(Position.status == "OPEN", Position.is_live == True)
+            )).scalars().all()
+        if base is None or latest is None:
+            return 0.0
+        # Cash from the latest snapshot (buys and sells write one), positions at their refreshed prices
+        current = (latest.cash_eur or 0.0) + sum((p.current_price_eur or 0.0) * p.shares for p in positions)
+        flows = await net_cash_flows_eur(is_live=True, since=base.timestamp)
+        return max(0.0, round((base.total_value_eur or 0.0) + flows - current, 2))
+
+    @staticmethod
+    def daily_loss_limit_eur(total_value_eur: float) -> float:
+        """The lower of MAX_DAILY_LOSS_EUR and MAX_DAILY_LOSS_PCT of the account value."""
+        if settings.MAX_DAILY_LOSS_PCT > 0 and total_value_eur > 0:
+            return min(settings.MAX_DAILY_LOSS_EUR, total_value_eur * settings.MAX_DAILY_LOSS_PCT / 100.0)
+        return settings.MAX_DAILY_LOSS_EUR
+
+    async def enforce_daily_loss_limit(self) -> Optional[str]:
+        """Turns the kill switch on (once, with a Telegram alert) when today's loss reaches the limit. Returns the reason, else None."""
+        async with AsyncSessionLocal() as session:
+            snap = (await session.execute(
+                select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True).order_by(desc(PortfolioSnapshot.timestamp))
+            )).scalars().first()
+        limit = self.daily_loss_limit_eur(snap.total_value_eur if snap else 0.0)
+        loss = await self.get_daily_loss_eur()
+        if loss < limit:
+            return None
+        msg = f"Daily loss limit reached (€{loss:.2f} >= €{limit:.2f}): kill switch on, no new buys. Stops and sells keep working."
+        if not settings.KILL_SWITCH_ACTIVE:
+            from src.db.session import set_kill_switch
+            await set_kill_switch(True)
+            logger.critical(msg)
+            try:
+                from src.telegram.bot import telegram_bot
+                await telegram_bot.send_message(f"🛑 <b>{msg}</b>")
+            except Exception as e:
+                logger.error(f"Failed to send daily loss alert: {e}")
+        return msg
 
     async def get_portfolio_summary(self) -> Dict[str, Any]:
         """Fetches live portfolio state (from broker and local mirror)."""
@@ -366,7 +480,7 @@ class LiveBroker(BaseBroker):
             pending_alloc = sum(t.allocation_eur for t in pending_triggers)
 
             cash = snapshot.cash_eur if snapshot else 0.0
-            usable_cash, protected_reserve = get_effective_deployable_cash(cash)
+            usable_cash, protected_reserve = get_effective_deployable_cash(self._spendable_cash(cash), invested_eur=sum(p.cost_basis_eur or 0.0 for p in positions))
             available_cash = max(0.0, usable_cash - pending_alloc)
             equity = sum(round(p.current_price_eur * p.shares, 2) for p in positions)
             total_val = round(cash + equity, 2)
@@ -394,7 +508,7 @@ class LiveBroker(BaseBroker):
                 total_val = round(ib_total, 2)
                 equity = ib_equity if ib_equity is not None else total_val - cash
             unrealized_pnl = sum(round(p.unrealized_pnl_eur, 2) for p in positions)
-            daily_loss = await self.get_daily_realized_loss_eur()
+            daily_loss = await self.get_daily_loss_eur()
 
             # Baseline initial capital for live trading
             first_snap_res = await session.execute(
@@ -431,8 +545,8 @@ class LiveBroker(BaseBroker):
                 "net_deposits_eur": net_deposits,
                 "invested_capital_eur": invested,
                 "total_gain_eur": total_gain,
-                "daily_realized_loss_eur": round(daily_loss, 2),
-                "max_daily_loss_limit_eur": settings.MAX_DAILY_LOSS_EUR,
+                "daily_loss_eur": round(daily_loss, 2),
+                "max_daily_loss_limit_eur": round(self.daily_loss_limit_eur(total_val), 2),
                 "open_positions_count": len(positions),
                 "pending_triggers_count": len(pending_triggers),
                 "ibkr_pricing_tier": getattr(settings, "IBKR_PRICING_TIER", "tiered"),
@@ -494,11 +608,9 @@ class LiveBroker(BaseBroker):
             return {"success": False, "message": arm_msg}
 
         # 2. Check Daily Max Loss Limit
-        daily_loss = await self.get_daily_realized_loss_eur()
-        if daily_loss >= settings.MAX_DAILY_LOSS_EUR:
-            msg = f"Live BUY blocked: Daily loss limit exceeded (€{daily_loss:.2f} >= €{settings.MAX_DAILY_LOSS_EUR:.2f})."
-            logger.critical(msg)
-            return {"success": False, "message": msg}
+        loss_msg = await self.enforce_daily_loss_limit()
+        if loss_msg:
+            return {"success": False, "message": f"Live BUY blocked: {loss_msg}"}
 
         # 3. Market Hours Check
         is_open, open_msg = check_market_hours(ticker)
@@ -524,7 +636,7 @@ class LiveBroker(BaseBroker):
             )
             snapshot = snap_res.scalars().first()
             cash_eur = snapshot.cash_eur if snapshot else 0.0
-            usable_cash, _ = get_effective_deployable_cash(cash_eur)
+            usable_cash, _ = get_effective_deployable_cash(self._spendable_cash(cash_eur), invested_eur=sum(p.cost_basis_eur or 0.0 for p in open_positions))
             equity_eur = sum(p.current_price_eur * p.shares for p in open_positions)
             total_eur = cash_eur + equity_eur
 
@@ -579,10 +691,6 @@ class LiveBroker(BaseBroker):
                 logger.info(f"Live BUY order blocked for {ticker}: {msg}")
                 return {"success": False, "message": msg}
 
-            # 8. Hard single order cap
-            if settings.MAX_SINGLE_ORDER_EUR and allocation_eur > settings.MAX_SINGLE_ORDER_EUR:
-                allocation_eur = settings.MAX_SINGLE_ORDER_EUR
-
             if allocation_eur > usable_cash:
                 allocation_eur = usable_cash
 
@@ -626,7 +734,7 @@ class LiveBroker(BaseBroker):
                 return {"success": False, "message": f"Insufficient cash (€{cash_eur:.2f}) for {ticker} cost €{actual_cost_eur:.2f} plus fee €{fee_eur:.2f}."}
 
             # 9. Dispatch real order to broker API
-            dispatched_id = await self._dispatch_real_order(
+            dispatched = await self._dispatch_real_order(
                 ticker=ticker,
                 shares=shares,
                 price=price_native,
@@ -634,10 +742,23 @@ class LiveBroker(BaseBroker):
                 stop_loss=stop_loss_native,
                 take_profit=take_profit_native
             )
-            if not dispatched_id:
+            if not dispatched:
                 logger.error(f"[LIVE EXECUTION] BUY {ticker} was not accepted by {settings.LIVE_BROKER.upper()}; nothing recorded.")
                 return {"success": False, "message": f"Order for {ticker} could not be placed at {settings.LIVE_BROKER.upper()} (broker not connected or order rejected)."}
-            broker_order_id = dispatched_id
+            broker_order_id, filled, fill_price = dispatched
+            if filled <= 0:
+                msg = f"BUY {ticker} @ {price_native} {currency} did not fill within {FILL_WAIT_SECONDS:.0f}s and was cancelled; nothing recorded."
+                logger.warning(f"[LIVE EXECUTION] {msg}")
+                return {"success": False, "unfilled": True, "message": msg}
+            # Book what the broker filled, not what was asked
+            shares, price_native = filled, fill_price
+            price_eur = currency_service.to_eur(price_native, currency)
+            actual_cost_eur = round(shares * price_eur, 2)
+            fee_info = calculate_broker_fee(
+                ticker=ticker, shares=shares, price_native=price_native, currency=currency, broker=settings.LIVE_BROKER,
+                pricing_tier=getattr(settings, "IBKR_PRICING_TIER", "tiered"), order_action="BUY"
+            )
+            fee_eur = fee_info["fee_eur"]
             logger.info(
                 f"[LIVE EXECUTION] Submitting real order to {settings.LIVE_BROKER.upper()}: "
                 f"BUY {shares} {ticker} @ {price_native} {currency} (Cost: €{actual_cost_eur}, Fee: €{fee_eur:.2f} [{fee_info['breakdown']}]) | "
@@ -739,11 +860,17 @@ class LiveBroker(BaseBroker):
                 "message": f"Real money order submitted to {settings.LIVE_BROKER.upper()}: {shares} shares of {ticker} for €{actual_cost_eur:.2f} (Fee: €{fee_eur:.2f})."
             }
 
-    async def execute_sell(self, ticker: str, reason: str = "Manual Close") -> Dict[str, Any]:
-        """Submits real sell order to brokerage API to close live position."""
-        is_open, open_msg = check_market_hours(ticker)
-        if not is_open:
-            return {"success": False, "message": open_msg}
+    async def execute_sell(
+        self, ticker: str, reason: str = "Manual Close", broker_flat: bool = False, exit_price_native: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """
+        Submits real sell order to brokerage API to close live position.
+        broker_flat: the broker already sold the shares (bracket leg, manual sale); only book the exit.
+        """
+        if not broker_flat:
+            is_open, open_msg = check_market_hours(ticker)
+            if not is_open:
+                return {"success": False, "message": open_msg}
 
         async with AsyncSessionLocal() as session:
             res = await session.execute(
@@ -753,8 +880,9 @@ class LiveBroker(BaseBroker):
             if not pos:
                 return {"success": False, "message": f"No open live position found for {ticker}."}
 
-            quote = market_data_provider.get_stock_data(ticker)
-            exit_price_native = quote["price"] if quote else pos.current_price_native
+            if not exit_price_native:
+                quote = market_data_provider.get_stock_data(ticker)
+                exit_price_native = quote["price"] if quote else pos.current_price_native
             exit_price_eur = currency_service.to_eur(exit_price_native, pos.currency)
             proceeds_eur = round(pos.shares * exit_price_eur, 2)
 
@@ -776,7 +904,7 @@ class LiveBroker(BaseBroker):
             realized_pnl_eur = round(proceeds_eur - pos.cost_basis_eur - total_fees_eur, 2)
             realized_pnl_pct = round((realized_pnl_eur / pos.cost_basis_eur) * 100, 2) if pos.cost_basis_eur > 0 else 0.0
 
-            dispatched_id = await self._dispatch_real_close(ticker=ticker, shares=pos.shares, currency=pos.currency)
+            dispatched_id = "broker_flat" if broker_flat else await self._dispatch_real_close(ticker=ticker, shares=pos.shares, currency=pos.currency)
             if not dispatched_id:
                 logger.error(f"[LIVE EXECUTION] SELL {ticker} was not accepted by {settings.LIVE_BROKER.upper()}; position left open.")
                 return {"success": False, "message": f"Exit order for {ticker} could not be placed at {settings.LIVE_BROKER.upper()} (broker not connected or order rejected)."}
@@ -814,29 +942,31 @@ class LiveBroker(BaseBroker):
             )
             session.add(trade)
 
-            snap_res = await session.execute(
-                select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True).order_by(desc(PortfolioSnapshot.timestamp))
-            )
-            snapshot = snap_res.scalars().first()
-            # Net cash received is proceeds minus exit fee
-            net_proceeds_eur = round(proceeds_eur - exit_fee_eur, 2)
-            cash_eur = (snapshot.cash_eur if snapshot else 0.0) + net_proceeds_eur
+            # A broker-side exit is already in the broker's cash, which the sync records; adding proceeds again would look like a deposit
+            if not broker_flat:
+                snap_res = await session.execute(
+                    select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True).order_by(desc(PortfolioSnapshot.timestamp))
+                )
+                snapshot = snap_res.scalars().first()
+                # Net cash received is proceeds minus exit fee
+                net_proceeds_eur = round(proceeds_eur - exit_fee_eur, 2)
+                cash_eur = (snapshot.cash_eur if snapshot else 0.0) + net_proceeds_eur
 
-            remaining_res = await session.execute(
-                select(Position).where(Position.status == "OPEN", Position.is_live == True, Position.ticker != ticker.upper())
-            )
-            remaining = remaining_res.scalars().all()
-            new_equity_eur = sum(p.current_price_eur * p.shares for p in remaining)
+                remaining_res = await session.execute(
+                    select(Position).where(Position.status == "OPEN", Position.is_live == True, Position.ticker != ticker.upper())
+                )
+                remaining = remaining_res.scalars().all()
+                new_equity_eur = sum(p.current_price_eur * p.shares for p in remaining)
 
-            new_snapshot = PortfolioSnapshot(
-                cash_eur=cash_eur,
-                equity_eur=new_equity_eur,
-                total_value_eur=round(cash_eur + new_equity_eur, 2),
-                open_positions_count=len(remaining),
-                is_live=True,
-                timestamp=utc_now
-            )
-            session.add(new_snapshot)
+                new_snapshot = PortfolioSnapshot(
+                    cash_eur=cash_eur,
+                    equity_eur=new_equity_eur,
+                    total_value_eur=round(cash_eur + new_equity_eur, 2),
+                    open_positions_count=len(remaining),
+                    is_live=True,
+                    timestamp=utc_now
+                )
+                session.add(new_snapshot)
 
             await session.commit()
             self._last_pnl_refresh = 0.0
@@ -924,7 +1054,10 @@ class LiveBroker(BaseBroker):
             )
             snapshot = snap_res.scalars().first()
             cash_eur = snapshot.cash_eur if snapshot else 0.0
-            usable_cash, _ = get_effective_deployable_cash(cash_eur)
+            invested = (await session.execute(
+                select(func.coalesce(func.sum(Position.cost_basis_eur), 0.0)).where(Position.status == "OPEN", Position.is_live == True)
+            )).scalar()
+            usable_cash, _ = get_effective_deployable_cash(self._spendable_cash(cash_eur), invested_eur=invested)
 
             pending_res = await session.execute(select(OrderTrigger).where(OrderTrigger.status == "PENDING", OrderTrigger.is_live == True))
             pending_triggers = pending_res.scalars().all()
@@ -1049,7 +1182,7 @@ class LiveBroker(BaseBroker):
         )
         snapshot = snap_res.scalars().first()
         cash_eur = snapshot.cash_eur if snapshot else 0.0
-        usable_cash, _ = get_effective_deployable_cash(cash_eur)
+        usable_cash, _ = get_effective_deployable_cash(self._spendable_cash(cash_eur), invested_eur=sum(p.cost_basis_eur or 0.0 for p in positions))
         portfolio_value = cash_eur + sum(p.current_price_eur * p.shares for p in positions)
         # Same ranking adjust_triggers_dynamically applies before the dashboard shows or a trigger fires
         allocations = allocate_pending_triggers(usable_cash, len(positions), pending, portfolio_value_eur=portfolio_value)
@@ -1108,7 +1241,7 @@ class LiveBroker(BaseBroker):
             )
             snapshot = snap_res.scalars().first()
             cash_eur = snapshot.cash_eur if snapshot else 0.0
-            usable_cash, _ = get_effective_deployable_cash(cash_eur)
+            usable_cash, _ = get_effective_deployable_cash(self._spendable_cash(cash_eur), invested_eur=sum(p.cost_basis_eur or 0.0 for p in open_positions))
 
             allocations = allocate_pending_triggers(
                 usable_cash, current_open, pending,
@@ -1265,6 +1398,7 @@ class LiveBroker(BaseBroker):
     async def check_stops_and_targets(self) -> List[Dict[str, Any]]:
         """Monitors open live positions for stop-loss and take-profit."""
         await self.refresh_positions_pnl()
+        await self.enforce_daily_loss_limit()
         triggered = []
         async with AsyncSessionLocal() as session:
             res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == True))
@@ -1336,7 +1470,7 @@ class LiveBroker(BaseBroker):
                         if curr_price > (p.highest_price_native or 0.0):
                             p.highest_price_native = curr_price
                             # Trailing stop (same as paper): past breakeven_trigger_pct the stop moves to breakeven + 1%,
-                            # then trails by N x ATR. This is the bot's own stop; the broker's bracket stop keeps its level.
+                            # then trails by N x ATR. The broker's stop order follows, see _move_broker_stop.
                             # Positions without a stop are left alone: those are holdings synced from the broker, not bot trades.
                             if p.stop_loss_native and p.entry_price_native:
                                 gain_pct = (curr_price / p.entry_price_native) - 1.0
@@ -1351,6 +1485,7 @@ class LiveBroker(BaseBroker):
                                     if new_stop is not None and new_stop != p.stop_loss_native:
                                         p.stop_loss_native = new_stop
                                         logger.info(f"Live trailing stop raised for {p.ticker} to {new_stop} (+{gain_pct*100:.1f}%)")
+                                        await self._move_broker_stop(p.ticker, p.currency, p.shares, new_stop)
                         curr_val_eur = p.current_price_eur * p.shares
                         p.unrealized_pnl_eur = round(curr_val_eur - p.cost_basis_eur, 2)
                         p.unrealized_pnl_pct = round(((p.current_price_eur / p.entry_price_eur) - 1.0) * 100, 2)
@@ -1359,10 +1494,15 @@ class LiveBroker(BaseBroker):
                 self._last_pnl_refresh = time.time()
 
     async def _fetch_ibkr_account_values(self, ib: Any) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-        """Reads (cash, net liquidation, gross position value) in base currency from the IBKR account summary."""
+        """
+        Reads (cash, net liquidation, gross position value) in base currency from the IBKR account summary.
+        Cash stays the real balance (snapshots and deposit detection need it); AvailableFunds is kept apart
+        for sizing buys (_spendable_cash).
+        """
         ib_cash = None
         ib_total = None
         ib_equity = None
+        available = None
         for s in await ib.accountSummaryAsync():
             if s.currency in (settings.BASE_CURRENCY, "EUR", "BASE"):
                 if s.tag in ("TotalCashValue", "CashBalance") and ib_cash is None:
@@ -1371,7 +1511,17 @@ class LiveBroker(BaseBroker):
                     ib_total = float(s.value)
                 elif s.tag == "GrossPositionValue" and ib_equity is None:
                     ib_equity = float(s.value)
+                elif s.tag == "AvailableFunds" and available is None:
+                    available = float(s.value)
+        if available is not None:
+            self._available_funds_eur = max(0.0, available)
         return ib_cash, ib_total, ib_equity
+
+    def _spendable_cash(self, cash_eur: float) -> float:
+        """Cash a buy may use: the balance, capped at IBKR AvailableFunds when known (unsettled sale proceeds, deposit holds)."""
+        if self._available_funds_eur is None:
+            return cash_eur
+        return min(cash_eur, self._available_funds_eur)
 
     async def sync_cash_balance(self) -> None:
         """
@@ -1415,8 +1565,22 @@ class LiveBroker(BaseBroker):
         except Exception as e:
             logger.warning(f"IBKR cash balance sync note: {e}")
 
-    async def _planned_levels(self, session, sym: str, entry: float) -> Tuple[float, float]:
-        """Stop/target for a broker holding: the latest buy-plan trigger for the symbol, else the default percentages."""
+    @staticmethod
+    def _last_sell_fill(ib: Any, ticker: str, currency: str) -> Optional[float]:
+        """Average price of the latest SELL fill for the symbol in this gateway session, else None."""
+        symbol = ticker.upper().split(".")[0]
+        sells = [
+            f for f in ib.fills()
+            if f.contract.symbol.upper() == symbol and (f.contract.currency or "").upper() == (currency or "USD").upper()
+            and f.execution.side == "SLD"
+        ]
+        return float(max(sells, key=lambda f: f.execution.time).execution.avgPrice) if sells else None
+
+    async def _planned_levels(self, session, sym: str) -> Tuple[Optional[float], Optional[float]]:
+        """
+        Stop/target for a broker holding from the latest buy-plan trigger for the symbol.
+        (None, None) without one: the holding was bought by hand, so the bot tracks it but never sells it.
+        """
         res = await session.execute(
             select(OrderTrigger).where(
                 OrderTrigger.is_live == True,
@@ -1425,14 +1589,12 @@ class LiveBroker(BaseBroker):
             ).order_by(desc(OrderTrigger.created_at)).limit(1)
         )
         t = res.scalars().first()
-        sl = t.stop_loss if t and t.stop_loss else round(entry * (1.0 - settings.DEFAULT_STOP_LOSS_PCT), 2)
-        tp = t.take_profit if t and t.take_profit else round(entry * (1.0 + settings.DEFAULT_TAKE_PROFIT_PCT), 2)
-        return sl, tp
+        return (t.stop_loss, t.take_profit) if t else (None, None)
 
-    async def sync_account_state(self, adopt_only: bool = False) -> Dict[str, Any]:
+    async def sync_account_state(self) -> Dict[str, Any]:
         """
-        Polls broker API (IBKR / Alpaca) for live account values and positions,
-        and aligns the local database snapshot. adopt_only (periodic use) never closes local positions.
+        Polls broker API (IBKR / Alpaca) for live account values and positions, and aligns the local database:
+        adopts holdings the bot never booked and books a SELL for positions the broker no longer holds.
         """
         logger.info(f"Syncing account state with {settings.LIVE_BROKER.upper()}...")
         broker = settings.LIVE_BROKER.lower()
@@ -1456,6 +1618,7 @@ class LiveBroker(BaseBroker):
 
                     ib_keys = set()
                     adopted = []
+                    stops_to_place = []
                     for p in ib_positions:
                         sym = p.contract.symbol.upper()
                         shares = float(p.position)
@@ -1477,11 +1640,11 @@ class LiveBroker(BaseBroker):
                                     pos.cost_basis_eur *= shares / pos.shares
                                 pos.shares = shares
                             if not pos.stop_loss_native or not pos.take_profit_native:
-                                sl, tp = await self._planned_levels(session, sym, pos.entry_price_native or cost_native)
+                                sl, tp = await self._planned_levels(session, sym)
                                 pos.stop_loss_native = pos.stop_loss_native or sl
                                 pos.take_profit_native = pos.take_profit_native or tp
                         else:
-                            sl, tp = await self._planned_levels(session, sym, cost_native)
+                            sl, tp = await self._planned_levels(session, sym)
                             # IBKR avgCost already includes commission; sum the session's BUY commissions for fees_eur.
                             # shortcut: ib.fills() only covers this gateway session, so older adoptions keep fees 0; upgrade via reqExecutions.
                             fees_eur = sum(
@@ -1508,11 +1671,20 @@ class LiveBroker(BaseBroker):
                                 is_live=True
                             )
                             session.add(new_pos)
-                            adopted.append(f"{shares:g} {sym} @ {cost_native:.2f} {curr_code} | SL {sl} | TP {tp}")
+                            if sl:
+                                adopted.append(f"{shares:g} {sym} @ {cost_native:.2f} {curr_code} | SL {sl} | TP {tp}")
+                                stops_to_place.append((sym, curr_code, shares, sl))
+                            else:
+                                adopted.append(f"{shares:g} {sym} @ {cost_native:.2f} {curr_code} | no bot trigger: tracked only, the bot never sells it")
 
-                    for key, pos in existing_live.items():
-                        if key not in ib_keys and not adopt_only:
-                            pos.status = "CLOSED"
+                    # ib.positions() can be briefly empty after a reconnect: only a fresh broker answer may close a position
+                    gone = [pos for key, pos in existing_live.items() if key not in ib_keys]
+                    if gone:
+                        held = {
+                            (bp.contract.symbol.upper(), (bp.contract.currency or "USD").upper())
+                            for bp in await ib.reqPositionsAsync() if float(bp.position) > 0
+                        }
+                        gone = [pos for pos in gone if (pos.ticker.upper().split(".")[0], (pos.currency or "USD").upper()) not in held]
 
                     if ib_cash is not None:
                         equity_val = ib_equity if ib_equity is not None else 0.0
@@ -1528,6 +1700,13 @@ class LiveBroker(BaseBroker):
                         )
                         session.add(snapshot)
                     await session.commit()
+                for pos in gone:
+                    await self.execute_sell(
+                        pos.ticker, reason="Closed at IBKR (stop/target leg or manual sale)",
+                        broker_flat=True, exit_price_native=self._last_sell_fill(ib, pos.ticker, pos.currency),
+                    )
+                for stop_args in stops_to_place:
+                    await self._move_broker_stop(*stop_args)
                 for a in adopted:
                     logger.warning(f"Adopted untracked IBKR holding: {a}")
                     try:

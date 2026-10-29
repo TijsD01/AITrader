@@ -104,12 +104,27 @@ async def test_ibkr_bracket_tif_explicit():
         reqContractDetailsAsync=AsyncMock(return_value=[SimpleNamespace(validExchanges="SMART", marketRuleIds="26")]),
         reqMarketRuleAsync=AsyncMock(return_value=[SimpleNamespace(lowEdge=0.0, increment=0.01)]),
         bracketOrder=lambda **kw: bracket,
-        placeOrder=lambda c, o: placed.append(o) or SimpleNamespace(order=o, orderStatus=SimpleNamespace(status="Submitted"), log=[]),
+        placeOrder=lambda c, o: placed.append(o) or SimpleNamespace(
+            order=o, orderStatus=SimpleNamespace(status="Filled", filled=1.0, avgFillPrice=220.4), log=[]),
     )
     broker = LiveBroker()
     with patch.object(settings, "LIVE_BROKER", "ibkr"), patch.object(broker, "_get_ib", AsyncMock(return_value=ib)):
-        assert await broker._dispatch_real_order("NVDA", 1, 220.5, "USD", 215.0, 230.0) == "ibkr_0"
+        assert await broker._dispatch_real_order("NVDA", 1, 220.5, "USD", 215.0, 230.0) == ("ibkr_0", 1.0, 220.4)
     assert [o.tif for o in placed] == ["DAY", "GTC", "GTC"]
+
+
+@pytest.mark.asyncio
+async def test_unfilled_entry_is_cancelled_and_partial_fill_kept():
+    status = SimpleNamespace(status="Submitted", filled=0.0, avgFillPrice=0.0)
+    trade = SimpleNamespace(order=SimpleNamespace(orderId=7), orderStatus=status)
+
+    def cancel(order):
+        status.status, status.filled, status.avgFillPrice = "Cancelled", 2.0, 99.5
+
+    cancelled = []
+    ib = SimpleNamespace(cancelOrder=lambda o: cancelled.append(o) or cancel(o))
+    assert await LiveBroker._await_entry_fill(ib, trade, timeout=0.3) == (2.0, 99.5)
+    assert cancelled == [trade.order]
 
 
 def test_round_to_tick_follows_price_band():
@@ -121,3 +136,26 @@ def test_round_to_tick_follows_price_band():
     assert round_to_tick(150.03, euronext) in (150.02, 150.04)
     assert round_to_tick(12.3456, euronext) == 12.346
     assert round_to_tick(220.5, []) == 220.5
+
+
+@pytest.mark.asyncio
+async def test_raised_stop_moves_the_ibkr_stop_order():
+    placed = []
+    contract = SimpleNamespace(symbol="NVDA", currency="USD", primaryExchange="NASDAQ")
+    stop_leg = SimpleNamespace(contract=contract, order=SimpleNamespace(action="SELL", orderType="STP", auxPrice=95.0))
+    tp_leg = SimpleNamespace(contract=contract, order=SimpleNamespace(action="SELL", orderType="LMT", auxPrice=0.0))
+    ib = SimpleNamespace(
+        isConnected=lambda: True,
+        openTrades=lambda: [tp_leg, stop_leg],
+        reqContractDetailsAsync=AsyncMock(return_value=[SimpleNamespace(validExchanges="SMART", marketRuleIds="26")]),
+        reqMarketRuleAsync=AsyncMock(return_value=[SimpleNamespace(lowEdge=0.0, increment=0.01)]),
+        placeOrder=lambda c, o: placed.append(o),
+    )
+    broker = LiveBroker()
+    with patch.object(settings, "LIVE_BROKER", "ibkr"), patch.object(broker, "_get_ib", AsyncMock(return_value=ib)):
+        await broker._move_broker_stop("NVDA", "USD", 2, 101.004)
+        assert placed == [stop_leg.order] and stop_leg.order.auxPrice == 101.0
+        # A lone take-profit leg: no separate stop, it would sit outside the OCA group
+        ib.openTrades = lambda: [tp_leg]
+        await broker._move_broker_stop("NVDA", "USD", 2, 102.0)
+        assert len(placed) == 1

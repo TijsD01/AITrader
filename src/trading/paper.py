@@ -3,7 +3,7 @@ import datetime
 import asyncio
 import time
 from typing import Dict, Any, List, Optional
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, func
 
 from config.settings import settings
 from src.db.models import Position, Trade, PortfolioSnapshot, SystemConfig, OrderTrigger
@@ -64,7 +64,7 @@ class PaperBroker(BaseBroker):
             pending_alloc = sum(t.allocation_eur for t in pending_triggers)
 
             cash = snapshot.cash_eur if snapshot else settings.INITIAL_PAPER_CAPITAL
-            usable_cash, protected_reserve = get_effective_deployable_cash(cash)
+            usable_cash, protected_reserve = get_effective_deployable_cash(cash, invested_eur=sum(p.cost_basis_eur or 0.0 for p in positions))
             available_cash = max(0.0, usable_cash - pending_alloc)
             equity = sum(round(p.current_price_eur * p.shares, 2) for p in positions)
             total_val = round(cash + equity, 2)
@@ -161,7 +161,7 @@ class PaperBroker(BaseBroker):
             )
             snapshot = snap_res.scalars().first()
             cash_eur = snapshot.cash_eur if snapshot else settings.INITIAL_PAPER_CAPITAL
-            usable_cash, _ = get_effective_deployable_cash(cash_eur)
+            usable_cash, _ = get_effective_deployable_cash(cash_eur, invested_eur=sum(p.cost_basis_eur or 0.0 for p in open_positions))
             equity_eur = sum(p.current_price_eur * p.shares for p in open_positions)
             total_eur = cash_eur + equity_eur
 
@@ -615,7 +615,10 @@ class PaperBroker(BaseBroker):
             )
             snapshot = snap_res.scalars().first()
             cash_eur = snapshot.cash_eur if snapshot else settings.INITIAL_PAPER_CAPITAL
-            usable_cash, _ = get_effective_deployable_cash(cash_eur)
+            invested = (await session.execute(
+                select(func.coalesce(func.sum(Position.cost_basis_eur), 0.0)).where(Position.status == "OPEN", Position.is_live == False)
+            )).scalar()
+            usable_cash, _ = get_effective_deployable_cash(cash_eur, invested_eur=invested)
 
             pending_res = await session.execute(select(OrderTrigger).where(OrderTrigger.status == "PENDING", OrderTrigger.is_live == False))
             pending_triggers = pending_res.scalars().all()
@@ -746,7 +749,7 @@ class PaperBroker(BaseBroker):
         )
         snapshot = snap_res.scalars().first()
         cash_eur = snapshot.cash_eur if snapshot else settings.INITIAL_PAPER_CAPITAL
-        usable_cash, _ = get_effective_deployable_cash(cash_eur)
+        usable_cash, _ = get_effective_deployable_cash(cash_eur, invested_eur=sum(p.cost_basis_eur or 0.0 for p in positions))
         portfolio_value = cash_eur + sum(p.current_price_eur * p.shares for p in positions)
         # Same ranking adjust_triggers_dynamically applies before the dashboard shows or a trigger fires
         allocations = allocate_pending_triggers(usable_cash, len(positions), pending, portfolio_value_eur=portfolio_value)
@@ -807,7 +810,7 @@ class PaperBroker(BaseBroker):
             )
             snapshot = snap_res.scalars().first()
             cash_eur = snapshot.cash_eur if snapshot else settings.INITIAL_PAPER_CAPITAL
-            usable_cash, _ = get_effective_deployable_cash(cash_eur)
+            usable_cash, _ = get_effective_deployable_cash(cash_eur, invested_eur=sum(p.cost_basis_eur or 0.0 for p in open_positions))
 
             allocations = allocate_pending_triggers(
                 usable_cash, current_open, pending,

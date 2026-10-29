@@ -136,7 +136,8 @@ async def init_db():
                 pass
         if "POSITION_SIZE_PCT" in db_configs:
             try:
-                settings.POSITION_SIZE_PCT = float(db_configs["POSITION_SIZE_PCT"])
+                # Cap stale DB values (e.g. old 0.55 from the 100% slider); matches web endpoint cap
+                settings.POSITION_SIZE_PCT = min(0.15, float(db_configs["POSITION_SIZE_PCT"]))
             except Exception:
                 pass
         if "ENFORCE_MARKET_HOURS" in db_configs:

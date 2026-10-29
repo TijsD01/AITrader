@@ -22,7 +22,7 @@ async def test_settings_persistence_cycle():
         test_payload = {
             "auto_buy_enabled": False,
             "min_consensus_score": 77,
-            "position_size_pct": 0.25,
+            "position_size_pct": 0.12,
             "max_positions": 5,
             "enforce_market_hours": False,
             "ibkr_host": "172.17.0.2",
@@ -37,7 +37,7 @@ async def test_settings_persistence_cycle():
         # 3. Verify in-memory settings singleton was updated
         assert settings.AUTO_BUY_ENABLED is False
         assert settings.MIN_CONSENSUS_SCORE == 77
-        assert abs(settings.POSITION_SIZE_PCT - 0.25) < 1e-4
+        assert abs(settings.POSITION_SIZE_PCT - 0.12) < 1e-4
         assert settings.MAX_POSITIONS == 5
         assert settings.ENFORCE_MARKET_HOURS is False
         assert settings.IBKR_HOST == "172.17.0.2"
@@ -51,7 +51,7 @@ async def test_settings_persistence_cycle():
             configs = {c.key: c.value for c in db_res.scalars().all()}
             assert configs["AUTO_BUY_ENABLED"] == "false"
             assert configs["MIN_CONSENSUS_SCORE"] == "77"
-            assert float(configs["POSITION_SIZE_PCT"]) == 0.25
+            assert float(configs["POSITION_SIZE_PCT"]) == 0.12
             assert configs["MAX_POSITIONS"] == "5"
             assert configs["ENFORCE_MARKET_HOURS"] == "false"
             assert configs["IBKR_HOST"] == "172.17.0.2"
@@ -65,7 +65,7 @@ async def test_settings_persistence_cycle():
         after_data = get_after.json()
         assert after_data["auto_buy_enabled"] is False
         assert after_data["min_consensus_score"] == 77
-        assert abs(after_data["position_size_pct"] - 0.25) < 1e-4
+        assert abs(after_data["position_size_pct"] - 0.12) < 1e-4
         assert after_data["max_positions"] == 5
         assert after_data["enforce_market_hours"] is False
         assert after_data["ibkr_host"] == "172.17.0.2"

@@ -240,6 +240,8 @@ async def _analyze(req: AnalyzeRequest):
         session.add(entry)
         await session.commit()
 
+    from src.trading.shadow import shadow_portfolios
+    await shadow_portfolios.follow_report(report, data, followed_main=False)
     return report
 
 # 4. Market Screener
@@ -562,7 +564,7 @@ async def update_settings(req: SettingsUpdateRequest):
             env_updates["TRIGGER_MIN_SCORE"] = int(req.trigger_min_score)
 
         if req.position_size_pct is not None:
-            pos_val = max(0.01, min(1.0, float(req.position_size_pct)))
+            pos_val = max(0.01, min(0.15, float(req.position_size_pct)))
             res = await session.execute(select(SystemConfig).where(SystemConfig.key == "POSITION_SIZE_PCT"))
             cfg = res.scalars().first()
             val = str(pos_val)

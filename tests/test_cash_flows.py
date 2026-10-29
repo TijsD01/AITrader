@@ -29,6 +29,10 @@ def test_detect_flow_tells_deposits_from_trades():
     assert detect_flow(base, _snap(1000.0, 5400.0), min_eur=100) is None
     # Small dividend stays gain
     assert detect_flow(base, _snap(1020.0, 5020.0), min_eur=100) is None
+    # €1,000 deposit plus a booked €800 buy between two snapshots: cash shows only +200, the deposit is still 1000
+    assert detect_flow(base, _snap(1200.0, 6000.0), min_eur=100, traded_cash_eur=800.0) == 1000.0
+    # The bot's own buy alone is no flow
+    assert detect_flow(base, _snap(200.0, 4995.0), min_eur=100, traded_cash_eur=800.0) is None
 
 
 async def _fresh_live_history():

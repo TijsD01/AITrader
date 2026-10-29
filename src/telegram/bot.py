@@ -1045,6 +1045,7 @@ class TelegramAssistant:
 
                 # Auto-arm only what the trigger gate allows: a buy verdict the Risk Officer approved, at or above the threshold
                 auto_armed_note = ""
+                armed = False
                 trigger_min_score = await get_trigger_min_score()
                 verdict = evaluate_trigger_verdict(report, trigger_min_score)
                 if verdict.allowed:
@@ -1065,6 +1066,7 @@ class TelegramAssistant:
                     if blocked is None:
                         trig_res = await self._arm_trigger_from_report(target_ticker, data, report, available_cash, plan=plan)
                         if trig_res.get("success"):
+                            armed = True
                             dist_pct = round(((trig_res["target_price"] / data["price"]) - 1.0) * 100, 1)
                             auto_armed_note = (
                                 f"\n\n🎯 <b>AUTOMATIC TRIGGER ARMED #{trig_res['trigger_id']}:</b>\n"
@@ -1086,6 +1088,9 @@ class TelegramAssistant:
                     # A score that would have armed a trigger, held back by the verdict (HOLD, SELL, Risk Officer veto).
                     # A score below the threshold is simply not high enough, which needs no comment.
                     auto_armed_note = f"\n\n🚫 <i>Not auto-armed: {html.escape(verdict.message)}</i>"
+
+                from src.trading.shadow import shadow_portfolios
+                await shadow_portfolios.follow_report(report, data, followed_main=armed)
 
                 tech = report.get('technical', {})
                 fund = report.get('fundamental', {})
@@ -1385,7 +1390,7 @@ class TelegramAssistant:
                             return default
 
                     min_score = _cast(p.get("min_consensus_score") or p.get("MIN_CONSENSUS_SCORE"), int, 70)
-                    pos_size = _cast(p.get("position_size_pct") or p.get("POSITION_SIZE_PCT"), float, 0.08)
+                    pos_size = settings.POSITION_SIZE_PCT  # calibration no longer returns it
                     atr_mult = _cast(p.get("atr_stop_multiplier") or p.get("ATR_STOP_MULTIPLIER"), float, 1.75)
                     tp_rr = _cast(p.get("take_profit_rr") or p.get("TAKE_PROFIT_RR"), float, 2.1)
                     adjustments = "\n".join([f"• {html.escape(str(a))}" for a in cal_res.get("adjustments", [])]) or "• All parameters remain within optimal bounds."

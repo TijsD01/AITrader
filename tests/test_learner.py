@@ -72,8 +72,9 @@ async def test_trade_post_mortem_win_and_loss():
         assert "ATR stop multiplier" in res_loss["lesson"] or "stop" in res_loss["lesson"].lower()
 
 @pytest.mark.asyncio
-async def test_autonomous_parameter_calibration():
+async def test_autonomous_parameter_calibration(monkeypatch):
     await init_db()
+    monkeypatch.setattr(settings, "LEARNER_MIN_TRADES", 3)
 
     # Insert 3 consecutive losing trades
     async with AsyncSessionLocal() as session:
@@ -97,6 +98,9 @@ async def test_autonomous_parameter_calibration():
 
     # Calibrate parameters
     before_size = settings.POSITION_SIZE_PCT
+    async with AsyncSessionLocal() as session:
+        before_row = (await session.execute(select(SystemConfig).where(SystemConfig.key == "POSITION_SIZE_PCT"))).scalars().first()
+        before_db = before_row.value if before_row else None
     cal_res = await trade_learner.calibrate_internal_parameters()
     assert cal_res["success"] is True
     assert cal_res["consecutive_losses"] >= 3
@@ -106,10 +110,10 @@ async def test_autonomous_parameter_calibration():
     # position size is manual and untouched by calibration
     p = cal_res["calibrated_parameters"]
     assert p["min_consensus_score"] >= 75
-    assert p["position_size_pct"] == before_size
+    assert "position_size_pct" not in p and "POSITION_SIZE_PCT" not in p
     async with AsyncSessionLocal() as session:
         row = (await session.execute(select(SystemConfig).where(SystemConfig.key == "POSITION_SIZE_PCT"))).scalars().first()
-        assert row is None or row.value == str(before_size)
+        assert (row.value if row else None) == before_db
     assert settings.POSITION_SIZE_PCT == before_size
     assert not any("sizing" in a.lower() for a in cal_res["adjustments"])
     assert p["atr_stop_multiplier"] >= 1.75
