@@ -552,7 +552,7 @@ class LiveBroker(BaseBroker):
 
             # Automated buys risk the same share of their slot (or portfolio, per RISK_BUDGET_BASE) at their stop
             if not is_manual:
-                allocation_eur = risk_capped_allocation(allocation_eur, price_native, stop_loss_native, total_eur)
+                allocation_eur = risk_capped_allocation(allocation_eur, price_native, stop_loss_native, total_eur, available_cash)
 
             # A share that costs more than the (capped) budget still gets bought when it fits the free cash (same rule as plan_buy)
             if settings.WHOLE_SHARES_ONLY:

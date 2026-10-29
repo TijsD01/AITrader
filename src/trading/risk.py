@@ -385,19 +385,24 @@ def risk_capped_allocation(
     allocation_eur: float,
     price_native: Optional[float],
     stop_loss_native: Optional[float],
-    portfolio_value_eur: float
+    portfolio_value_eur: float,
+    free_cash_eur: Optional[float] = None
 ) -> float:
     """
     The main bot's risk cap on an automated buy, measured as RISK_BUDGET_BASE says:
     "slot" keeps the full slot for a stop up to DEFAULT_STOP_LOSS_PCT away and scales a wider stop down,
     so every trade risks the same share of its slot; "portfolio" applies RISK_PER_TRADE_PCT of the
     portfolio (apply_risk_budget); "off" (or RISK_PER_TRADE_PCT = 0) leaves the allocation as is.
+    In "slot" mode a buy that already takes all free cash (free_cash_eur, e.g. the last free slot) keeps it:
+    the cash the cap would cut off has no other slot to go to.
     """
     base = (settings.RISK_BUDGET_BASE or "slot").strip().lower()
     if base == "off" or not settings.RISK_PER_TRADE_PCT or settings.RISK_PER_TRADE_PCT <= 0:
         return allocation_eur
     if base == "portfolio":
         return apply_risk_budget(allocation_eur, price_native, stop_loss_native, portfolio_value_eur)
+    if free_cash_eur is not None and free_cash_eur > 0 and abs(allocation_eur - free_cash_eur) <= 0.01:
+        return allocation_eur
     if not price_native or price_native <= 0 or not stop_loss_native:
         return allocation_eur
     stop_distance = (price_native - stop_loss_native) / price_native
@@ -421,7 +426,7 @@ def plan_buy(
     use this same sequence, so they show the same budget and share count.
     """
     from src.data.currency import currency_service
-    budget = risk_capped_allocation(allocation_eur, price_native, stop_loss_native, portfolio_value_eur) if automated else allocation_eur
+    budget = risk_capped_allocation(allocation_eur, price_native, stop_loss_native, portfolio_value_eur, max_eur) if automated else allocation_eur
     price_eur = currency_service.to_eur(price_native, currency) if price_native else 0.0
     if not budget or budget <= 0 or price_eur <= 0:
         shares = 0.0

@@ -79,7 +79,16 @@ def test_planned_buy_rounds_to_whole_shares_within_free_cash(two_slots):
     assert (plan["shares"], plan["cost_eur"], plan["risk_capped"]) == (2.0, 180.0, False)
     # Manual buys skip the risk cap
     assert plan_buy(250.0, 90.0, "EUR", 45.0, 500.0, max_eur=250.0, automated=False)["shares"] == 2.0
-    assert plan_buy(250.0, 90.0, "EUR", 45.0, 500.0, max_eur=250.0)["risk_capped"] is True
+    assert plan_buy(250.0, 90.0, "EUR", 45.0, 500.0, max_eur=500.0)["risk_capped"] is True
+
+
+def test_slot_risk_cap_skipped_when_the_buy_takes_all_free_cash(two_slots):
+    # One position open, MAX_POSITIONS 2: the last slot gets all €240, also with a wide (~7%) stop
+    assert risk_capped_allocation(240.0, 100.0, 93.0, 600.0) < 240.0
+    assert risk_capped_allocation(240.0, 100.0, 93.0, 600.0, free_cash_eur=240.0) == 240.0
+    assert risk_capped_allocation(240.0, 100.0, 93.0, 600.0, free_cash_eur=480.0) < 240.0  # cash left for another slot
+    plan = plan_buy(240.0, 206.0, "EUR", 191.6, 600.0, max_eur=240.0)
+    assert (plan["budget_eur"], plan["risk_capped"], plan["shares"]) == (240.0, False, 1.0)
 
 
 def _unique(prefix: str) -> str:
