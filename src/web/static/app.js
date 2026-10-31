@@ -1161,7 +1161,7 @@ async function loadBrokerStatus(force = false) {
     const diagMsg = document.getElementById('diagBrokerMessage');
 
     if (diagName) {
-      diagName.textContent = brokerName === 'IBKR' ? 'IBKR (Interactive Brokers)' : (brokerName === 'ALPACA' ? 'Alpaca Markets' : 'Paper Trading Engine');
+      diagName.textContent = brokerName === 'IBKR' ? 'IBKR (Interactive Brokers)' : (brokerName === 'TRADING212' ? 'Trading 212' : (brokerName === 'ALPACA' ? 'Alpaca Markets' : 'Paper Trading Engine'));
     }
     if (diagDot && diagText) {
       if (isConnected) {
