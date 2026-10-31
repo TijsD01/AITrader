@@ -1,7 +1,7 @@
 """
 Broker Fee and Commission Modeling for the Multi-Agent Trading System.
-Provides detailed transaction cost calculations for Interactive Brokers (IBKR)
-and Alpaca, enforcing economic viability guardrails to prevent fee drag
+Provides detailed transaction cost calculations for Interactive Brokers (IBKR),
+Trading 212 and Alpaca, enforcing economic viability guardrails to prevent fee drag
 from destroying portfolio returns on small accounts.
 """
 
@@ -53,6 +53,7 @@ def calculate_broker_fee(
     
     Supported Brokers:
       - IBKR (Interactive Brokers): Supports 'tiered' (default) and 'fixed' pricing for EU and US equities.
+      - Trading 212: no commission, 0.15% FX fee on non-EUR instruments.
       - Alpaca: Commission-free US equities (SEC/FINRA regulatory fees on sell only).
     """
     broker_name = (broker or settings.LIVE_BROKER or "ibkr").lower()
@@ -122,6 +123,15 @@ def calculate_broker_fee(
                 fee_native = round(min(total_usd, max(1.00, trade_value_native * 0.01)), 2)
                 breakdown = f"IBKR US Fixed (min $1.00 or $0.005/sh)"
             fee_eur = round(currency_service.to_eur(fee_native, curr if curr != "EUR" else "USD"), 2)
+
+    elif broker_name == "trading212":
+        # Trading 212 Invest: no commission; 0.15% FX fee if instrument currency != EUR (buy and sell)
+        fx = trade_value_native * 0.0015 if curr != "EUR" else 0.0
+        ftt = trade_value_native * 0.004 if (ticker.upper().endswith(".PA") and action == "BUY") else 0.0
+        stamp = trade_value_native * 0.005 if ((ticker.upper().endswith(".L") or curr == "GBP") and action == "BUY") else 0.0
+        fee_native = round(fx + ftt + stamp, 2)
+        fee_eur = round(currency_service.to_eur(fee_native, curr), 2)
+        breakdown = "Trading 212 (€0 commission + 0.15% FX)" + (f" + {ftt:.2f} FTT" if ftt else "") + (f" + {stamp:.2f} SDRT" if stamp else "")
 
     elif broker_name == "alpaca":
         # Alpaca: Zero commission US equities; small regulatory fee on sells
@@ -231,6 +241,8 @@ def get_min_viable_order_eur(
             configured_min = getattr(settings, "MIN_ORDER_EUR_IBKR_US", 35.0)
             calculated_min = round(rt_min_eur / (max_drag / 100.0), 2)
             return max(configured_min, calculated_min)
+    elif broker_name == "trading212":
+        return 1.0  # fractional, no commission minimum
     elif broker_name == "alpaca":
         return 20.0
     return 50.0
@@ -251,6 +263,7 @@ def evaluate_trade_economic_viability(
     Evaluates whether a trade is economically viable after factoring in broker fees.
     Ensures that broker commissions do not exceed or excessively erode expected gains.
     """
+    label = (broker or settings.LIVE_BROKER or "ibkr").upper()
     if allocation_eur <= 0 or price_native <= 0:
         return {
             "viable": False,
@@ -310,7 +323,7 @@ def evaluate_trade_economic_viability(
     # 1. Total round-trip fees exceed gross target profit (guaranteed loss on winner)
     if net_profit_eur <= 0:
         msg = (
-            f"Trade economically non-viable: Estimated IBKR round-trip fees (€{rt_fee_eur:.2f}) "
+            f"Trade economically non-viable: Estimated {label} round-trip fees (€{rt_fee_eur:.2f}) "
             f"exceed total target profit (€{gross_profit_eur:.2f}). Net outcome would be -€{abs(net_profit_eur):.2f}. "
             f"Min viable order for {ticker} is €{min_viable_alloc:.2f}."
         )
@@ -330,7 +343,7 @@ def evaluate_trade_economic_viability(
     # 2. Excessive fee drag (> max_drag %)
     if drag_pct > max_drag:
         msg = (
-            f"Excessive fee drag: IBKR round-trip commission (€{rt_fee_eur:.2f}, {drag_pct:.1f}% of order) "
+            f"Excessive fee drag: {label} round-trip commission (€{rt_fee_eur:.2f}, {drag_pct:.1f}% of order) "
             f"exceeds limit ({max_drag}%). Sizing too small for broker fees. "
             f"Min viable order for {ticker} is €{min_viable_alloc:.2f}."
         )

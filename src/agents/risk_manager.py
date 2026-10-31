@@ -127,6 +127,7 @@ class RiskManagerAgent:
         rt_drag_pct = rt_info["round_trip_drag_pct"]
 
         max_drag = getattr(settings, "MAX_FEE_DRAG_PCT", 3.8)
+        broker_label = (settings.LIVE_BROKER or "ibkr").upper()
         viability = evaluate_trade_economic_viability(
             ticker=ticker,
             allocation_eur=est_alloc_eur,
@@ -146,9 +147,9 @@ class RiskManagerAgent:
             risk_flags.append(viability["reason"])
         elif rt_drag_pct > max_drag:
             approved = False
-            risk_flags.append(f"Excessive IBKR fee drag ({rt_drag_pct:.1f}% on est. €{est_alloc_eur:.0f} size > {max_drag}%)")
+            risk_flags.append(f"Excessive {broker_label} fee drag ({rt_drag_pct:.1f}% on est. €{est_alloc_eur:.0f} size > {max_drag}%)")
         elif rt_drag_pct > 2.5:
-            risk_flags.append(f"Elevated IBKR fee drag ({rt_drag_pct:.1f}% on est. €{est_alloc_eur:.0f} size)")
+            risk_flags.append(f"Elevated {broker_label} fee drag ({rt_drag_pct:.1f}% on est. €{est_alloc_eur:.0f} size)")
 
         if approved:
             summary = (
@@ -157,13 +158,13 @@ class RiskManagerAgent:
                 f"Stop-Loss anchored at {round(stop_loss, 2)} (-{risk_pct:.1f}% from entry), "
                 f"Take-Profit set at {take_profit} (+{round(((take_profit/entry)-1)*100, 1)}% from entry), "
                 f"delivering a favorable {rr_ratio}:1 reward-to-risk ratio. "
-                f"Est. IBKR round-trip commission: €{rt_fee_eur:.2f} ({rt_drag_pct:.1f}% drag)."
+                f"Est. {broker_label} round-trip commission: €{rt_fee_eur:.2f} ({rt_drag_pct:.1f}% drag)."
             )
         else:
             summary = (
                 f"Trade structure REJECTED by Risk Officer: {viability.get('reason', 'Excessive risk/fee drag')}. "
                 f"AI Trigger: {trigger_type} @ {entry_trigger_price}. "
-                f"Est. IBKR round-trip commission: €{rt_fee_eur:.2f} ({rt_drag_pct:.1f}% drag on est. €{est_alloc_eur:.0f} size)."
+                f"Est. {broker_label} round-trip commission: €{rt_fee_eur:.2f} ({rt_drag_pct:.1f}% drag on est. €{est_alloc_eur:.0f} size)."
             )
 
         return {
