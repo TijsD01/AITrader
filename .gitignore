@@ -62,4 +62,8 @@ logs/
 
 # Local agent tooling
 .agents/
-.claude/
+# Shared Claude Code setup is committed; personal overrides and local state are not
+.claude/*
+!.claude/settings.json
+!.claude/skills/
+.claude/settings.local.json
