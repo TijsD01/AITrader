@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 from typing import Optional
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     # withdrawal, so it does not show up as portfolio gain. Smaller changes (dividends, interest) stay gain.
     CASH_FLOW_MIN_EUR: float = 100.0
 
+    @model_validator(mode="after")
+    def _default_whole_shares(self):
+        if "WHOLE_SHARES_ONLY" not in self.model_fields_set and self.LIVE_BROKER.lower() == "trading212":
+            self.WHOLE_SHARES_ONLY = False
+        return self
+
     @field_validator("MAX_DEPLOYABLE_CAPITAL_EUR", mode="before")
     @classmethod
     def _parse_deployable_capital(cls, v):
@@ -88,7 +94,7 @@ class Settings(BaseSettings):
     TRADING_MODE: str = "PAPER"             # "PAPER" or "LIVE"
     LIVE_TRADING_ENABLED: bool = False      # Explicit safety interlock for real money
     FULL_BUDGET_UTILIZATION: bool = True    # Fully deploy available capital across active slots
-    LIVE_BROKER: str = "ibkr"               # "ibkr" (Interactive Brokers) or "alpaca"
+    LIVE_BROKER: str = "ibkr"               # "ibkr" (Interactive Brokers), "trading212" or "alpaca"
     KILL_SWITCH_ACTIVE: bool = False        # Emergency trading halt
     MAX_DAILY_LOSS_EUR: float = 500.0       # Daily drawdown stop: past it the kill switch turns on (buys halt, stops keep working)
     MAX_DAILY_LOSS_PCT: float = 3.0         # Same stop as % of account value; the lower of the two limits applies (0 = EUR only)
@@ -110,7 +116,9 @@ class Settings(BaseSettings):
     SENTIMENT_ANONYMIZE: bool = True        # Hide company name and ticker from the news-sentiment prompt
     SENTIMENT_VETO_SCORE: float = -0.4      # News sentiment at or below this blocks a buy; positive news adds nothing
     LEARNER_MIN_TRADES: int = 20            # Closed trades required between automatic learner recalibrations
-    WHOLE_SHARES_ONLY: bool = True          # Buy whole shares only: IBKR's API rejects fractional quantities (paper mirrors live)
+    # Buy whole shares only. Unset: on for IBKR (its API rejects fractional quantities, error 10243), off for Trading 212.
+    # Paper mirrors live.
+    WHOLE_SHARES_ONLY: bool = True
     WHOLE_SHARE_ROUND_UP_PCT: float = 10.0  # May round up to one extra share if that costs at most this % above the allocation
     MAX_POSITION_PCT: float = 60.0          # A position may grow past its slot (e.g. one share costs more) up to this % of portfolio value
 
@@ -124,6 +132,11 @@ class Settings(BaseSettings):
     MAX_PROFIT_EROSION_PCT: float = 48.0    # Max allowed profit consumed by commissions
     MIN_ORDER_EUR_IBKR_EU: float = 100.0    # Floor order size for European equities on IBKR
     MIN_ORDER_EUR_IBKR_US: float = 35.0     # Recommended min order for US equities on IBKR
+
+    # Trading 212 Config (Invest account; EU & US equities, fractional shares)
+    TRADING212_API_KEY: Optional[str] = None
+    TRADING212_API_SECRET: Optional[str] = None
+    TRADING212_DEMO: bool = True            # True = demo.trading212.com (practice money); False = live account
 
     # Alpaca Config (Supports US equities)
     ALPACA_API_KEY: Optional[str] = None

@@ -2,6 +2,7 @@ import logging
 import datetime
 import asyncio
 import time
+import httpx
 from typing import Dict, Any, List, Optional, Tuple
 from sqlalchemy import select, desc, func
 
@@ -14,6 +15,7 @@ from src.trading.risk import risk_guardrail, get_effective_deployable_cash, allo
 from src.data.market_hours import check_market_hours
 from src.trading.base import BaseBroker
 from src.trading.cash_flows import scan_live_cash_flows, net_cash_flows_eur
+from src.trading import trading212
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,8 @@ class LiveBroker(BaseBroker):
         self._connection_check_ttl: float = 15.0  # 15s cache to prevent socket churn
         self._last_connection_status: Optional[Dict[str, Any]] = None
         self._connection_lock = asyncio.Lock()
+        # Trading 212: a sync must not adopt the shares of a buy that is still in flight
+        self._t212_lock = asyncio.Lock()
 
     def _on_ib_disconnected(self):
         logger.warning("IBKR connection dropped.")
@@ -174,9 +178,9 @@ class LiveBroker(BaseBroker):
         take_profit: Optional[float]
     ) -> Optional[Tuple[str, float, float]]:
         """
-        Dispatches live bracket order to configured broker API (IBKR or Alpaca).
+        Dispatches live entry order to configured broker API (IBKR, Trading 212 or Alpaca).
         Returns (broker order ID, filled shares, average fill price), or None when not placed.
-        An IBKR entry that has not filled within FILL_WAIT_SECONDS is cancelled, so only filled shares get booked.
+        An IBKR or Trading 212 entry that has not filled within FILL_WAIT_SECONDS is cancelled, so only filled shares get booked.
         """
         broker = settings.LIVE_BROKER.lower()
         if broker == "ibkr":
@@ -231,6 +235,11 @@ class LiveBroker(BaseBroker):
                     return f"alpaca_{resp.id}", shares, price
             except Exception as e:
                 logger.info(f"Alpaca communication note: {e}")
+        elif broker == "trading212":
+            try:
+                return await self._t212_buy(ticker, shares, price, currency, stop_loss)
+            except Exception as e:
+                logger.error(f"Trading 212 BUY {ticker} failed: {e}")
         return None
 
     @staticmethod
@@ -246,6 +255,12 @@ class LiveBroker(BaseBroker):
         Puts the bot's stop on the resting IBKR stop order (or places a GTC stop when the symbol has no SELL order),
         so the position keeps its raised stop while the bot or gateway is offline.
         """
+        if settings.LIVE_BROKER.lower() == "trading212":
+            try:
+                await self._t212_move_stop(ticker, currency, shares, stop)
+            except Exception as e:
+                logger.warning(f"Trading 212 stop update for {ticker} failed: {e}")
+            return
         if settings.LIVE_BROKER.lower() != "ibkr":
             return
         try:
@@ -316,6 +331,310 @@ class LiveBroker(BaseBroker):
             if status in ("PreSubmitted", "Submitted", "Filled") or loop.time() >= deadline:
                 return None
             await asyncio.sleep(0.2)
+
+    # ---- Trading 212 (REST API v0, see src/trading/trading212.py) ----
+
+    @staticmethod
+    def _t212_price(price: float) -> float:
+        return round(price, 2 if price >= 1 else 4)
+
+    @staticmethod
+    def _t212_sells(orders: List[Dict[str, Any]], t212_ticker: str) -> List[Dict[str, Any]]:
+        return [o for o in orders if o.get("ticker") == t212_ticker and (o.get("side") == "SELL" or float(o.get("quantity") or 0) < 0)]
+
+    @staticmethod
+    async def _t212_wait_gone(client: Any, order_ids: List[int], tries: int = 5) -> bool:
+        """Polls each order about once per second (the endpoint allows 1 req/s) until it is no longer pending."""
+        for oid in order_ids:
+            for attempt in range(tries):
+                if await client.get_order(oid) is None:
+                    break
+                if attempt == tries - 1:
+                    return False
+                await asyncio.sleep(1.0)
+        return True
+
+    @staticmethod
+    async def _t212_fills(client: Any, t212_ticker: str, order_id: int, tries: int = 3) -> Tuple[float, float, Optional[str]]:
+        """
+        (filled quantity, average fill price, final status in history) of one order;
+        retries because history can lag the fill.
+        """
+        status = None
+        for attempt in range(tries):
+            items = [i for i in await client.history_orders(t212_ticker) if (i.get("order") or {}).get("id") == order_id]
+            fills = [i["fill"] for i in items if i.get("fill") and float(i["fill"].get("quantity") or 0)]
+            if fills:
+                qty = sum(abs(float(f["quantity"])) for f in fills)
+                return qty, sum(abs(float(f["quantity"])) * float(f["price"]) for f in fills) / qty, items[0]["order"].get("status")
+            status = next((i["order"].get("status") for i in items if i["order"].get("status") in ("CANCELLED", "REJECTED")), None)
+            if status or attempt == tries - 1:
+                break
+            await asyncio.sleep(3.0)  # history allows 20 req/min
+        return 0.0, 0.0, status
+
+    @staticmethod
+    def _t212_ambiguous(e: Exception) -> bool:
+        """POST errors after which the order may still exist at T212: transport failures, 408 and 5xx."""
+        return isinstance(e, httpx.TransportError) or (
+            isinstance(e, trading212.Trading212Error) and (e.status == 408 or e.status >= 500)
+        )
+
+    @staticmethod
+    async def _t212_find_recent(client: Any, t212_ticker: str, quantity: float, since: datetime.datetime) -> Optional[Dict[str, Any]]:
+        """After an ambiguous POST error: the order placed just now (pending or already in history), else None."""
+        orders = await client.pending_orders() + [i["order"] for i in await client.history_orders(t212_ticker) if i.get("order")]
+        for o in orders:
+            created = o.get("createdAt")
+            if o.get("ticker") == t212_ticker and abs(float(o.get("quantity") or 0) - quantity) < 1e-6 and created \
+                    and datetime.datetime.fromisoformat(created.replace("Z", "+00:00")) >= since - datetime.timedelta(seconds=60):
+                return o
+        return None
+
+    async def _t212_post(self, client: Any, place: Any, t212_ticker: str, quantity: float, what: str) -> Optional[Dict[str, Any]]:
+        """Sends one order POST. After an ambiguous error it looks the order up instead: order POSTs are not idempotent."""
+        sent_at = datetime.datetime.now(datetime.timezone.utc)
+        try:
+            return await place()
+        except Exception as e:
+            if not self._t212_ambiguous(e):
+                raise
+            order = await self._t212_find_recent(client, t212_ticker, quantity, sent_at)
+            if not order:
+                logger.error(f"Trading 212 {what} failed ({type(e).__name__}: {e}) and no order was found.")
+                return None
+            logger.warning(f"Trading 212 {what} failed ({type(e).__name__}) but order {order.get('id')} exists; following it.")
+            return order
+
+    @staticmethod
+    async def _t212_follow(client: Any, oid: int, status: Optional[str]) -> Tuple[Optional[str], bool]:
+        """Polls an order about once per second for up to FILL_WAIT_SECONDS. Returns (last status, no longer pending)."""
+        done = status in ("FILLED", "CANCELLED", "REJECTED")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + FILL_WAIT_SECONDS
+        try:
+            while not done and loop.time() < deadline:
+                await asyncio.sleep(1.0)
+                pending = await client.get_order(oid)
+                status = pending.get("status") if pending else status
+                done = pending is None or status in ("FILLED", "CANCELLED", "REJECTED")
+        except Exception as e:
+            logger.warning(f"Trading 212 order {oid} status poll failed: {e}")
+        return status, done
+
+    async def _t212_cancel(self, client: Any, oid: int) -> bool:
+        """Cancels an order and waits until it is gone; False when that is not confirmed."""
+        try:
+            await client.cancel_order(oid)
+            return await self._t212_wait_gone(client, [oid])
+        except Exception as e:
+            logger.warning(f"Trading 212 cancel of order {oid} failed: {e}")
+            return False
+
+    @staticmethod
+    async def _t212_alert(text: str) -> None:
+        try:
+            from src.telegram.bot import telegram_bot
+            await telegram_bot.send_message(f"🛑 <b>{text}</b>")
+        except Exception as e:
+            logger.error(f"Failed to send Trading 212 alert: {e}")
+
+    async def _t212_place_stop(self, client: Any, t212_ticker: str, ticker: str, shares: float, stop: float) -> bool:
+        """Places a GTC stop SELL; retries once (the endpoint allows 1 req/2s) and alerts when the position stays unprotected."""
+        price = self._t212_price(stop)
+        for attempt in range(2):
+            try:
+                # A retry after an ambiguous error must not add a second stop
+                if attempt and any(o.get("type") == "STOP" for o in self._t212_sells(await client.pending_orders(), t212_ticker)):
+                    return True
+                await client.place_stop(t212_ticker, -abs(shares), price)
+                logger.info(f"Trading 212 GTC stop for {shares:g} {ticker} placed at {price}.")
+                return True
+            except Exception as e:
+                logger.error(f"Trading 212 stop for {ticker} at {price} NOT placed (attempt {attempt + 1}): {e}")
+                if not attempt:
+                    await asyncio.sleep(2.0)
+        await self._t212_alert(f"Trading 212 stop for {shares:g} {ticker} at {price} could not be placed: position has no broker stop")
+        return False
+
+    async def _t212_unbooked_shares(self, client: Any, t212_ticker: str, ticker: str, shares: float) -> Tuple[float, float]:
+        """
+        Shares the broker holds beyond the bot's open position (at most the ordered shares), with their average price.
+        Used when the order looks unfilled but its outcome is unknown (404 right after the POST, lagging history, failed cancel).
+        """
+        pos = [p for p in await client.positions(t212_ticker) if (p.get("instrument") or {}).get("ticker") == t212_ticker]
+        held = sum(float(p.get("quantity") or 0) for p in pos)
+        async with AsyncSessionLocal() as session:
+            local = (await session.execute(select(func.sum(Position.shares)).where(
+                Position.ticker == ticker.upper(), Position.status == "OPEN", Position.is_live == True))).scalar() or 0.0
+        extra = round(min(held - local, shares), 6)
+        if extra <= 1e-6:
+            return 0.0, 0.0
+        logger.warning(f"Trading 212 BUY {ticker}: no fill in history but the position grew by {extra:g}; booking it.")
+        return extra, (float(pos[0].get("averagePricePaid") or 0.0) if local <= 0 and pos else 0.0)
+
+    async def _t212_buy(self, ticker: str, shares: float, price: float, currency: str, stop_loss: Optional[float]) -> Optional[Tuple[str, float, float]]:
+        """
+        DAY limit BUY at price; cancels whatever has not filled after FILL_WAIT_SECONDS and books only the real fills.
+        Places a GTC stop for the filled shares. No take-profit order at the broker: check_stops_and_targets
+        sells at the target, and a resting TP next to it could sell the shares twice.
+        Runs under _t212_lock so a sync cannot adopt the shares of a buy still in flight.
+        """
+        client = trading212.get_client()
+        if not client:
+            logger.error(f"Trading 212 API key/secret missing; BUY {ticker} not sent.")
+            return None
+        t212_ticker = await client.resolve_ticker(ticker, currency)
+        if not t212_ticker:
+            logger.error(f"Trading 212 BUY {shares} {ticker} refused: no unique T212 instrument for {ticker} ({currency}).")
+            return None
+        async with self._t212_lock:
+            limit = self._t212_price(price)
+            order = await self._t212_post(
+                client, lambda: client.place_limit(t212_ticker, shares, limit), t212_ticker, shares, f"BUY {shares} {ticker}"
+            )
+            if not order:
+                return None
+            oid = order["id"]
+            status, done = await self._t212_follow(client, oid, order.get("status"))
+            if status == "REJECTED":
+                logger.error(f"Trading 212 rejected BUY {shares} {ticker} ({t212_ticker}).")
+                return None
+            if not done:
+                # Still pending (or unknown after a failed poll): cancel the rest so only real fills get booked
+                await self._t212_cancel(client, oid)
+            filled, avg_price, final = await self._t212_fills(client, t212_ticker, oid)
+            if filled <= 0 and final not in ("CANCELLED", "REJECTED"):
+                # Outcome unknown: the broker position is the truth
+                filled, avg_price = await self._t212_unbooked_shares(client, t212_ticker, ticker, shares)
+            if filled > 0:
+                await self._t212_place_stop(client, t212_ticker, ticker, filled, stop_loss or price * 0.95)
+            return f"t212_{oid}", filled, avg_price or limit
+
+    async def _t212_move_stop(self, ticker: str, currency: str, shares: float, stop: float) -> None:
+        """Same rules as IBKR: replace the resting STOP, or add one only when the ticker has no SELL order."""
+        client = trading212.get_client()
+        t212_ticker = await client.resolve_ticker(ticker, currency) if client else None
+        if not t212_ticker:
+            return
+        sells = self._t212_sells(await client.pending_orders(), t212_ticker)
+        stops = [o for o in sells if o.get("type") == "STOP"]
+        if sells and not stops:
+            logger.warning(f"{ticker} has a SELL order at Trading 212 but no stop; broker stop not moved to {stop}.")
+            return
+        price = self._t212_price(stop)
+        if len(stops) == 1 and abs(float(stops[0].get("stopPrice") or 0) - price) < 1e-9:
+            return
+        for o in stops:
+            await client.cancel_order(o["id"])
+        # The old stop holds the shares; a new one placed before it is gone could double the sell
+        if not await self._t212_wait_gone(client, [o["id"] for o in stops]):
+            logger.warning(f"Trading 212 stop for {ticker} still pending after cancel; new stop at {price} not placed.")
+            return
+        await self._t212_place_stop(client, t212_ticker, ticker, shares, price)
+
+    async def _t212_restore_stop(self, client: Any, t212_ticker: str, ticker: str, stop: float) -> None:
+        """After a failed exit: puts the cancelled stop back for the shares still held, unless a SELL order is still pending."""
+        try:
+            sells = self._t212_sells(await client.pending_orders(), t212_ticker)
+            if sells:
+                if not any(o.get("type") == "STOP" for o in sells):
+                    await self._t212_alert(f"Trading 212 exit for {ticker} failed and a SELL order is still pending; stop at {stop} not restored")
+                return
+            held = sum(
+                float(p.get("quantity") or 0) for p in await client.positions(t212_ticker)
+                if (p.get("instrument") or {}).get("ticker") == t212_ticker
+            )
+            if held > 0:
+                await self._t212_place_stop(client, t212_ticker, ticker, held, stop)
+        except Exception as e:
+            logger.error(f"Trading 212 stop restore for {ticker} failed: {e}")
+            await self._t212_alert(f"Trading 212 exit for {ticker} failed and its stop at {stop} could not be restored")
+
+    async def _t212_close(self, ticker: str, shares: float, currency: str) -> Optional[str]:
+        """
+        Cancels the resting SELL orders, then sells the position at market and returns the id only once T212 reports
+        the full fill. On any failure the cancelled stop is put back, so the position is never left unprotected.
+        """
+        client = trading212.get_client()
+        if not client:
+            logger.error(f"Trading 212 API key/secret missing; exit for {ticker} not sent.")
+            return None
+        t212_ticker = await client.resolve_ticker(ticker, currency)
+        if not t212_ticker:
+            logger.error(f"Trading 212 exit for {ticker} refused: no unique T212 instrument for {ticker} ({currency}).")
+            return None
+        sells = self._t212_sells(await client.pending_orders(), t212_ticker)
+        stop = next((float(o["stopPrice"]) for o in sells if o.get("type") == "STOP" and o.get("stopPrice")), None)
+        try:
+            exit_id = await self._t212_exit(client, t212_ticker, ticker, shares, sells)
+        except Exception as e:
+            logger.error(f"Trading 212 exit for {ticker} failed: {e}")
+            exit_id = None
+        if exit_id is None and stop:
+            await self._t212_restore_stop(client, t212_ticker, ticker, stop)
+        return exit_id
+
+    async def _t212_exit(self, client: Any, t212_ticker: str, ticker: str, shares: float, sells: List[Dict[str, Any]]) -> Optional[str]:
+        # Cancel the resting stop first, otherwise it can still fill after the market sell
+        for o in sells:
+            await client.cancel_order(o["id"])
+        if not await self._t212_wait_gone(client, [o["id"] for o in sells]):
+            logger.warning(f"Trading 212 SELL orders for {ticker} still pending after cancel; exit not sent.")
+            return None
+        held = free = 0.0
+        for attempt in range(2):
+            # Never sell more than the broker holds; a flat answer is confirmed by a second call
+            pos = [p for p in await client.positions(t212_ticker) if (p.get("instrument") or {}).get("ticker") == t212_ticker]
+            held = sum(float(p.get("quantity") or 0) for p in pos)
+            free = sum(float(p.get("quantityAvailableForTrading") or 0) for p in pos)
+            if held > 0 or attempt:
+                break
+            await asyncio.sleep(1.1)  # positions allows 1 req/s
+        if held <= 0:
+            logger.info(f"Trading 212 position for {ticker} already flat (stop filled or sold by hand); no exit order sent.")
+            return "t212_exit_already_flat"
+        if free < shares - 1e-6:
+            # execute_sell books all local shares as sold; the next sync aligns the local share count with the broker
+            logger.error(f"Trading 212 has only {free:g} of {shares:g} {ticker} free to sell; exit not sent.")
+            return None
+        order = await self._t212_post(
+            client, lambda: client.place_market(t212_ticker, -shares), t212_ticker, -shares, f"SELL {shares} {ticker}"
+        )
+        if not order:
+            return None
+        oid = order["id"]
+        status, done = await self._t212_follow(client, oid, order.get("status"))
+        if not done:
+            # Not filled (e.g. queued while the market is closed): it must not fire after the stop is back
+            await self._t212_cancel(client, oid)
+        filled, _, _ = await self._t212_fills(client, t212_ticker, oid)
+        if filled < shares - 1e-6:
+            logger.error(f"Trading 212 SELL {shares:g} {ticker} filled {filled:g} (status {status}); exit not booked.")
+            return None
+        return f"t212_exit_{oid}"
+
+    async def _fetch_t212_account_values(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+        """
+        (cash, total value, invested value) from the T212 account summary. Cash is the real balance
+        (availableToTrade + reservedForOrders); availableToTrade alone caps buy sizing, like IBKR AvailableFunds.
+        """
+        client = trading212.get_client()
+        if not client:
+            return None, None, None
+        acct = await client.account_summary()
+        if (acct.get("currency") or "").upper() != settings.BASE_CURRENCY.upper():
+            logger.error(f"Trading 212 account currency {acct.get('currency')} is not {settings.BASE_CURRENCY}; account values ignored.")
+            return None, None, None
+        cash = acct.get("cash") or {}
+        available = float(cash.get("availableToTrade") or 0.0)
+        self._available_funds_eur = max(0.0, available)
+        total = acct.get("totalValue")
+        return (
+            available + float(cash.get("reservedForOrders") or 0.0),
+            float(total) if total is not None else None,
+            float((acct.get("investments") or {}).get("currentValue") or 0.0),
+        )
 
     async def _dispatch_real_close(self, ticker: str, shares: float, currency: str = "USD") -> Optional[str]:
         """Dispatches live position exit to configured broker API."""
@@ -388,6 +707,11 @@ class LiveBroker(BaseBroker):
                     return f"alpaca_exit_{pos.id}"
             except Exception as e:
                 logger.info(f"Alpaca close note: {e}")
+        elif broker == "trading212":
+            try:
+                return await self._t212_close(ticker, shares, currency)
+            except Exception as e:
+                logger.error(f"Trading 212 exit for {ticker} failed: {e}")
         return None
 
     def is_live_armed(self) -> Tuple[bool, str]:
@@ -484,21 +808,24 @@ class LiveBroker(BaseBroker):
             available_cash = max(0.0, usable_cash - pending_alloc)
             equity = sum(round(p.current_price_eur * p.shares, 2) for p in positions)
             total_val = round(cash + equity, 2)
-            # Portfolio value comes from IBKR: fresh account summary, else the last synced snapshot, else local quotes
+            # Portfolio value comes from the broker (IBKR / Trading 212): fresh account summary, else the last synced snapshot, else local quotes
             value_source = "local"
             ib_cash = ib_total = ib_equity = None
-            if settings.LIVE_BROKER.lower() == "ibkr":
+            broker = settings.LIVE_BROKER.lower()
+            if broker in ("ibkr", "trading212"):
                 try:
                     async def _fresh():
+                        if broker == "trading212":
+                            return await self._fetch_t212_account_values()
                         ib = await self._get_ib(timeout=2.0)
                         if not (ib and ib.isConnected()):
                             return None, None, None
                         return await self._fetch_ibkr_account_values(ib)
                     ib_cash, ib_total, ib_equity = await asyncio.wait_for(_fresh(), timeout=4.0)
                 except Exception as e:
-                    logger.debug(f"Fresh IBKR account values unavailable: {e}")
+                    logger.debug(f"Fresh {broker.upper()} account values unavailable: {e}")
                 if ib_total is not None:
-                    value_source = "ibkr"
+                    value_source = broker
                     # Same moment as the total, so cash + equity add up
                     if ib_cash is not None:
                         cash = ib_cash
@@ -1529,15 +1856,19 @@ class LiveBroker(BaseBroker):
         so a transient empty position list from the broker can never close local positions.
         Keeps the last known balance when the broker is unreachable.
         """
-        if settings.LIVE_BROKER.lower() != "ibkr":
+        broker = settings.LIVE_BROKER.lower()
+        if broker not in ("ibkr", "trading212"):
             # The Alpaca sync only records balances and never touches positions
             await self.sync_account_state()
             return
         try:
-            ib = await self._get_ib(timeout=5.0)
-            if not (ib and ib.isConnected()):
-                raise ConnectionError("Persistent IB client not connected.")
-            ib_cash, ib_total, ib_equity = await self._fetch_ibkr_account_values(ib)
+            if broker == "trading212":
+                ib_cash, ib_total, ib_equity = await self._fetch_t212_account_values()
+            else:
+                ib = await self._get_ib(timeout=5.0)
+                if not (ib and ib.isConnected()):
+                    raise ConnectionError("Persistent IB client not connected.")
+                ib_cash, ib_total, ib_equity = await self._fetch_ibkr_account_values(ib)
             if ib_cash is None:
                 return
 
@@ -1561,9 +1892,9 @@ class LiveBroker(BaseBroker):
                     is_live=True
                 ))
                 await session.commit()
-                logger.info(f"Live cash balance synced from IBKR: €{ib_cash:.2f}")
+                logger.info(f"Live cash balance synced from {broker.upper()}: €{ib_cash:.2f}")
         except Exception as e:
-            logger.warning(f"IBKR cash balance sync note: {e}")
+            logger.warning(f"{broker.upper()} cash balance sync note: {e}")
 
     @staticmethod
     def _last_sell_fill(ib: Any, ticker: str, currency: str) -> Optional[float]:
@@ -1591,9 +1922,137 @@ class LiveBroker(BaseBroker):
         t = res.scalars().first()
         return (t.stop_loss, t.take_profit) if t else (None, None)
 
+    async def _update_tracked_holding(self, session, pos: Position, level_ticker: str, shares: float, cost_native: float, curr_code: str) -> None:
+        """Aligns a tracked position with the broker's share count; fills missing stop/target from the latest buy plan."""
+        # Keep the bot's own euro cost basis (incl. fees); re-converting avgCost at today's FX drifts it.
+        if abs(pos.shares - shares) > 1e-9:
+            if shares > pos.shares:
+                pos.cost_basis_eur += currency_service.to_eur(cost_native, curr_code) * (shares - pos.shares)
+            else:
+                pos.cost_basis_eur *= shares / pos.shares
+            pos.shares = shares
+        if not pos.stop_loss_native or not pos.take_profit_native:
+            sl, tp = await self._planned_levels(session, level_ticker)
+            pos.stop_loss_native = pos.stop_loss_native or sl
+            pos.take_profit_native = pos.take_profit_native or tp
+
+    async def _adopt_holding(
+        self, session, ticker: str, name: str, curr_code: str, shares: float, cost_native: float, fees_eur: float,
+        adopted: List[str], stops_to_place: List[tuple],
+    ) -> None:
+        """Books a broker holding the bot never recorded; it gets a broker stop only when a bot buy plan exists."""
+        sl, tp = await self._planned_levels(session, ticker)
+        price_eur = currency_service.to_eur(cost_native, curr_code)
+        session.add(Position(
+            ticker=ticker,
+            name=name,
+            currency=curr_code,
+            shares=shares,
+            entry_price_native=cost_native,
+            current_price_native=cost_native,
+            highest_price_native=cost_native,
+            stop_loss_native=sl,
+            take_profit_native=tp,
+            entry_price_eur=price_eur,
+            current_price_eur=price_eur,
+            cost_basis_eur=price_eur * shares,
+            fees_eur=round(fees_eur, 2),
+            status="OPEN",
+            is_live=True
+        ))
+        if sl:
+            adopted.append(f"{shares:g} {ticker} @ {cost_native:.2f} {curr_code} | SL {sl} | TP {tp}")
+            stops_to_place.append((ticker, curr_code, shares, sl))
+        else:
+            adopted.append(f"{shares:g} {ticker} @ {cost_native:.2f} {curr_code} | no bot trigger: tracked only, the bot never sells it")
+
+    async def _finish_sync(self, label: str, gone: List[Tuple[Position, Optional[float]]], stops_to_place: List[tuple], adopted: List[str]) -> None:
+        """Books exits for positions the broker no longer holds, places stops for adopted holdings and sends alerts."""
+        for pos, exit_price in gone:
+            await self.execute_sell(
+                pos.ticker, reason=f"Closed at {label} (stop/target leg or manual sale)",
+                broker_flat=True, exit_price_native=exit_price,
+            )
+        for stop_args in stops_to_place:
+            await self._move_broker_stop(*stop_args)
+        for a in adopted:
+            logger.warning(f"Adopted untracked {label} holding: {a}")
+            try:
+                from src.telegram.bot import telegram_bot
+                await telegram_bot.send_message(f"⚠️ <b>Untracked broker position adopted</b>\n{a}")
+            except Exception as e:
+                logger.error(f"Failed to send adoption alert: {e}")
+
+    @staticmethod
+    async def _t212_last_sell_fill(client: Any, t212_ticker: str) -> Optional[float]:
+        """Price of the latest SELL fill for the ticker in T212 history, else None."""
+        try:
+            fills = [
+                i["fill"] for i in await client.history_orders(t212_ticker)
+                if i.get("fill") and ((i.get("order") or {}).get("side") == "SELL" or float((i.get("order") or {}).get("quantity") or 0) < 0)
+            ]
+            return float(max(fills, key=lambda f: f.get("filledAt") or "")["price"]) if fills else None
+        except Exception as e:
+            logger.info(f"Trading 212 exit price lookup for {t212_ticker} failed: {e}")
+            return None
+
+    async def _sync_t212_account(self) -> None:
+        """Trading 212 version of the IBKR reconcile: snapshot, adopt untracked holdings, close confirmed-gone positions."""
+        async with self._t212_lock:
+            await self._sync_t212_locked()
+
+    async def _sync_t212_locked(self) -> None:
+        client = trading212.get_client()
+        if not client:
+            raise ConnectionError("Trading 212 API key/secret not configured.")
+        t_cash, t_total, t_equity = await self._fetch_t212_account_values()
+        held = {p["instrument"]["ticker"]: p for p in await client.positions() if float(p.get("quantity") or 0) > 0}
+        async with AsyncSessionLocal() as session:
+            res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == True))
+            # Local tickers are Yahoo tickers (ASML.AS); map each to its T212 ticker. Unmapped ones are never closed here.
+            local: Dict[str, Position] = {}
+            for pos in res.scalars().all():
+                t212_ticker = await client.resolve_ticker(pos.ticker, pos.currency)
+                if t212_ticker:
+                    local[t212_ticker] = pos
+                else:
+                    logger.warning(f"Trading 212 sync: {pos.ticker} has no unique T212 instrument; not reconciled.")
+            adopted: List[str] = []
+            stops_to_place: List[tuple] = []
+            for t212_ticker, bp in held.items():
+                inst = bp["instrument"]
+                shares, cost_native, curr_code = float(bp["quantity"]), float(bp["averagePricePaid"]), inst.get("currency") or "USD"
+                if t212_ticker in local:
+                    pos = local[t212_ticker]
+                    await self._update_tracked_holding(session, pos, pos.ticker, shares, cost_native, curr_code)
+                else:
+                    yahoo = await client.yahoo_ticker(t212_ticker)
+                    await self._adopt_holding(session, yahoo, inst.get("name") or yahoo, curr_code, shares, cost_native, 0.0, adopted, stops_to_place)
+            gone = [t for t in local if t not in held]
+            if gone:
+                # Only a second, fresh positions answer may close a local position
+                await asyncio.sleep(1.1)  # positions allows 1 req/s
+                still_held = {p["instrument"]["ticker"] for p in await client.positions() if float(p.get("quantity") or 0) > 0}
+                gone = [t for t in gone if t not in still_held]
+            if t_cash is not None:
+                equity_val = t_equity if t_equity is not None else 0.0
+                session.add(PortfolioSnapshot(
+                    cash_eur=t_cash,
+                    equity_eur=equity_val,
+                    total_value_eur=t_total if t_total is not None else (t_cash + equity_val),
+                    daily_pnl_eur=0.0,
+                    daily_pnl_pct=0.0,
+                    open_positions_count=len(held),
+                    is_live=True
+                ))
+            await session.commit()
+        await self._finish_sync(
+            "Trading 212", [(local[t], await self._t212_last_sell_fill(client, t)) for t in gone], stops_to_place, adopted
+        )
+
     async def sync_account_state(self) -> Dict[str, Any]:
         """
-        Polls broker API (IBKR / Alpaca) for live account values and positions, and aligns the local database:
+        Polls broker API (IBKR / Trading 212 / Alpaca) for live account values and positions, and aligns the local database:
         adopts holdings the bot never booked and books a SELL for positions the broker no longer holds.
         """
         logger.info(f"Syncing account state with {settings.LIVE_BROKER.upper()}...")
@@ -1629,22 +2088,9 @@ class LiveBroker(BaseBroker):
                             logger.warning(f"IBKR reports non-long position {shares} {sym}; not tracked as an open position.")
                             continue
                         ib_keys.add(key)
-                        cost_eur = currency_service.to_eur(cost_native, curr_code) * shares
                         if key in existing_live:
-                            pos = existing_live[key]
-                            # Keep the bot's own euro cost basis (incl. fees); re-converting avgCost at today's FX drifts it.
-                            if abs(pos.shares - shares) > 1e-9:
-                                if shares > pos.shares:
-                                    pos.cost_basis_eur += currency_service.to_eur(cost_native, curr_code) * (shares - pos.shares)
-                                else:
-                                    pos.cost_basis_eur *= shares / pos.shares
-                                pos.shares = shares
-                            if not pos.stop_loss_native or not pos.take_profit_native:
-                                sl, tp = await self._planned_levels(session, sym)
-                                pos.stop_loss_native = pos.stop_loss_native or sl
-                                pos.take_profit_native = pos.take_profit_native or tp
+                            await self._update_tracked_holding(session, existing_live[key], sym, shares, cost_native, curr_code)
                         else:
-                            sl, tp = await self._planned_levels(session, sym)
                             # IBKR avgCost already includes commission; sum the session's BUY commissions for fees_eur.
                             # shortcut: ib.fills() only covers this gateway session, so older adoptions keep fees 0; upgrade via reqExecutions.
                             fees_eur = sum(
@@ -1653,29 +2099,7 @@ class LiveBroker(BaseBroker):
                                 if f.contract.conId == p.contract.conId and f.execution.side == "BOT"
                                 and f.commissionReport and f.commissionReport.commission == f.commissionReport.commission
                             )
-                            new_pos = Position(
-                                ticker=sym,
-                                name=sym,
-                                currency=curr_code,
-                                shares=shares,
-                                entry_price_native=cost_native,
-                                current_price_native=cost_native,
-                                highest_price_native=cost_native,
-                                stop_loss_native=sl,
-                                take_profit_native=tp,
-                                entry_price_eur=currency_service.to_eur(cost_native, curr_code),
-                                current_price_eur=currency_service.to_eur(cost_native, curr_code),
-                                cost_basis_eur=cost_eur,
-                                fees_eur=round(fees_eur, 2),
-                                status="OPEN",
-                                is_live=True
-                            )
-                            session.add(new_pos)
-                            if sl:
-                                adopted.append(f"{shares:g} {sym} @ {cost_native:.2f} {curr_code} | SL {sl} | TP {tp}")
-                                stops_to_place.append((sym, curr_code, shares, sl))
-                            else:
-                                adopted.append(f"{shares:g} {sym} @ {cost_native:.2f} {curr_code} | no bot trigger: tracked only, the bot never sells it")
+                            await self._adopt_holding(session, sym, sym, curr_code, shares, cost_native, fees_eur, adopted, stops_to_place)
 
                     # ib.positions() can be briefly empty after a reconnect: only a fresh broker answer may close a position
                     gone = [pos for key, pos in existing_live.items() if key not in ib_keys]
@@ -1700,22 +2124,16 @@ class LiveBroker(BaseBroker):
                         )
                         session.add(snapshot)
                     await session.commit()
-                for pos in gone:
-                    await self.execute_sell(
-                        pos.ticker, reason="Closed at IBKR (stop/target leg or manual sale)",
-                        broker_flat=True, exit_price_native=self._last_sell_fill(ib, pos.ticker, pos.currency),
-                    )
-                for stop_args in stops_to_place:
-                    await self._move_broker_stop(*stop_args)
-                for a in adopted:
-                    logger.warning(f"Adopted untracked IBKR holding: {a}")
-                    try:
-                        from src.telegram.bot import telegram_bot
-                        await telegram_bot.send_message(f"⚠️ <b>Untracked broker position adopted</b>\n{a}")
-                    except Exception as e:
-                        logger.error(f"Failed to send adoption alert: {e}")
+                await self._finish_sync(
+                    "IBKR", [(pos, self._last_sell_fill(ib, pos.ticker, pos.currency)) for pos in gone], stops_to_place, adopted
+                )
             except Exception as e:
                 logger.warning(f"IBKR sync communication note: {e}")
+        elif broker == "trading212":
+            try:
+                await self._sync_t212_account()
+            except Exception as e:
+                logger.warning(f"Trading 212 sync communication note: {e}")
         elif broker == "alpaca":
             try:
                 from alpaca.trading.client import TradingClient
@@ -1754,7 +2172,7 @@ class LiveBroker(BaseBroker):
 
     async def check_connection(self, force: bool = False) -> Dict[str, Any]:
         """
-        Actively probes connectivity to the configured live brokerage API (IBKR / Alpaca).
+        Actively probes connectivity to the configured live brokerage API (IBKR / Trading 212 / Alpaca).
         Caches the status for self._connection_check_ttl seconds unless force=True.
         """
         async with self._connection_lock:
@@ -1817,6 +2235,34 @@ class LiveBroker(BaseBroker):
                         "error": err_msg,
                         "account_id": settings.IBKR_ACCOUNT_ID,
                         "message": f"IBKR Gateway unreachable at {settings.IBKR_HOST}:{settings.IBKR_PORT} ({err_msg}). {hint}"
+                    })
+            elif broker == "trading212":
+                env = "DEMO" if settings.TRADING212_DEMO else "LIVE"
+                status_data["environment"] = env
+                start_t = time.perf_counter()
+                try:
+                    client = trading212.get_client()
+                    if not client:
+                        raise ValueError("Trading 212 API key/secret missing in configuration.")
+                    acct = await client.account_summary()
+                    latency = round((time.perf_counter() - start_t) * 1000, 1)
+                    # The account id is left out on purpose
+                    status_data.update({
+                        "connected": True,
+                        "status": "ONLINE",
+                        "latency_ms": latency,
+                        "account_currency": acct.get("currency"),
+                        "message": f"Connected to Trading 212 {env} API (Latency: {latency}ms, Currency: {acct.get('currency')})"
+                    })
+                except Exception as e:
+                    elapsed = round((time.perf_counter() - start_t) * 1000, 1)
+                    err_msg = str(e).strip() or type(e).__name__
+                    status_data.update({
+                        "connected": False,
+                        "status": "OFFLINE",
+                        "latency_ms": elapsed,
+                        "error": err_msg,
+                        "message": f"Trading 212 {env} API unreachable: {err_msg}"
                     })
             elif broker == "alpaca":
                 start_t = time.perf_counter()
