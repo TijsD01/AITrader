@@ -23,6 +23,16 @@ This repo ships a shared Claude Code setup in `.claude/`. When you open the repo
 
 There was no maintained public backtesting skill worth adding, so these two are written for this codebase.
 
+### Vendored ponytail skills (for cloud sessions)
+
+`.claude/skills/ponytail`, `ponytail-review`, `ponytail-audit` and `ponytail-debt` are copies of the skills from [DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail) at tag `v5.3.3` (MIT, see `.claude/skills/ponytail/LICENSE`).
+
+Why: Claude Code on the web can only reach the GitHub repos attached to the session, so the `ponytail` marketplace in `.claude/settings.json` never installs there. Skills in `.claude/skills/` come with the clone, so they work in every cloud session. The plugin's hooks (always-on rules, the band) are not included; type `/ponytail` to turn the mode on.
+
+Locally the plugin still installs from `.claude/settings.json`. You may then see both the plugin skills (`ponytail:ponytail`) and these copies. That is harmless.
+
+To update: download the four `skills/<name>/SKILL.md` files from the new tag and replace the copies here.
+
 ## Optional (marketplaces are registered, not enabled)
 
 Turn one on with `/plugin install <name>@<marketplace>` or by adding it to `enabledPlugins`.
