@@ -23,15 +23,10 @@ logger = logging.getLogger(__name__)
 FILL_WAIT_SECONDS = 15.0
 
 
-def round_to_tick(price: float, increments: List[Tuple[float, float]]) -> float:
-    """Rounds a price to the tick that applies at that price; increments is an IBKR market rule [(lowEdge, increment), ...] in ascending order."""
-    tick = next((inc for low, inc in reversed(increments) if price >= low), 0.01)
-    return round(round(price / tick) * tick, 6)
-
 class LiveBroker(BaseBroker):
     """
     Live Real-Money Broker for the Antigravity Multi-Agent Trading System.
-    Connects to Interactive Brokers (IBKR) or Alpaca to execute real orders,
+    Connects to Trading 212 or Alpaca to execute real orders,
     track real equity, sync balances, and enforce institutional risk controls.
     """
 
@@ -39,9 +34,7 @@ class LiveBroker(BaseBroker):
         self._last_pnl_refresh: float = 0.0
         self._pnl_refresh_ttl: float = 10.0
         self._refresh_lock = asyncio.Lock()
-        self._ib: Optional[Any] = None
-        self._ibkr_price_cache: Dict[str, Tuple[float, float]] = {}
-        # Last IBKR AvailableFunds: a cash account cannot spend unsettled cash, so buys never size past it
+        # Last broker buying power (Trading 212 availableToTrade): buys never size past unsettled cash
         self._available_funds_eur: Optional[float] = None
         self._last_connection_check: float = 0.0
         self._connection_check_ttl: float = 15.0  # 15s cache to prevent socket churn
@@ -50,71 +43,9 @@ class LiveBroker(BaseBroker):
         # Trading 212: a sync must not adopt the shares of a buy that is still in flight
         self._t212_lock = asyncio.Lock()
 
-    def _on_ib_disconnected(self):
-        logger.warning("IBKR connection dropped.")
-        self._last_connection_status = {
-            "broker": "IBKR",
-            "trading_mode": "LIVE",
-            "live_trading_enabled": settings.LIVE_TRADING_ENABLED,
-            "kill_switch_active": settings.KILL_SWITCH_ACTIVE,
-            "host": settings.IBKR_HOST,
-            "port": settings.IBKR_PORT,
-            "connected": False,
-            "status": "OFFLINE",
-            "latency_ms": None,
-            "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "message": "IBKR connection lost (disconnected)."
-        }
-        self._last_connection_check = time.time()
-
-    def _on_ib_error(self, reqId: int, errorCode: int, errorString: str, contract: Any):
-        if errorCode in (2104, 2106, 2108):
-            return
-        if errorCode in (1100, 1101, 1102, 2110, 2158):
-            logger.warning(f"IBKR connectivity notice [{errorCode}]: {errorString}")
-            if self._last_connection_status:
-                self._last_connection_status["message"] = f"IBKR [{errorCode}]: {errorString}"
-            return
-        logger.info(f"IBKR note [{errorCode}]: {errorString}")
-
-    async def _get_ib(self, timeout: float = 5.0) -> Optional[Any]:
-        """
-        Returns shared persistent IB client.
-        Reuses existing active connection to eliminate socket churn.
-        """
-        async with self._connection_lock:
-            if self._ib is not None and self._ib.isConnected():
-                return self._ib
-
-            try:
-                from ib_async import IB
-                if self._ib is None:
-                    self._ib = IB()
-                    self._ib.disconnectedEvent += self._on_ib_disconnected
-                    self._ib.errorEvent += self._on_ib_error
-
-                if not self._ib.isConnected():
-                    await self._ib.connectAsync(
-                        host=settings.IBKR_HOST,
-                        port=settings.IBKR_PORT,
-                        clientId=settings.IBKR_CLIENT_ID,
-                        timeout=timeout,
-                        readonly=False
-                    )
-                return self._ib
-            except Exception as e:
-                logger.debug(f"IBKR connect note: {e}")
-                return None
-
     async def disconnect(self):
-        """Cleanly disconnects the persistent IB client and clears cache."""
+        """Clears the cached connection status."""
         async with self._connection_lock:
-            if self._ib and self._ib.isConnected():
-                try:
-                    self._ib.disconnect()
-                except Exception:
-                    pass
-            self._ib = None
             self._last_connection_status = None
             self._last_connection_check = 0.0
 
@@ -122,50 +53,6 @@ class LiveBroker(BaseBroker):
         """Forces clean disconnection and immediately re-probes broker connectivity."""
         await self.disconnect()
         return await self.check_connection(force=True)
-
-
-    async def _fetch_ibkr_prices(self, tickers: List[Tuple[str, str]]) -> Dict[str, float]:
-        """
-        Fetches current or delayed market prices directly from IBKR via ib_async.
-        Uses in-memory TTL cache (30s) to minimize socket connections and roundtrips.
-        """
-        now = time.time()
-        needed = [
-            (t, c) for t, c in tickers
-            if t not in self._ibkr_price_cache or (now - self._ibkr_price_cache[t][0]) > 30.0
-        ]
-        if not needed:
-            return {t: self._ibkr_price_cache[t][1] for t, _ in tickers if t in self._ibkr_price_cache}
-
-        if settings.LIVE_BROKER.lower() == "ibkr":
-            try:
-                from ib_async import Stock
-                ib = await self._get_ib()
-                if ib and ib.isConnected():
-                    # 3 = delayed only where the account has no real-time subscription; subscribed exchanges stream live
-                    ib.reqMarketDataType(3)
-                    contracts = [
-                        Stock(t.split(".")[0], "SMART", c.upper())
-                        for t, c in needed
-                    ]
-                    await ib.qualifyContractsAsync(*contracts)
-                    stream = [ib.reqMktData(c, "", False, False) for c in contracts]
-                    await asyncio.sleep(1.0)
-                    for (orig_ticker, _), tk in zip(needed, stream):
-                        # Delayed quotes (3/4, e.g. US without a subscription) lag ~15 min: leave them out so callers use yfinance
-                        if getattr(tk, "marketDataType", 1) in (3, 4):
-                            continue
-                        p = tk.marketPrice()
-                        if p != p or p <= 0:
-                            p = tk.last if (tk.last == tk.last and tk.last > 0) else tk.close
-                        if p and p == p and p > 0:
-                            self._ibkr_price_cache[orig_ticker] = (time.time(), float(p))
-                    for c in contracts:
-                        ib.cancelMktData(c)
-            except Exception as e:
-                logger.debug(f"IBKR live market data note: {e}")
-
-        return {t: self._ibkr_price_cache[t][1] for t, _ in tickers if t in self._ibkr_price_cache}
 
 
     async def _dispatch_real_order(
@@ -178,41 +65,12 @@ class LiveBroker(BaseBroker):
         take_profit: Optional[float]
     ) -> Optional[Tuple[str, float, float]]:
         """
-        Dispatches live entry order to configured broker API (IBKR, Trading 212 or Alpaca).
+        Dispatches live entry order to configured broker API (Trading 212 or Alpaca).
         Returns (broker order ID, filled shares, average fill price), or None when not placed.
-        An IBKR or Trading 212 entry that has not filled within FILL_WAIT_SECONDS is cancelled, so only filled shares get booked.
+        A Trading 212 entry that has not filled within FILL_WAIT_SECONDS is cancelled, so only filled shares get booked.
         """
         broker = settings.LIVE_BROKER.lower()
-        if broker == "ibkr":
-            try:
-                from ib_async import Stock
-                ib = await self._get_ib()
-                if ib and ib.isConnected():
-                    contract = Stock(ticker.upper().split(".")[0], "SMART", currency.upper())
-                    await ib.qualifyContractsAsync(contract)
-                    increments = await self._tick_increments(ib, contract)
-                    bracket = ib.bracketOrder(
-                        action="BUY",
-                        quantity=shares,
-                        limitPrice=round_to_tick(price, increments),
-                        takeProfitPrice=round_to_tick(take_profit or price * 1.10, increments),
-                        stopLossPrice=round_to_tick(stop_loss or price * 0.95, increments)
-                    )
-                    # Explicit TIF avoids IBKR's preset-override notice (10349); TP/SL must survive the close
-                    for order in bracket:
-                        order.tif = "DAY" if order.action == "BUY" else "GTC"
-                    placed = [ib.placeOrder(contract, order) for order in bracket]
-                    if placed:
-                        # placeOrder returns before IBKR answers; a rejected order must not become a recorded position
-                        rejection = await self._ibkr_order_rejection(placed[0])
-                        if rejection:
-                            logger.error(f"IBKR rejected BUY {shares} {ticker}: {rejection}")
-                            return None
-                        filled, avg_price = await self._await_entry_fill(ib, placed[0])
-                        return f"ibkr_{placed[0].order.orderId}", filled, avg_price or price
-            except Exception as e:
-                logger.info(f"IBKR gateway communication note: {e}")
-        elif broker == "alpaca":
+        if broker == "alpaca":
             try:
                 from alpaca.trading.client import TradingClient
                 from alpaca.trading.requests import MarketOrderRequest, TakeProfitRequest, StopLossRequest
@@ -242,95 +100,17 @@ class LiveBroker(BaseBroker):
                 logger.error(f"Trading 212 BUY {ticker} failed: {e}")
         return None
 
-    @staticmethod
-    async def _tick_increments(ib: Any, contract: Any) -> List[Tuple[float, float]]:
-        """Price bands of the contract's market rule: exchanges reject prices off their tick grid (Error 110), and Euronext/Xetra ticks grow with the price."""
-        details = (await ib.reqContractDetailsAsync(contract))[0]
-        exchanges, rule_ids = details.validExchanges.split(","), details.marketRuleIds.split(",")
-        rule_id = rule_ids[exchanges.index(contract.primaryExchange)] if contract.primaryExchange in exchanges else rule_ids[0]
-        return [(r.lowEdge, r.increment) for r in await ib.reqMarketRuleAsync(int(rule_id))]
-
     async def _move_broker_stop(self, ticker: str, currency: str, shares: float, stop: float) -> None:
         """
-        Puts the bot's stop on the resting IBKR stop order (or places a GTC stop when the symbol has no SELL order),
-        so the position keeps its raised stop while the bot or gateway is offline.
+        Puts the bot's stop on the resting Trading 212 stop order (or places a GTC stop when the symbol has no SELL order),
+        so the position keeps its raised stop while the bot is offline.
         """
-        if settings.LIVE_BROKER.lower() == "trading212":
-            try:
-                await self._t212_move_stop(ticker, currency, shares, stop)
-            except Exception as e:
-                logger.warning(f"Trading 212 stop update for {ticker} failed: {e}")
-            return
-        if settings.LIVE_BROKER.lower() != "ibkr":
+        if settings.LIVE_BROKER.lower() != "trading212":
             return
         try:
-            from ib_async import Stock, StopOrder
-            ib = await self._get_ib()
-            if not (ib and ib.isConnected()):
-                return
-            symbol = ticker.upper().split(".")[0]
-            sells = [
-                t for t in ib.openTrades()
-                if t.contract.symbol.upper() == symbol and (t.contract.currency or "").upper() == currency.upper()
-                and t.order.action == "SELL"
-            ]
-            stops = [t for t in sells if t.order.orderType == "STP"]
-            if sells and not stops:
-                # A lone take-profit leg: a separate stop outside its OCA group could sell the shares twice
-                logger.warning(f"{ticker} has a SELL order at IBKR but no stop; broker stop not moved to {stop}.")
-                return
-            contract = stops[0].contract if stops else Stock(symbol, "SMART", currency.upper())
-            if not stops:
-                await ib.qualifyContractsAsync(contract)
-            price = round_to_tick(stop, await self._tick_increments(ib, contract))
-            if stops:
-                order = stops[0].order
-                if order.auxPrice == price:
-                    return
-                order.auxPrice = price
-            else:
-                order = StopOrder("SELL", shares, price, tif="GTC")
-            ib.placeOrder(contract, order)
-            logger.info(f"IBKR stop for {ticker} {'moved' if stops else 'placed'} at {price}.")
+            await self._t212_move_stop(ticker, currency, shares, stop)
         except Exception as e:
-            logger.warning(f"IBKR stop update for {ticker} failed: {e}")
-
-    @staticmethod
-    async def _await_entry_fill(ib: Any, trade: Any, timeout: float = FILL_WAIT_SECONDS) -> Tuple[float, float]:
-        """
-        Waits for a placed BUY to fill. Cancels any unfilled rest (the bracket legs follow the parent),
-        then returns (filled shares, average fill price) so only real fills get booked.
-        """
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-        while trade.orderStatus.status != "Filled" and loop.time() < deadline:
-            await asyncio.sleep(0.2)
-        if trade.orderStatus.status != "Filled":
-            ib.cancelOrder(trade.order)
-            for _ in range(20):
-                if trade.orderStatus.status in ("Filled", "Cancelled", "ApiCancelled", "Inactive"):
-                    break
-                await asyncio.sleep(0.1)
-        return float(trade.orderStatus.filled or 0.0), float(trade.orderStatus.avgFillPrice or 0.0)
-
-    @staticmethod
-    async def _ibkr_order_rejection(trade: Any, timeout: float = 2.0) -> Optional[str]:
-        """
-        Waits briefly for IBKR to accept or reject a placed order. Returns the rejection reason,
-        or None once the order is live (or still pending when the timeout runs out).
-        """
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-        while True:
-            status = getattr(getattr(trade, "orderStatus", None), "status", "") or ""
-            log = getattr(trade, "log", None) or []
-            # ib_async lacks 10349 (informational "TIF set to DAY by preset") in its warningCodes and marks the order Cancelled; the real status follows
-            if status in ("Cancelled", "ApiCancelled", "Inactive") and not (log and getattr(log[-1], "errorCode", 0) == 10349):
-                messages = [getattr(entry, "message", "") for entry in log]
-                return "; ".join(m for m in messages if m) or status
-            if status in ("PreSubmitted", "Submitted", "Filled") or loop.time() >= deadline:
-                return None
-            await asyncio.sleep(0.2)
+            logger.warning(f"Trading 212 stop update for {ticker} failed: {e}")
 
     # ---- Trading 212 (REST API v0, see src/trading/trading212.py) ----
 
@@ -512,7 +292,7 @@ class LiveBroker(BaseBroker):
             return f"t212_{oid}", filled, avg_price or limit
 
     async def _t212_move_stop(self, ticker: str, currency: str, shares: float, stop: float) -> None:
-        """Same rules as IBKR: replace the resting STOP, or add one only when the ticker has no SELL order."""
+        """Replace the resting STOP, or add one only when the ticker has no SELL order."""
         client = trading212.get_client()
         t212_ticker = await client.resolve_ticker(ticker, currency) if client else None
         if not t212_ticker:
@@ -617,7 +397,7 @@ class LiveBroker(BaseBroker):
     async def _fetch_t212_account_values(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
         """
         (cash, total value, invested value) from the T212 account summary. Cash is the real balance
-        (availableToTrade + reservedForOrders); availableToTrade alone caps buy sizing, like IBKR AvailableFunds.
+        (availableToTrade + reservedForOrders); availableToTrade alone caps buy sizing.
         """
         client = trading212.get_client()
         if not client:
@@ -639,44 +419,7 @@ class LiveBroker(BaseBroker):
     async def _dispatch_real_close(self, ticker: str, shares: float, currency: str = "USD") -> Optional[str]:
         """Dispatches live position exit to configured broker API."""
         broker = settings.LIVE_BROKER.lower()
-        if broker == "ibkr":
-            try:
-                from ib_async import Stock, MarketOrder
-                ib = await self._get_ib()
-                if ib and ib.isConnected():
-                    symbol = ticker.upper().split(".")[0]
-                    contract = Stock(symbol, "SMART", currency.upper())
-                    await ib.qualifyContractsAsync(contract)
-
-                    # Cancel resting bracket legs (stop / take-profit) first, otherwise a leg
-                    # can still fill after our market sell and open a short position.
-                    legs = []
-                    for open_trade in ib.openTrades():
-                        oc = open_trade.contract
-                        if oc.symbol.upper() == symbol and (oc.currency or "").upper() == currency.upper() \
-                                and open_trade.order.action == "SELL":
-                            ib.cancelOrder(open_trade.order)
-                            legs.append(open_trade)
-                    # Give the cancels up to 2s to settle: a leg that fills meanwhile must show up in the position below
-                    for _ in range(20):
-                        if all(leg.isDone() for leg in legs):
-                            break
-                        await asyncio.sleep(0.1)
-
-                    # Never sell more than the broker actually holds (fresh positions, not the cached list)
-                    held = sum(
-                        float(bp.position) for bp in await ib.reqPositionsAsync()
-                        if bp.contract.symbol.upper() == symbol and (bp.contract.currency or "").upper() == currency.upper()
-                    )
-                    if held <= 0:
-                        logger.info(f"IBKR position for {ticker} already flat (bracket leg filled); no exit order sent.")
-                        return "ibkr_exit_already_flat"
-                    order = MarketOrder("SELL", min(shares, held), tif="DAY")
-                    placed = ib.placeOrder(contract, order)
-                    return f"ibkr_exit_{placed.order.orderId}"
-            except Exception as e:
-                logger.info(f"IBKR close note: {e}")
-        elif broker == "alpaca":
+        if broker == "alpaca":
             try:
                 from alpaca.trading.client import TradingClient
                 if settings.ALPACA_API_KEY and settings.ALPACA_SECRET_KEY:
@@ -808,32 +551,25 @@ class LiveBroker(BaseBroker):
             available_cash = max(0.0, usable_cash - pending_alloc)
             equity = sum(round(p.current_price_eur * p.shares, 2) for p in positions)
             total_val = round(cash + equity, 2)
-            # Portfolio value comes from the broker (IBKR / Trading 212): fresh account summary, else the last synced snapshot, else local quotes
+            # Portfolio value comes from the broker (Trading 212): fresh account summary, else the last synced snapshot, else local quotes
             value_source = "local"
-            ib_cash = ib_total = ib_equity = None
+            acct_cash = acct_total = acct_equity = None
             broker = settings.LIVE_BROKER.lower()
-            if broker in ("ibkr", "trading212"):
+            if broker == "trading212":
                 try:
-                    async def _fresh():
-                        if broker == "trading212":
-                            return await self._fetch_t212_account_values()
-                        ib = await self._get_ib(timeout=2.0)
-                        if not (ib and ib.isConnected()):
-                            return None, None, None
-                        return await self._fetch_ibkr_account_values(ib)
-                    ib_cash, ib_total, ib_equity = await asyncio.wait_for(_fresh(), timeout=4.0)
+                    acct_cash, acct_total, acct_equity = await asyncio.wait_for(self._fetch_t212_account_values(), timeout=4.0)
                 except Exception as e:
                     logger.debug(f"Fresh {broker.upper()} account values unavailable: {e}")
-                if ib_total is not None:
+                if acct_total is not None:
                     value_source = broker
                     # Same moment as the total, so cash + equity add up
-                    if ib_cash is not None:
-                        cash = ib_cash
+                    if acct_cash is not None:
+                        cash = acct_cash
                 elif snapshot and snapshot.total_value_eur:
-                    ib_total, ib_equity, value_source = snapshot.total_value_eur, snapshot.equity_eur, "snapshot"
-            if ib_total is not None:
-                total_val = round(ib_total, 2)
-                equity = ib_equity if ib_equity is not None else total_val - cash
+                    acct_total, acct_equity, value_source = snapshot.total_value_eur, snapshot.equity_eur, "snapshot"
+            if acct_total is not None:
+                total_val = round(acct_total, 2)
+                equity = acct_equity if acct_equity is not None else total_val - cash
             unrealized_pnl = sum(round(p.unrealized_pnl_eur, 2) for p in positions)
             daily_loss = await self.get_daily_loss_eur()
 
@@ -876,7 +612,6 @@ class LiveBroker(BaseBroker):
                 "max_daily_loss_limit_eur": round(self.daily_loss_limit_eur(total_val), 2),
                 "open_positions_count": len(positions),
                 "pending_triggers_count": len(pending_triggers),
-                "ibkr_pricing_tier": getattr(settings, "IBKR_PRICING_TIER", "tiered"),
                 "max_fee_drag_pct": getattr(settings, "MAX_FEE_DRAG_PCT", 3.5),
             }
 
@@ -925,7 +660,7 @@ class LiveBroker(BaseBroker):
         trigger_id: Optional[int] = None
     ) -> Dict[str, Any]:
         """
-        Submits real buy order to the brokerage API (IBKR / Alpaca) with real money.
+        Submits real buy order to the brokerage API (Trading 212 / Alpaca) with real money.
         Validates kill switch, daily drawdown, market hours, and settled capital.
         """
         # 1. Verify live execution interlocks
@@ -1047,7 +782,6 @@ class LiveBroker(BaseBroker):
                 price_native=price_native,
                 currency=currency,
                 broker=settings.LIVE_BROKER,
-                pricing_tier=getattr(settings, "IBKR_PRICING_TIER", "tiered"),
                 order_action="BUY"
             )
             fee_eur = fee_info["fee_eur"]
@@ -1082,8 +816,7 @@ class LiveBroker(BaseBroker):
             price_eur = currency_service.to_eur(price_native, currency)
             actual_cost_eur = round(shares * price_eur, 2)
             fee_info = calculate_broker_fee(
-                ticker=ticker, shares=shares, price_native=price_native, currency=currency, broker=settings.LIVE_BROKER,
-                pricing_tier=getattr(settings, "IBKR_PRICING_TIER", "tiered"), order_action="BUY"
+                ticker=ticker, shares=shares, price_native=price_native, currency=currency, broker=settings.LIVE_BROKER, order_action="BUY"
             )
             fee_eur = fee_info["fee_eur"]
             logger.info(
@@ -1221,7 +954,6 @@ class LiveBroker(BaseBroker):
                 price_native=exit_price_native,
                 currency=pos.currency,
                 broker=settings.LIVE_BROKER,
-                pricing_tier=getattr(settings, "IBKR_PRICING_TIER", "tiered"),
                 order_action="SELL"
             )
             exit_fee_eur = exit_fee_info["fee_eur"]
@@ -1416,7 +1148,6 @@ class LiveBroker(BaseBroker):
                 stop_loss_native=stop_loss,
                 take_profit_native=take_profit,
                 broker=settings.LIVE_BROKER,
-                pricing_tier=getattr(settings, "IBKR_PRICING_TIER", "tiered"),
                 max_fee_drag_pct=getattr(settings, "MAX_FEE_DRAG_PCT", 3.5)
             )
             if not viability["viable"]:
@@ -1601,14 +1332,11 @@ class LiveBroker(BaseBroker):
                 return []
             plans = await self._pending_trigger_plans(session)
 
-            unique_tickers = list({(t.ticker, t.currency) for t in triggers if t.status == "PENDING"})
-            ib_prices = await self._fetch_ibkr_prices(unique_tickers) if unique_tickers else {}
-
             results = []
             quote_cache = {}
             for t in triggers:
-                curr_price = ib_prices.get(t.ticker)
-                if not curr_price and t.status == "PENDING":
+                curr_price = None
+                if t.status == "PENDING":
                     # Last known quote, also while the market is closed: the price at creation is stale
                     if t.ticker not in quote_cache:
                         quote_cache[t.ticker] = await asyncio.to_thread(market_data_provider.get_stock_data, t.ticker)
@@ -1668,14 +1396,8 @@ class LiveBroker(BaseBroker):
                 if not is_open:
                     continue
 
-                curr_price = None
-                if settings.LIVE_BROKER.lower() == "ibkr":
-                    ib_prices = await self._fetch_ibkr_prices([(t.ticker, t.currency)])
-                    curr_price = ib_prices.get(t.ticker)
-                if not curr_price:
-                    data = await asyncio.to_thread(market_data_provider.get_stock_data, t.ticker)
-                    if data:
-                        curr_price = data["price"]
+                data = await asyncio.to_thread(market_data_provider.get_stock_data, t.ticker)
+                curr_price = data["price"] if data else None
                 if not curr_price:
                     continue
 
@@ -1766,30 +1488,13 @@ class LiveBroker(BaseBroker):
                     self._last_pnl_refresh = now
                     return
 
-                unique_pos = list({(p.ticker, p.currency) for p in positions})
-                ib_prices = await self._fetch_ibkr_prices(unique_pos) if (unique_pos and settings.LIVE_BROKER.lower() == "ibkr") else {}
-                # IBKR's own per-position marketPrice (native currency) wins so values match the broker's.
-                try:
-                    ib = self._ib if settings.LIVE_BROKER.lower() == "ibkr" else None
-                    pf = {
-                        (i.contract.symbol.upper(), (i.contract.currency or "USD").upper()): float(i.marketPrice)
-                        for i in (ib.portfolio() if ib and ib.isConnected() else [])
-                        if i.marketPrice == i.marketPrice and i.marketPrice > 0
-                    }
-                except Exception as e:
-                    logger.debug(f"IBKR portfolio() prices unavailable: {e}")
-                    pf = {}
-
                 for p in positions:
                     is_open, _ = check_market_hours(p.ticker)
                     if not is_open and p.current_price_native and p.current_price_native > 0:
                         continue
 
-                    curr_price = pf.get((p.ticker.upper().split(".")[0], (p.currency or "USD").upper())) or ib_prices.get(p.ticker)
-                    if not curr_price:
-                        data = await asyncio.to_thread(market_data_provider.get_stock_data, p.ticker)
-                        if data:
-                            curr_price = data["price"]
+                    data = await asyncio.to_thread(market_data_provider.get_stock_data, p.ticker)
+                    curr_price = data["price"] if data else None
 
                     if curr_price:
                         p.current_price_native = curr_price
@@ -1820,32 +1525,8 @@ class LiveBroker(BaseBroker):
                 await session.commit()
                 self._last_pnl_refresh = time.time()
 
-    async def _fetch_ibkr_account_values(self, ib: Any) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-        """
-        Reads (cash, net liquidation, gross position value) in base currency from the IBKR account summary.
-        Cash stays the real balance (snapshots and deposit detection need it); AvailableFunds is kept apart
-        for sizing buys (_spendable_cash).
-        """
-        ib_cash = None
-        ib_total = None
-        ib_equity = None
-        available = None
-        for s in await ib.accountSummaryAsync():
-            if s.currency in (settings.BASE_CURRENCY, "EUR", "BASE"):
-                if s.tag in ("TotalCashValue", "CashBalance") and ib_cash is None:
-                    ib_cash = float(s.value)
-                elif s.tag == "NetLiquidation" and ib_total is None:
-                    ib_total = float(s.value)
-                elif s.tag == "GrossPositionValue" and ib_equity is None:
-                    ib_equity = float(s.value)
-                elif s.tag == "AvailableFunds" and available is None:
-                    available = float(s.value)
-        if available is not None:
-            self._available_funds_eur = max(0.0, available)
-        return ib_cash, ib_total, ib_equity
-
     def _spendable_cash(self, cash_eur: float) -> float:
-        """Cash a buy may use: the balance, capped at IBKR AvailableFunds when known (unsettled sale proceeds, deposit holds)."""
+        """Cash a buy may use: the balance, capped at the broker's buying power when known (unsettled sale proceeds, deposit holds)."""
         if self._available_funds_eur is None:
             return cash_eur
         return min(cash_eur, self._available_funds_eur)
@@ -1857,19 +1538,13 @@ class LiveBroker(BaseBroker):
         Keeps the last known balance when the broker is unreachable.
         """
         broker = settings.LIVE_BROKER.lower()
-        if broker not in ("ibkr", "trading212"):
+        if broker != "trading212":
             # The Alpaca sync only records balances and never touches positions
             await self.sync_account_state()
             return
         try:
-            if broker == "trading212":
-                ib_cash, ib_total, ib_equity = await self._fetch_t212_account_values()
-            else:
-                ib = await self._get_ib(timeout=5.0)
-                if not (ib and ib.isConnected()):
-                    raise ConnectionError("Persistent IB client not connected.")
-                ib_cash, ib_total, ib_equity = await self._fetch_ibkr_account_values(ib)
-            if ib_cash is None:
+            acct_cash, acct_total, acct_equity = await self._fetch_t212_account_values()
+            if acct_cash is None:
                 return
 
             async with AsyncSessionLocal() as session:
@@ -1877,35 +1552,24 @@ class LiveBroker(BaseBroker):
                     select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True).order_by(desc(PortfolioSnapshot.timestamp), desc(PortfolioSnapshot.id))
                 )
                 latest = snap_res.scalars().first()
-                if latest and latest.cash_eur == ib_cash and (ib_total is None or latest.total_value_eur == ib_total) and (ib_equity is None or latest.equity_eur == ib_equity):
+                if latest and latest.cash_eur == acct_cash and (acct_total is None or latest.total_value_eur == acct_total) and (acct_equity is None or latest.equity_eur == acct_equity):
                     return
 
                 pos_res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == True))
-                equity_val = ib_equity if ib_equity is not None else 0.0
+                equity_val = acct_equity if acct_equity is not None else 0.0
                 session.add(PortfolioSnapshot(
-                    cash_eur=ib_cash,
+                    cash_eur=acct_cash,
                     equity_eur=equity_val,
-                    total_value_eur=ib_total if ib_total is not None else (ib_cash + equity_val),
+                    total_value_eur=acct_total if acct_total is not None else (acct_cash + equity_val),
                     daily_pnl_eur=0.0,
                     daily_pnl_pct=0.0,
                     open_positions_count=len(pos_res.scalars().all()),
                     is_live=True
                 ))
                 await session.commit()
-                logger.info(f"Live cash balance synced from {broker.upper()}: €{ib_cash:.2f}")
+                logger.info(f"Live cash balance synced from {broker.upper()}: €{acct_cash:.2f}")
         except Exception as e:
             logger.warning(f"{broker.upper()} cash balance sync note: {e}")
-
-    @staticmethod
-    def _last_sell_fill(ib: Any, ticker: str, currency: str) -> Optional[float]:
-        """Average price of the latest SELL fill for the symbol in this gateway session, else None."""
-        symbol = ticker.upper().split(".")[0]
-        sells = [
-            f for f in ib.fills()
-            if f.contract.symbol.upper() == symbol and (f.contract.currency or "").upper() == (currency or "USD").upper()
-            and f.execution.side == "SLD"
-        ]
-        return float(max(sells, key=lambda f: f.execution.time).execution.avgPrice) if sells else None
 
     async def _planned_levels(self, session, sym: str) -> Tuple[Optional[float], Optional[float]]:
         """
@@ -1997,7 +1661,7 @@ class LiveBroker(BaseBroker):
             return None
 
     async def _sync_t212_account(self) -> None:
-        """Trading 212 version of the IBKR reconcile: snapshot, adopt untracked holdings, close confirmed-gone positions."""
+        """Trading 212 reconcile: snapshot, adopt untracked holdings, close confirmed-gone positions."""
         async with self._t212_lock:
             await self._sync_t212_locked()
 
@@ -2052,84 +1716,12 @@ class LiveBroker(BaseBroker):
 
     async def sync_account_state(self) -> Dict[str, Any]:
         """
-        Polls broker API (IBKR / Trading 212 / Alpaca) for live account values and positions, and aligns the local database:
+        Polls broker API (Trading 212 / Alpaca) for live account values and positions, and aligns the local database:
         adopts holdings the bot never booked and books a SELL for positions the broker no longer holds.
         """
         logger.info(f"Syncing account state with {settings.LIVE_BROKER.upper()}...")
         broker = settings.LIVE_BROKER.lower()
-        if broker == "ibkr":
-            try:
-                ib = await self._get_ib(timeout=5.0)
-                if not (ib and ib.isConnected()):
-                    raise ConnectionError("Persistent IB client not connected.")
-                ib_cash, ib_total, ib_equity = await self._fetch_ibkr_account_values(ib)
-
-                ib_positions = ib.positions()
-
-                async with AsyncSessionLocal() as session:
-                    res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == True))
-                    # Local tickers carry Yahoo suffixes (ASML.AS) while IBKR reports the bare
-                    # symbol (ASML), so match on (base symbol, currency).
-                    existing_live = {
-                        (p.ticker.upper().split(".")[0], (p.currency or "USD").upper()): p
-                        for p in res.scalars().all()
-                    }
-
-                    ib_keys = set()
-                    adopted = []
-                    stops_to_place = []
-                    for p in ib_positions:
-                        sym = p.contract.symbol.upper()
-                        shares = float(p.position)
-                        cost_native = float(p.avgCost)
-                        curr_code = p.contract.currency or "USD"
-                        key = (sym, curr_code.upper())
-                        if shares <= 0:
-                            logger.warning(f"IBKR reports non-long position {shares} {sym}; not tracked as an open position.")
-                            continue
-                        ib_keys.add(key)
-                        if key in existing_live:
-                            await self._update_tracked_holding(session, existing_live[key], sym, shares, cost_native, curr_code)
-                        else:
-                            # IBKR avgCost already includes commission; sum the session's BUY commissions for fees_eur.
-                            # shortcut: ib.fills() only covers this gateway session, so older adoptions keep fees 0; upgrade via reqExecutions.
-                            fees_eur = sum(
-                                currency_service.to_eur(f.commissionReport.commission, f.commissionReport.currency or curr_code)
-                                for f in ib.fills()
-                                if f.contract.conId == p.contract.conId and f.execution.side == "BOT"
-                                and f.commissionReport and f.commissionReport.commission == f.commissionReport.commission
-                            )
-                            await self._adopt_holding(session, sym, sym, curr_code, shares, cost_native, fees_eur, adopted, stops_to_place)
-
-                    # ib.positions() can be briefly empty after a reconnect: only a fresh broker answer may close a position
-                    gone = [pos for key, pos in existing_live.items() if key not in ib_keys]
-                    if gone:
-                        held = {
-                            (bp.contract.symbol.upper(), (bp.contract.currency or "USD").upper())
-                            for bp in await ib.reqPositionsAsync() if float(bp.position) > 0
-                        }
-                        gone = [pos for pos in gone if (pos.ticker.upper().split(".")[0], (pos.currency or "USD").upper()) not in held]
-
-                    if ib_cash is not None:
-                        equity_val = ib_equity if ib_equity is not None else 0.0
-                        total_val = ib_total if ib_total is not None else (ib_cash + equity_val)
-                        snapshot = PortfolioSnapshot(
-                            cash_eur=ib_cash,
-                            equity_eur=equity_val,
-                            total_value_eur=total_val,
-                            daily_pnl_eur=0.0,
-                            daily_pnl_pct=0.0,
-                            open_positions_count=len(ib_positions),
-                            is_live=True
-                        )
-                        session.add(snapshot)
-                    await session.commit()
-                await self._finish_sync(
-                    "IBKR", [(pos, self._last_sell_fill(ib, pos.ticker, pos.currency)) for pos in gone], stops_to_place, adopted
-                )
-            except Exception as e:
-                logger.warning(f"IBKR sync communication note: {e}")
-        elif broker == "trading212":
+        if broker == "trading212":
             try:
                 await self._sync_t212_account()
             except Exception as e:
@@ -2172,7 +1764,7 @@ class LiveBroker(BaseBroker):
 
     async def check_connection(self, force: bool = False) -> Dict[str, Any]:
         """
-        Actively probes connectivity to the configured live brokerage API (IBKR / Trading 212 / Alpaca).
+        Actively probes connectivity to the configured live brokerage API (Trading 212 / Alpaca).
         Caches the status for self._connection_check_ttl seconds unless force=True.
         """
         async with self._connection_lock:
@@ -2190,53 +1782,7 @@ class LiveBroker(BaseBroker):
                 "checked_at": utc_iso,
             }
 
-            if broker == "ibkr":
-                status_data["host"] = settings.IBKR_HOST
-                status_data["port"] = settings.IBKR_PORT
-                start_t = time.perf_counter()
-                try:
-                    from ib_async import IB
-                    if self._ib is None:
-                        self._ib = IB()
-                        self._ib.disconnectedEvent += self._on_ib_disconnected
-                        self._ib.errorEvent += self._on_ib_error
-
-                    if not self._ib.isConnected():
-                        await self._ib.connectAsync(
-                            host=settings.IBKR_HOST,
-                            port=settings.IBKR_PORT,
-                            clientId=settings.IBKR_CLIENT_ID,
-                            timeout=5.0,
-                            readonly=False
-                        )
-
-                    latency = round((time.perf_counter() - start_t) * 1000, 1)
-                    managed_accts = self._ib.managedAccounts()
-                    server_version = self._ib.client.serverVersion()
-                    acct_id = settings.IBKR_ACCOUNT_ID or (managed_accts[0] if managed_accts else None)
-
-                    status_data.update({
-                        "connected": True,
-                        "status": "ONLINE",
-                        "latency_ms": latency,
-                        "server_version": server_version,
-                        "accounts": managed_accts,
-                        "account_id": acct_id,
-                        "message": f"Connected to IBKR Gateway (Latency: {latency}ms, Server v{server_version})"
-                    })
-                except Exception as e:
-                    elapsed = round((time.perf_counter() - start_t) * 1000, 1)
-                    err_msg = str(e).strip() or type(e).__name__
-                    hint = "Check if IB Gateway container is running and 2FA notification is approved on IBKR Mobile."
-                    status_data.update({
-                        "connected": False,
-                        "status": "OFFLINE",
-                        "latency_ms": elapsed,
-                        "error": err_msg,
-                        "account_id": settings.IBKR_ACCOUNT_ID,
-                        "message": f"IBKR Gateway unreachable at {settings.IBKR_HOST}:{settings.IBKR_PORT} ({err_msg}). {hint}"
-                    })
-            elif broker == "trading212":
+            if broker == "trading212":
                 env = "DEMO" if settings.TRADING212_DEMO else "LIVE"
                 status_data["environment"] = env
                 start_t = time.perf_counter()

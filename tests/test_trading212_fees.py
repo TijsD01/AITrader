@@ -37,11 +37,6 @@ def test_uk_stamp_duty_buy_only():
     assert _fee("SHEL.L", "GBP")["fee_native"] > _fee("SHEL.L", "GBP", "SELL")["fee_native"]
 
 
-def test_min_order_floor_only_for_ibkr(monkeypatch):
-    monkeypatch.setattr(settings, "MIN_ORDER_EUR_IBKR_EU", 100.0)
-    monkeypatch.setattr(settings, "MIN_ORDER_EUR_IBKR_US", 35.0)
+def test_no_min_order_floor():
     assert get_min_viable_order_eur("ASML.AS", "EUR") < 10
     assert get_min_viable_order_eur("AAPL", "USD") < 10
-    monkeypatch.setattr(settings, "LIVE_BROKER", "ibkr")
-    assert get_min_viable_order_eur("ASML.AS", "EUR") >= 100.0
-    assert get_min_viable_order_eur("AAPL", "USD") >= 35.0

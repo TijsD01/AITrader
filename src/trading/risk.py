@@ -49,7 +49,7 @@ def calculate_position_allocation(
       allocation = available_cash / max(1, max_positions - current_positions_count)
       Capped at max_single_order_eur and available_cash.
       If dividing across all slots yields allocations that are too small to justify
-      broker fees (e.g. IBKR European minimum commission €2.00-€3.00), it dynamically
+      broker fees (e.g. a minimum commission or FX fee), it dynamically
       consolidates slots so each trade carries sufficient capital to keep fee drag under ~3.5%.
     
     When full_budget_utilization is False:
@@ -271,7 +271,6 @@ def validate_buy_order(
             stop_loss_native=stop_loss_native,
             take_profit_native=take_profit_native,
             broker=settings.LIVE_BROKER,
-            pricing_tier=getattr(settings, "IBKR_PRICING_TIER", "tiered"),
             max_fee_drag_pct=getattr(settings, "MAX_FEE_DRAG_PCT", 3.5)
         )
         if not viability["viable"]:

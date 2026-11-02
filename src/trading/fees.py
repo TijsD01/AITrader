@@ -1,7 +1,6 @@
 """
 Broker Fee and Commission Modeling for the Multi-Agent Trading System.
-Provides detailed transaction cost calculations for Interactive Brokers (IBKR),
-Trading 212 and Alpaca, enforcing economic viability guardrails to prevent fee drag
+Provides transaction cost calculations for Trading 212 and Alpaca, enforcing economic viability guardrails to prevent fee drag
 from destroying portfolio returns on small accounts.
 """
 
@@ -45,19 +44,16 @@ def calculate_broker_fee(
     price_native: float,
     currency: str = "EUR",
     broker: Optional[str] = None,
-    pricing_tier: Optional[str] = None,
     order_action: str = "BUY"
 ) -> Dict[str, Any]:
     """
     Calculates estimated broker commissions and regulatory fees for a single order.
     
     Supported Brokers:
-      - IBKR (Interactive Brokers): Supports 'tiered' (default) and 'fixed' pricing for EU and US equities.
       - Trading 212: no commission, 0.15% FX fee on non-EUR instruments.
       - Alpaca: Commission-free US equities (SEC/FINRA regulatory fees on sell only).
     """
-    broker_name = (broker or settings.LIVE_BROKER or "ibkr").lower()
-    tier = (pricing_tier or getattr(settings, "IBKR_PRICING_TIER", "tiered")).lower()
+    broker_name = (broker or settings.LIVE_BROKER or "trading212").lower()
     action = order_action.upper()
     curr = currency.upper()
 
@@ -65,66 +61,7 @@ def calculate_broker_fee(
     trade_value_eur = currency_service.to_eur(trade_value_native, curr)
     is_eu = is_european_ticker(ticker, curr)
 
-    if broker_name == "ibkr":
-        if is_eu:
-            # European & UK Equities on IBKR
-            is_xetra = ticker.upper().endswith(".DE")
-            is_uk = ticker.upper().endswith(".L") or curr == "GBP"
-            # French Financial Transaction Tax (TTF): 0.4% on BUY of French firms with market cap > €1bn
-            # shortcut: every .PA ticker is taxed (official list is ~100 firms >€1bn cap; also overcharges non-French .PA like AIR.PA), upgrade to the yearly DGFiP list when trading French small/mid caps
-            ftt = round(trade_value_native * 0.004, 2) if (ticker.upper().endswith(".PA") and action == "BUY") else 0.0
-            ftt_note = f" + €{ftt:.2f} FTT" if ftt > 0 else ""
-            if tier == "tiered":
-                # IBKR Tiered: 0.05% of value, min €1.25 (£1.00 for UK), max €29.00
-                min_base = 1.00 if is_uk else 1.25
-                base_comm = max(min_base, min(29.0, trade_value_native * 0.0005))
-                # Third-party exchange + clearing fees:
-                # Xetra: ~€0.95, Euronext: ~€0.65, LSE: ~£0.35
-                exchange_clearing = 0.95 if is_xetra else (0.35 if is_uk else 0.65)
-                # UK Stamp Duty Reserve Tax (SDRT): 0.5% on BUY only for UK equities (.L)
-                stamp_duty = round(trade_value_native * 0.005, 2) if (is_uk and action == "BUY") else 0.0
-                fee_native = round(base_comm + exchange_clearing + stamp_duty + ftt, 2)
-                sdrt_note = f" + £{stamp_duty:.2f} SDRT" if stamp_duty > 0 else ""
-                curr_sym = "£" if is_uk else "€"
-                breakdown = f"IBKR EU Tiered ({curr_sym}{base_comm:.2f} comm + {curr_sym}{exchange_clearing:.2f} exch/clr{sdrt_note}{ftt_note})"
-            else:
-                # IBKR Fixed: 0.05% of value, min €3.00 (Euronext/LSE) or €4.00 (XETRA), max €29.00
-                min_fee = 4.00 if is_xetra else 3.00
-                stamp_duty = round(trade_value_native * 0.005, 2) if (is_uk and action == "BUY") else 0.0
-                fee_native = round(max(min_fee, min(29.0, trade_value_native * 0.0005)) + stamp_duty + ftt, 2)
-                sdrt_note = f" + £{stamp_duty:.2f} SDRT" if stamp_duty > 0 else ""
-                curr_sym = "£" if is_uk else "€"
-                breakdown = f"IBKR EU Fixed (min {curr_sym}{min_fee:.2f} or 0.05%{sdrt_note}{ftt_note})"
-            fee_eur = currency_service.to_eur(fee_native, curr)
-        else:
-            # US Equities on IBKR (priced in USD)
-            if tier == "tiered":
-                # IBKR Tiered: $0.0035/share, min $0.35, max 1.0% of trade value
-                base_comm = max(0.35, shares * 0.0035)
-                # Exchange & clearing fees (~$0.00020/share)
-                exchange_clearing = max(0.01, shares * 0.00020)
-                reg_fees = 0.0
-                if action == "SELL":
-                    # SEC fee: $0.0000278 * trade value; FINRA TAF: $0.000166/share (max $8.30)
-                    sec_fee = trade_value_native * 0.0000278
-                    finra_taf = min(8.30, shares * 0.000166)
-                    reg_fees = sec_fee + finra_taf
-                total_usd = base_comm + exchange_clearing + reg_fees
-                # Capped at 1% of trade value
-                fee_native = round(min(total_usd, max(0.35, trade_value_native * 0.01)), 2)
-                breakdown = f"IBKR US Tiered (${base_comm:.2f} comm + ${exchange_clearing + reg_fees:.2f} exch/reg)"
-            else:
-                # IBKR Fixed: $0.005/share, min $1.00, max 1.0% of trade value
-                base_comm = max(1.00, shares * 0.005)
-                reg_fees = 0.0
-                if action == "SELL":
-                    reg_fees = (trade_value_native * 0.0000278) + min(8.30, shares * 0.000166)
-                total_usd = base_comm + reg_fees
-                fee_native = round(min(total_usd, max(1.00, trade_value_native * 0.01)), 2)
-                breakdown = f"IBKR US Fixed (min $1.00 or $0.005/sh)"
-            fee_eur = round(currency_service.to_eur(fee_native, curr if curr != "EUR" else "USD"), 2)
-
-    elif broker_name == "trading212":
+    if broker_name == "trading212":
         # Trading 212 Invest: no commission; 0.15% FX fee if instrument currency != EUR (buy and sell)
         fx = trade_value_native * 0.0015 if curr != "EUR" else 0.0
         ftt = trade_value_native * 0.004 if (ticker.upper().endswith(".PA") and action == "BUY") else 0.0
@@ -155,7 +92,6 @@ def calculate_broker_fee(
 
     return {
         "broker": broker_name.upper(),
-        "pricing_tier": tier,
         "is_european": is_eu,
         "currency": curr,
         "trade_value_native": trade_value_native,
@@ -173,7 +109,6 @@ def calculate_round_trip_fee(
     exit_price: Optional[float] = None,
     currency: str = "EUR",
     broker: Optional[str] = None,
-    pricing_tier: Optional[str] = None
 ) -> Dict[str, Any]:
     """Calculates entry + exit round-trip broker commission and fee drag."""
     exit_p = exit_price if (exit_price and exit_price > 0) else entry_price
@@ -183,7 +118,6 @@ def calculate_round_trip_fee(
         price_native=entry_price,
         currency=currency,
         broker=broker,
-        pricing_tier=pricing_tier,
         order_action="BUY"
     )
     exit_fee_info = calculate_broker_fee(
@@ -192,7 +126,6 @@ def calculate_round_trip_fee(
         price_native=exit_p,
         currency=currency,
         broker=broker,
-        pricing_tier=pricing_tier,
         order_action="SELL"
     )
 
@@ -214,34 +147,14 @@ def get_min_viable_order_eur(
     ticker: str,
     currency: str = "EUR",
     broker: Optional[str] = None,
-    pricing_tier: Optional[str] = None,
     max_fee_drag_pct: Optional[float] = None
 ) -> float:
     """
     Computes the minimum trade allocation (in EUR) required to keep round-trip
     broker fees below the maximum allowable fee drag percentage (default 3.5%).
     """
-    broker_name = (broker or settings.LIVE_BROKER or "ibkr").lower()
-    tier = (pricing_tier or getattr(settings, "IBKR_PRICING_TIER", "tiered")).lower()
-    max_drag = max_fee_drag_pct if max_fee_drag_pct is not None else getattr(settings, "MAX_FEE_DRAG_PCT", 3.8)
-    is_eu = is_european_ticker(ticker, currency) if ticker else (currency.upper() == "EUR" if currency else True)
-
-    if broker_name == "ibkr":
-        if is_eu:
-            # On IBKR Tiered EU, typical round-trip is ~€3.80 (€1.90 BUY + €1.90 SELL).
-            # On Fixed EU, round-trip is ~€6.00 to €8.00.
-            rt_min = 6.00 if tier == "fixed" else 3.80
-            configured_min = getattr(settings, "MIN_ORDER_EUR_IBKR_EU", 100.0)
-            calculated_min = round(rt_min / (max_drag / 100.0), 2)
-            return max(configured_min, calculated_min)
-        else:
-            # On IBKR Tiered US, round-trip is ~$0.70 - $0.80 (~€0.70).
-            # On Fixed US, round-trip is ~$2.00 (~€1.85).
-            rt_min_eur = 1.85 if tier == "fixed" else 0.75
-            configured_min = getattr(settings, "MIN_ORDER_EUR_IBKR_US", 35.0)
-            calculated_min = round(rt_min_eur / (max_drag / 100.0), 2)
-            return max(configured_min, calculated_min)
-    elif broker_name == "trading212":
+    broker_name = (broker or settings.LIVE_BROKER or "trading212").lower()
+    if broker_name == "trading212":
         return 1.0  # fractional, no commission minimum
     elif broker_name == "alpaca":
         return 20.0
@@ -255,7 +168,6 @@ def evaluate_trade_economic_viability(
     stop_loss_native: Optional[float] = None,
     take_profit_native: Optional[float] = None,
     broker: Optional[str] = None,
-    pricing_tier: Optional[str] = None,
     max_fee_drag_pct: Optional[float] = None,
     max_profit_erosion_pct: Optional[float] = None
 ) -> Dict[str, Any]:
@@ -263,7 +175,7 @@ def evaluate_trade_economic_viability(
     Evaluates whether a trade is economically viable after factoring in broker fees.
     Ensures that broker commissions do not exceed or excessively erode expected gains.
     """
-    label = (broker or settings.LIVE_BROKER or "ibkr").upper()
+    label = (broker or settings.LIVE_BROKER or "trading212").upper()
     if allocation_eur <= 0 or price_native <= 0:
         return {
             "viable": False,
@@ -287,7 +199,6 @@ def evaluate_trade_economic_viability(
         exit_price=take_profit_native or price_native,
         currency=currency,
         broker=broker,
-        pricing_tier=pricing_tier
     )
 
     rt_fee_eur = rt_info["round_trip_fee_eur"]
@@ -298,7 +209,6 @@ def evaluate_trade_economic_viability(
         ticker=ticker,
         currency=currency,
         broker=broker,
-        pricing_tier=pricing_tier,
         max_fee_drag_pct=max_drag
     )
 

@@ -74,11 +74,6 @@ class SettingsUpdateRequest(BaseModel):
     max_capital_usage_pct: Optional[float] = None
     max_deployable_capital_eur: Optional[float] = None
     clear_max_deployable_capital: Optional[bool] = None
-    ibkr_host: Optional[str] = None
-    ibkr_port: Optional[int] = None
-    ibkr_client_id: Optional[int] = None
-    ibkr_account_id: Optional[str] = None
-    ibkr_pricing_tier: Optional[str] = None
     max_fee_drag_pct: Optional[float] = None
 
 @router.get("/api/market-status")
@@ -518,11 +513,6 @@ async def get_settings():
             "llm_provider": settings.LLM_PROVIDER,
             "trading_mode": configs.get("TRADING_MODE", settings.TRADING_MODE),
             "live_trading_enabled": configs.get("LIVE_TRADING_ENABLED", str(settings.LIVE_TRADING_ENABLED)).lower() == "true",
-            "ibkr_host": configs.get("IBKR_HOST", settings.IBKR_HOST),
-            "ibkr_port": int(configs.get("IBKR_PORT", settings.IBKR_PORT)),
-            "ibkr_client_id": int(configs.get("IBKR_CLIENT_ID", settings.IBKR_CLIENT_ID)),
-            "ibkr_account_id": configs.get("IBKR_ACCOUNT_ID", settings.IBKR_ACCOUNT_ID or ""),
-            "ibkr_pricing_tier": configs.get("IBKR_PRICING_TIER", getattr(settings, "IBKR_PRICING_TIER", "tiered")),
             "max_fee_drag_pct": float(configs.get("MAX_FEE_DRAG_PCT", getattr(settings, "MAX_FEE_DRAG_PCT", 3.5))),
             "has_antigravity": bool(settings.LLM_PROVIDER == "antigravity" and llm_client.has_active_key()),
             "has_gemini_key": bool(settings.GEMINI_API_KEY and not settings.GEMINI_API_KEY.startswith("your_")),
@@ -660,67 +650,6 @@ async def update_settings(req: SettingsUpdateRequest):
             else:
                 session.add(SystemConfig(key="LIVE_TRADING_ENABLED", value=val))
             env_updates["LIVE_TRADING_ENABLED"] = bool(req.live_trading_enabled)
-
-        if req.ibkr_host is not None:
-            h = req.ibkr_host.strip()
-            if h:
-                settings.IBKR_HOST = h
-                res = await session.execute(select(SystemConfig).where(SystemConfig.key == "IBKR_HOST"))
-                cfg = res.scalars().first()
-                if cfg:
-                    cfg.value = h
-                else:
-                    session.add(SystemConfig(key="IBKR_HOST", value=h))
-                env_updates["IBKR_HOST"] = h
-
-        if req.ibkr_port is not None:
-            p = int(req.ibkr_port)
-            if p > 0:
-                settings.IBKR_PORT = p
-                res = await session.execute(select(SystemConfig).where(SystemConfig.key == "IBKR_PORT"))
-                cfg = res.scalars().first()
-                val = str(p)
-                if cfg:
-                    cfg.value = val
-                else:
-                    session.add(SystemConfig(key="IBKR_PORT", value=val))
-                env_updates["IBKR_PORT"] = p
-
-        if req.ibkr_client_id is not None:
-            cid = int(req.ibkr_client_id)
-            settings.IBKR_CLIENT_ID = cid
-            res = await session.execute(select(SystemConfig).where(SystemConfig.key == "IBKR_CLIENT_ID"))
-            cfg = res.scalars().first()
-            val = str(cid)
-            if cfg:
-                cfg.value = val
-            else:
-                session.add(SystemConfig(key="IBKR_CLIENT_ID", value=val))
-            env_updates["IBKR_CLIENT_ID"] = cid
-
-        if req.ibkr_account_id is not None:
-            acc = req.ibkr_account_id.strip()
-            settings.IBKR_ACCOUNT_ID = acc or None
-            res = await session.execute(select(SystemConfig).where(SystemConfig.key == "IBKR_ACCOUNT_ID"))
-            cfg = res.scalars().first()
-            val = acc or ""
-            if cfg:
-                cfg.value = val
-            else:
-                session.add(SystemConfig(key="IBKR_ACCOUNT_ID", value=val))
-            env_updates["IBKR_ACCOUNT_ID"] = val
-
-        if req.ibkr_pricing_tier is not None:
-            tier_val = req.ibkr_pricing_tier.strip().lower()
-            if tier_val in ("tiered", "fixed"):
-                settings.IBKR_PRICING_TIER = tier_val
-                res = await session.execute(select(SystemConfig).where(SystemConfig.key == "IBKR_PRICING_TIER"))
-                cfg = res.scalars().first()
-                if cfg:
-                    cfg.value = tier_val
-                else:
-                    session.add(SystemConfig(key="IBKR_PRICING_TIER", value=tier_val))
-                env_updates["IBKR_PRICING_TIER"] = tier_val
 
         if req.max_fee_drag_pct is not None:
             drag_val = float(req.max_fee_drag_pct)

@@ -106,7 +106,7 @@ class ColdStartEngine:
         all_l1_facts = [f"[{a['type'].upper()}] {a['content']}" for a in l1_atoms]
         filtered_l1 = [
             f for a, f in zip(l1_atoms, all_l1_facts)
-            if a.get("subject") not in ("IBKR_Broker_Fee", "RiskManager")
+            if a.get("subject") not in ("Broker_Fee", "RiskManager")
         ]
         l1_key_facts = (filtered_l1 or all_l1_facts[:2])[:5]
 
