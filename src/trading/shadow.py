@@ -483,7 +483,7 @@ class ShadowPortfolios:
         def fee_for(n: float) -> float:
             return calculate_broker_fee(
                 ticker=t.ticker, shares=n, price_native=price, currency=t.currency,
-                broker=settings.LIVE_BROKER, pricing_tier=getattr(settings, "IBKR_PRICING_TIER", "tiered"), order_action="BUY",
+                broker=settings.LIVE_BROKER, order_action="BUY",
             )["fee_eur"]
 
         if settings.WHOLE_SHARES_ONLY:
@@ -600,7 +600,7 @@ class ShadowPortfolios:
         proceeds = round(p.shares * price_eur, 2)
         fee = calculate_broker_fee(
             ticker=p.ticker, shares=p.shares, price_native=price, currency=p.currency,
-            broker=settings.LIVE_BROKER, pricing_tier=getattr(settings, "IBKR_PRICING_TIER", "tiered"), order_action="SELL",
+            broker=settings.LIVE_BROKER, order_action="SELL",
         )["fee_eur"]
         total_fees = round((p.fees_eur or 0.0) + fee, 2)
         pnl = round(proceeds - p.cost_basis_eur - total_fees, 2)

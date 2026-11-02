@@ -3,12 +3,8 @@ from unittest.mock import patch
 from config.settings import settings
 from src.trading.fees import (
     calculate_broker_fee,
-    calculate_round_trip_fee,
-    get_min_viable_order_eur,
-    evaluate_trade_economic_viability,
     is_european_ticker
 )
-from src.trading.risk import calculate_position_allocation, validate_buy_order
 from src.db.session import init_db, AsyncSessionLocal
 from src.db.models import Position, Trade, PortfolioSnapshot
 from src.trading.live import live_broker
@@ -20,172 +16,6 @@ def test_is_european_ticker():
     assert is_european_ticker("AAPL") is False
     assert is_european_ticker("NVDA") is False
     assert is_european_ticker("XYZ", currency="EUR") is True
-
-def test_ibkr_european_fee_calculation():
-    # 1. IBKR Tiered Euronext (e.g. BESI.AS, €33.33 trade)
-    fee_tiered = calculate_broker_fee(
-        ticker="BESI.AS",
-        shares=0.1895,
-        price_native=175.88,
-        currency="EUR",
-        broker="ibkr",
-        pricing_tier="tiered"
-    )
-    # Trade value ~ €33.33. Base commission min is €1.25 + €0.65 exchange/clearing = €1.90
-    assert fee_tiered["fee_eur"] >= 1.90
-    assert fee_tiered["is_european"] is True
-    assert fee_tiered["currency"] == "EUR"
-
-    # 2. IBKR Fixed Euronext (min €3.00)
-    fee_fixed = calculate_broker_fee(
-        ticker="BESI.AS",
-        shares=0.1895,
-        price_native=175.88,
-        currency="EUR",
-        broker="ibkr",
-        pricing_tier="fixed"
-    )
-    assert fee_fixed["fee_eur"] >= 3.00
-
-    # 3. IBKR Tiered XETRA (min €1.25 + €0.95 = €2.20)
-    fee_xetra = calculate_broker_fee(
-        ticker="SAP.DE",
-        shares=1.0,
-        price_native=180.0,
-        currency="EUR",
-        broker="ibkr",
-        pricing_tier="tiered"
-    )
-    assert fee_xetra["fee_eur"] >= 2.20
-
-def test_ibkr_us_fee_calculation():
-    # 1. US Tiered BUY (e.g. AAPL 1 share @ $200)
-    fee_us_buy = calculate_broker_fee(
-        ticker="AAPL",
-        shares=1.0,
-        price_native=200.0,
-        currency="USD",
-        broker="ibkr",
-        pricing_tier="tiered",
-        order_action="BUY"
-    )
-    # Tiered min is $0.35 + clearing ~$0.01 = ~$0.36 USD -> in EUR ~0.33
-    assert 0.25 <= fee_us_buy["fee_eur"] <= 0.60
-    assert fee_us_buy["is_european"] is False
-
-    # 2. US Fixed BUY (min $1.00 USD -> in EUR ~0.93)
-    fee_us_fixed = calculate_broker_fee(
-        ticker="AAPL",
-        shares=1.0,
-        price_native=200.0,
-        currency="USD",
-        broker="ibkr",
-        pricing_tier="fixed",
-        order_action="BUY"
-    )
-    assert 0.80 <= fee_us_fixed["fee_eur"] <= 1.20
-
-def test_round_trip_fee_and_fee_drag():
-    # Round-trip for €33.33 trade on BESI.AS
-    rt = calculate_round_trip_fee(
-        ticker="BESI.AS",
-        shares=0.1895,
-        entry_price=175.88,
-        exit_price=191.64,
-        currency="EUR",
-        broker="ibkr",
-        pricing_tier="tiered"
-    )
-    # Entry ~ €1.90, exit ~ €1.90 -> total round-trip ~ €3.80
-    assert rt["round_trip_fee_eur"] >= 3.80
-    # Fee drag = 3.80 / 33.33 = ~11.4%
-    assert rt["round_trip_drag_pct"] > 10.0
-
-def test_economic_viability_rejection():
-    # A €33.33 order on BESI.AS with 8% TP (+€2.67 gross profit)
-    # Round-trip fee €3.80 exceeds gross profit -> guaranteed loss!
-    viability = evaluate_trade_economic_viability(
-        ticker="BESI.AS",
-        allocation_eur=33.33,
-        price_native=175.88,
-        stop_loss_native=171.94,
-        take_profit_native=191.64,
-        currency="EUR",
-        broker="ibkr",
-        pricing_tier="tiered"
-    )
-    assert viability["viable"] is False
-    assert viability["net_profit_eur"] <= 0 or viability["fee_drag_pct"] > 3.5
-
-    # A €150.00 order on BESI.AS (gross profit at 9% is €13.50, fee is €3.80 -> net +€9.70)
-    viability_viable = evaluate_trade_economic_viability(
-        ticker="BESI.AS",
-        allocation_eur=150.0,
-        price_native=175.88,
-        stop_loss_native=171.94,
-        take_profit_native=191.64,
-        currency="EUR",
-        broker="ibkr",
-        pricing_tier="tiered"
-    )
-    assert viability_viable["viable"] is True
-    assert viability_viable["net_profit_eur"] > 0
-    assert viability_viable["fee_drag_pct"] <= 3.5
-
-def test_fee_aware_allocation_consolidation():
-    # In a €200 account with MAX_POSITIONS=6, raw division produces 200/6 = €33.33
-    # Fee-aware sizing consolidates slots so each allocation meets minimum viable size (~€75-€100)
-    alloc = calculate_position_allocation(
-        available_cash=200.0,
-        current_positions_count=0,
-        full_budget_utilization=True,
-        max_positions=6,
-        ticker="BESI.AS",
-        currency="EUR"
-    )
-    # Must NOT be diluted down to €33.33; should be consolidated into 2 slots (€100.00) or 1 slot (€200.00)
-    assert alloc >= 75.0
-    assert alloc in (100.0, 200.0)
-
-def test_validate_buy_order_fee_guardrail():
-    # Mock positions empty
-    positions = []
-    
-    # 1. Unviable €33.33 trade with price_native provided should be blocked
-    valid, msg = validate_buy_order(
-        ticker="BESI.AS",
-        current_positions=positions,
-        cash_eur=200.0,
-        portfolio_total_eur=200.0,
-        allocation_eur=33.33,
-        consensus_score=85,
-        auto_buy_enabled=True,
-        available_cash_eur=200.0,
-        price_native=175.88,
-        currency="EUR",
-        stop_loss_native=171.94,
-        take_profit_native=191.64
-    )
-    assert valid is False
-    assert "Fee guardrail" in msg
-
-    # 2. Viable €120.00 trade should be approved
-    valid_ok, msg_ok = validate_buy_order(
-        ticker="BESI.AS",
-        current_positions=positions,
-        cash_eur=200.0,
-        portfolio_total_eur=200.0,
-        allocation_eur=120.0,
-        consensus_score=85,
-        auto_buy_enabled=True,
-        available_cash_eur=200.0,
-        price_native=175.88,
-        currency="EUR",
-        stop_loss_native=168.0,
-        take_profit_native=195.0
-    )
-    assert valid_ok is True
-    assert msg_ok == "Approved"
 
 @pytest.mark.asyncio
 async def test_live_execution_fee_accounting():
@@ -215,8 +45,8 @@ async def test_live_execution_fee_accounting():
 
         mock_quote = {"price": 100.0, "currency": "USD", "name": "NVIDIA Corp"}
         with patch("src.trading.live.market_data_provider.get_stock_data", return_value=mock_quote), \
-             patch.object(live_broker, "_dispatch_real_order", side_effect=lambda **kw: ("ibkr_2001", kw["shares"], kw["price"])), \
-             patch.object(live_broker, "_dispatch_real_close", return_value="ibkr_exit_2002"):
+             patch.object(live_broker, "_dispatch_real_order", side_effect=lambda **kw: ("t212_2001", kw["shares"], kw["price"])), \
+             patch.object(live_broker, "_dispatch_real_close", return_value="t212_exit_2002"):
             # Execute BUY of €100
             buy_res = await live_broker.execute_buy(
                 ticker=ticker,
@@ -250,49 +80,6 @@ async def test_live_execution_fee_accounting():
         settings.LIVE_TRADING_ENABLED = orig_live
         settings.KILL_SWITCH_ACTIVE = orig_kill
         settings.ENFORCE_MARKET_HOURS = orig_enforce
-
-def test_uk_stamp_duty_sdr():
-    """Verify UK London Stock Exchange (.L) equities incur 0.5% SDRT on BUY only."""
-    # BUY £1000 of SHEL.L (100 shares @ £10.00)
-    fee_buy = calculate_broker_fee(
-        ticker="SHEL.L",
-        shares=100.0,
-        price_native=10.0,
-        currency="GBP",
-        broker="ibkr",
-        pricing_tier="tiered",
-        order_action="BUY"
-    )
-    # 0.5% of £1000 = £5.00 SDRT + IBKR base comm (~£1.00)
-    assert fee_buy["fee_native"] >= 6.0
-    assert "SDRT" in fee_buy["breakdown"]
-
-    # SELL £1000 of SHEL.L - no stamp duty on sells
-    fee_sell = calculate_broker_fee(
-        ticker="SHEL.L",
-        shares=100.0,
-        price_native=10.0,
-        currency="GBP",
-        broker="ibkr",
-        pricing_tier="tiered",
-        order_action="SELL"
-    )
-    assert "SDRT" not in fee_sell["breakdown"]
-    assert fee_sell["fee_native"] < fee_buy["fee_native"]
-
-
-def test_french_ftt_on_paris_buy():
-    """Verify Paris (.PA) equities incur 0.4% FTT on BUY only, and the round trip includes it."""
-    buy = calculate_broker_fee("MC.PA", 10.0, 100.0, "EUR", "ibkr", "tiered", "BUY")
-    sell = calculate_broker_fee("MC.PA", 10.0, 100.0, "EUR", "ibkr", "tiered", "SELL")
-    # €1000 order: €1.25 min comm + €0.65 exch/clr + €4.00 FTT
-    assert buy["fee_native"] == 5.90 and "FTT" in buy["breakdown"]
-    assert sell["fee_native"] == 1.90 and "FTT" not in sell["breakdown"]
-    assert calculate_broker_fee("MC.PA", 10.0, 100.0, "EUR", "ibkr", "fixed", "BUY")["fee_native"] == 7.00
-    # Amsterdam is not taxed
-    assert calculate_broker_fee("ASML.AS", 10.0, 100.0, "EUR", "ibkr", "tiered", "BUY")["fee_native"] == 1.90
-    rt = calculate_round_trip_fee("MC.PA", 10.0, 100.0, currency="EUR", broker="ibkr", pricing_tier="tiered")
-    assert rt["round_trip_fee_eur"] == 7.80
 
 @pytest.mark.asyncio
 async def test_risk_manager_veto_on_unviable_fees():

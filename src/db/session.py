@@ -103,10 +103,6 @@ async def init_db():
             "MAX_POSITIONS": str(settings.MAX_POSITIONS),
             "TRADING_MODE": settings.TRADING_MODE,
             "LIVE_TRADING_ENABLED": str(settings.LIVE_TRADING_ENABLED).lower(),
-            "IBKR_HOST": settings.IBKR_HOST,
-            "IBKR_PORT": str(settings.IBKR_PORT),
-            "IBKR_CLIENT_ID": str(settings.IBKR_CLIENT_ID),
-            "IBKR_ACCOUNT_ID": settings.IBKR_ACCOUNT_ID or "",
         }
 
         seeded_any = False
@@ -164,25 +160,6 @@ async def init_db():
                 settings.TRADING_MODE = m
         if "LIVE_TRADING_ENABLED" in db_configs:
             settings.LIVE_TRADING_ENABLED = db_configs["LIVE_TRADING_ENABLED"].strip().lower() == "true"
-        if "IBKR_HOST" in db_configs:
-            h = db_configs["IBKR_HOST"].strip()
-            if h:
-                settings.IBKR_HOST = h
-        if "IBKR_PORT" in db_configs:
-            try:
-                p = int(db_configs["IBKR_PORT"])
-                if p > 0:
-                    settings.IBKR_PORT = p
-            except Exception:
-                pass
-        if "IBKR_CLIENT_ID" in db_configs:
-            try:
-                settings.IBKR_CLIENT_ID = int(db_configs["IBKR_CLIENT_ID"])
-            except Exception:
-                pass
-        if "IBKR_ACCOUNT_ID" in db_configs:
-            aid = db_configs["IBKR_ACCOUNT_ID"].strip()
-            settings.IBKR_ACCOUNT_ID = aid if aid else None
 
         await session.commit()
 

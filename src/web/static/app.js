@@ -1161,7 +1161,7 @@ async function loadBrokerStatus(force = false) {
     const diagMsg = document.getElementById('diagBrokerMessage');
 
     if (diagName) {
-      diagName.textContent = brokerName === 'IBKR' ? 'IBKR (Interactive Brokers)' : (brokerName === 'TRADING212' ? 'Trading 212' : (brokerName === 'ALPACA' ? 'Alpaca Markets' : 'Paper Trading Engine'));
+      diagName.textContent = brokerName === 'TRADING212' ? 'Trading 212' : (brokerName === 'ALPACA' ? 'Alpaca Markets' : 'Paper Trading Engine');
     }
     if (diagDot && diagText) {
       if (isConnected) {
@@ -1310,19 +1310,6 @@ async function loadSettings() {
       document.getElementById('settingMarketHours').checked = data.enforce_market_hours !== false;
     }
 
-    if (document.getElementById('settingIbkrHost') && data.ibkr_host) {
-      document.getElementById('settingIbkrHost').value = data.ibkr_host;
-    }
-    if (document.getElementById('settingIbkrPort') && data.ibkr_port) {
-      document.getElementById('settingIbkrPort').value = data.ibkr_port;
-    }
-    if (document.getElementById('settingIbkrClientId') && data.ibkr_client_id !== undefined) {
-      document.getElementById('settingIbkrClientId').value = data.ibkr_client_id;
-    }
-    if (document.getElementById('settingIbkrAccountId')) {
-      document.getElementById('settingIbkrAccountId').value = data.ibkr_account_id || '';
-    }
-
     await loadMarketStatus();
     await loadBrokerStatus();
   } catch (e) {
@@ -1403,16 +1390,6 @@ async function saveSettings() {
       payload.trading_mode = tradingMode;
       payload.live_trading_enabled = (tradingMode === 'LIVE');
     }
-
-    const ibkrHostEl = document.getElementById('settingIbkrHost');
-    const ibkrPortEl = document.getElementById('settingIbkrPort');
-    const ibkrClientIdEl = document.getElementById('settingIbkrClientId');
-    const ibkrAccountIdEl = document.getElementById('settingIbkrAccountId');
-
-    if (ibkrHostEl && ibkrHostEl.value.trim()) payload.ibkr_host = ibkrHostEl.value.trim();
-    if (ibkrPortEl && !isNaN(parseInt(ibkrPortEl.value))) payload.ibkr_port = parseInt(ibkrPortEl.value);
-    if (ibkrClientIdEl && !isNaN(parseInt(ibkrClientIdEl.value))) payload.ibkr_client_id = parseInt(ibkrClientIdEl.value);
-    if (ibkrAccountIdEl) payload.ibkr_account_id = ibkrAccountIdEl.value.trim();
 
     const res = await fetch('/api/settings', {
       method: 'POST',
@@ -1534,56 +1511,21 @@ function setTriggerNavBadge(count) {
   else { b.classList.add('hidden'); }
 }
 
-async function saveBrokerConfig() {
-  const host = document.getElementById('settingIbkrHost')?.value.trim();
-  const port = parseInt(document.getElementById('settingIbkrPort')?.value);
-  const clientId = parseInt(document.getElementById('settingIbkrClientId')?.value);
-  const accountId = document.getElementById('settingIbkrAccountId')?.value.trim();
-
-  const payload = {};
-  if (host) payload.ibkr_host = host;
-  if (!isNaN(port) && port > 0) payload.ibkr_port = port;
-  if (!isNaN(clientId)) payload.ibkr_client_id = clientId;
-  if (accountId !== undefined) payload.ibkr_account_id = accountId;
-
-  const btn = document.getElementById('saveBrokerConfigBtn');
-  if (btn) btn.disabled = true;
-
-  try {
-    const res = await fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    if (res.ok) {
-      showToast('IBKR Broker settings saved successfully.');
-      await loadBrokerStatus(true);
-    } else {
-      const err = await res.json();
-      showToast(err.detail || 'Failed to save broker configuration.', true);
-    }
-  } catch (e) {
-    showToast('Network error saving broker configuration.', true);
-  } finally {
-    if (btn) btn.disabled = false;
-  }
-}
-
 async function reconnectBroker() {
   const btn = document.getElementById('settingsReconnectBtn');
   const icon = document.getElementById('settingsReconnectIcon');
   if (btn) btn.disabled = true;
   if (icon) icon.className = 'fa-solid fa-spinner fa-spin';
 
-  showToast('Connecting to IBKR Gateway...');
+  showToast('Connecting to broker...');
 
   try {
     const res = await fetch('/api/broker/reconnect', { method: 'POST' });
     const data = await res.json();
     if (data.connected) {
-      showToast(`IBKR connected successfully (${data.latency_ms || 0}ms)!`);
+      showToast(`Broker connected (${data.latency_ms || 0}ms)!`);
     } else {
-      showToast(`IBKR connection failed: ${data.error || data.message || 'Offline'}`, true);
+      showToast(`Broker connection failed: ${data.error || data.message || 'Offline'}`, true);
     }
     await loadBrokerStatus(true);
     await loadPortfolio();
@@ -2520,7 +2462,7 @@ async function openExtractModal() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        raw_text: sample || "Investigated BESI.AS pullback entry at €175.88. Enforced Euronext minimum €100 order size to limit IBKR tiered commission drag to 3.8%.",
+        raw_text: sample || "Investigated BESI.AS pullback entry at €175.88. Enforced Euronext minimum €100 order size to limit fee drag to 3.8%.",
         sync_to_store: true
       })
     });

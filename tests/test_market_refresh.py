@@ -82,7 +82,7 @@ async def test_trigger_job_syncs_account_balance_before_checking_triggers():
 @pytest.mark.asyncio
 async def test_trigger_job_still_checks_triggers_when_balance_sync_fails():
     check = AsyncMock(return_value=[])
-    with patch.object(paper_broker, "sync_cash_balance", side_effect=ConnectionError("IBKR down"), create=True), \
+    with patch.object(paper_broker, "sync_cash_balance", side_effect=ConnectionError("broker down"), create=True), \
          patch.object(paper_broker, "check_and_execute_triggers", check):
         await trading_scheduler.monitor_price_triggers()
 
@@ -188,17 +188,9 @@ async def test_market_data_refresh_endpoint_reports_the_refresh_result():
         assert key in body
 
 
-def _fake_ib(cash: str):
-    from types import SimpleNamespace
-    ib = SimpleNamespace()
-    ib.isConnected = lambda: True
-    ib.accountSummaryAsync = AsyncMock(return_value=[
-        SimpleNamespace(tag="TotalCashValue", currency="EUR", value=cash),
-        SimpleNamespace(tag="NetLiquidation", currency="EUR", value="9000.0"),
-        SimpleNamespace(tag="GrossPositionValue", currency="EUR", value="1500.0"),
-    ])
-    ib.positions = lambda: []  # IBKR lists no positions, e.g. briefly after a reconnect
-    return ib
+def _t212_values(cash: float):
+    # Broker answer for cash sync only; positions are never read by sync_cash_balance
+    return AsyncMock(return_value=(cash, 9000.0, 1500.0))
 
 
 async def _latest_live_cash():
@@ -215,7 +207,7 @@ async def test_live_cash_sync_records_broker_cash_and_keeps_unlisted_positions_o
     await init_db()
     ticker = "CASHSYNC_TEST"
     orig_broker = settings.LIVE_BROKER
-    settings.LIVE_BROKER = "ibkr"
+    settings.LIVE_BROKER = "trading212"
     try:
         async with AsyncSessionLocal() as session:
             session.add(Position(
@@ -226,7 +218,7 @@ async def test_live_cash_sync_records_broker_cash_and_keeps_unlisted_positions_o
             ))
             await session.commit()
 
-        with patch.object(live_broker, "_get_ib", AsyncMock(return_value=_fake_ib("7777.0"))):
+        with patch.object(live_broker, "_fetch_t212_account_values", _t212_values(7777.0)):
             await live_broker.sync_cash_balance()
 
         assert await _latest_live_cash() == 7777.0
@@ -247,10 +239,10 @@ async def test_live_cash_sync_keeps_last_balance_when_broker_is_disconnected():
     from src.trading.live import live_broker
     await init_db()
     orig_broker = settings.LIVE_BROKER
-    settings.LIVE_BROKER = "ibkr"
+    settings.LIVE_BROKER = "trading212"
     try:
         before = await _latest_live_cash()
-        with patch.object(live_broker, "_get_ib", AsyncMock(return_value=None)):
+        with patch.object(live_broker, "_fetch_t212_account_values", AsyncMock(side_effect=ConnectionError)):
             await live_broker.sync_cash_balance()
         assert await _latest_live_cash() == before
     finally:
@@ -263,7 +255,7 @@ async def test_live_cash_sync_adds_no_snapshot_when_cash_is_unchanged():
     from src.trading.live import live_broker
     await init_db()
     orig_broker = settings.LIVE_BROKER
-    settings.LIVE_BROKER = "ibkr"
+    settings.LIVE_BROKER = "trading212"
 
     async def count_snapshots():
         async with AsyncSessionLocal() as session:
@@ -272,7 +264,7 @@ async def test_live_cash_sync_adds_no_snapshot_when_cash_is_unchanged():
             )).scalar()
 
     try:
-        with patch.object(live_broker, "_get_ib", AsyncMock(return_value=_fake_ib("6543.21"))):
+        with patch.object(live_broker, "_fetch_t212_account_values", _t212_values(6543.21)):
             await live_broker.sync_cash_balance()
             await live_broker.sync_cash_balance()
         assert await count_snapshots() == 1

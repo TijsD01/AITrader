@@ -8,7 +8,7 @@ table, so the gain shown is value minus everything that was put in.
 A snapshot pair counts as a deposit (or withdrawal) when cash and total account value both jump the
 same way: a deposit raises cash and total alike, while a fill only swaps cash for shares (total about
 flat) and a market move changes shares, not cash. That holds for fills the bot never recorded too,
-such as an IBKR stop that closed a position between syncs. Cash the bot's own booked trades moved
+such as a broker stop that closed a position between syncs. Cash the bot's own booked trades moved
 between the two snapshots is taken out first, so a deposit next to a buy is still found at its full size.
 """
 import asyncio

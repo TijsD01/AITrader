@@ -16,7 +16,7 @@ async def test_settings_persistence_cycle():
         assert get_res.status_code == 200
         initial = get_res.json()
         assert "position_size_pct" in initial
-        assert "ibkr_host" in initial
+        assert "ibkr_host" not in initial
 
         # 2. Update settings via POST
         test_payload = {
@@ -24,11 +24,7 @@ async def test_settings_persistence_cycle():
             "min_consensus_score": 77,
             "position_size_pct": 0.12,
             "max_positions": 5,
-            "enforce_market_hours": False,
-            "ibkr_host": "172.17.0.2",
-            "ibkr_port": 4003,
-            "ibkr_client_id": 99,
-            "ibkr_account_id": "TEST_ACC_123"
+            "enforce_market_hours": False
         }
         post_res = await ac.post("/api/settings", json=test_payload)
         assert post_res.status_code == 200
@@ -40,10 +36,6 @@ async def test_settings_persistence_cycle():
         assert abs(settings.POSITION_SIZE_PCT - 0.12) < 1e-4
         assert settings.MAX_POSITIONS == 5
         assert settings.ENFORCE_MARKET_HOURS is False
-        assert settings.IBKR_HOST == "172.17.0.2"
-        assert settings.IBKR_PORT == 4003
-        assert settings.IBKR_CLIENT_ID == 99
-        assert settings.IBKR_ACCOUNT_ID == "TEST_ACC_123"
 
         # 4. Verify database SystemConfig contains the persisted records
         async with AsyncSessionLocal() as session:
@@ -54,10 +46,6 @@ async def test_settings_persistence_cycle():
             assert float(configs["POSITION_SIZE_PCT"]) == 0.12
             assert configs["MAX_POSITIONS"] == "5"
             assert configs["ENFORCE_MARKET_HOURS"] == "false"
-            assert configs["IBKR_HOST"] == "172.17.0.2"
-            assert configs["IBKR_PORT"] == "4003"
-            assert configs["IBKR_CLIENT_ID"] == "99"
-            assert configs["IBKR_ACCOUNT_ID"] == "TEST_ACC_123"
 
         # 5. Verify GET /api/settings returns the newly updated values
         get_after = await ac.get("/api/settings")
@@ -68,19 +56,13 @@ async def test_settings_persistence_cycle():
         assert abs(after_data["position_size_pct"] - 0.12) < 1e-4
         assert after_data["max_positions"] == 5
         assert after_data["enforce_market_hours"] is False
-        assert after_data["ibkr_host"] == "172.17.0.2"
-        assert after_data["ibkr_port"] == 4003
-        assert after_data["ibkr_client_id"] == 99
-        assert after_data["ibkr_account_id"] == "TEST_ACC_123"
 
         # 6. Revert back to original/sensible defaults
         revert_payload = {
             "auto_buy_enabled": True,
             "min_consensus_score": 70,
             "position_size_pct": initial.get("position_size_pct", 0.08),
-            "enforce_market_hours": True,
-            "ibkr_client_id": 1,
-            "ibkr_account_id": ""
+            "enforce_market_hours": True
         }
         revert_res = await ac.post("/api/settings", json=revert_payload)
         assert revert_res.status_code == 200

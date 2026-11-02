@@ -56,7 +56,7 @@ async def test_memory_store_crud(temp_db_path):
         title="Test Scenario",
         summary="A test scenario summary",
         context_content="Details here",
-        active_entities=["BESI.AS", "IBKR"]
+        active_entities=["BESI.AS"]
     )
     await store.update_scenario(sc)
     fetched_sc = await store.get_or_create_scenario("test-scenario")
@@ -76,7 +76,7 @@ async def test_memory_store_crud(temp_db_path):
     # 6. Wiki
     wiki_pages = await store.list_wiki_pages()
     assert len(wiki_pages) >= 1
-    assert any("ibkr" in w["page_id"].lower() for w in wiki_pages)
+    assert any("fee" in w["page_id"].lower() for w in wiki_pages)
 
 @pytest.mark.asyncio
 async def test_cold_start_engine():
@@ -93,13 +93,13 @@ async def test_asset_extractor():
     text = (
         "Deliberated BUY on BESI.AS with consensus score 85/100. "
         "Armed trigger #96 for BESI.AS at €175.88 with €100.00 allocation. "
-        "Enforced IBKR tiered commission minimum €1.90 with fee drag limit 3.8%."
+        "Enforced broker commission minimum €1.90 with fee drag limit 3.8%."
     )
     res = await AssetExtractor.extract_from_text(text, session_id="test_extract", sync_to_store=True)
     assert res["extracted_atoms_count"] >= 1
     # Check that atoms have extracted ticker and constraints
     extracted_subs = [a["subject"] for a in res["extracted_atoms"]]
-    assert any("BESI.AS" in s or "IBKR" in s or "Capital" in s for s in extracted_subs)
+    assert any("BESI.AS" in s or "Broker_Fee" in s or "Capital" in s for s in extracted_subs)
 
 @pytest.mark.asyncio
 async def test_agent_memory_client():
@@ -168,7 +168,7 @@ async def test_memory_api_endpoints():
 
         # 5. Extract endpoint
         res = await ac.post("/v3/memory/extract", json={
-            "raw_text": "Investigated BESI.AS pullback entry at €175.88. Enforced Euronext minimum €100 order size to limit IBKR tiered commission drag to 3.8%."
+            "raw_text": "Investigated BESI.AS pullback entry at €175.88. Enforced Euronext minimum €100 order size to limit fee drag to 3.8%."
         })
         assert res.status_code == 200
         ext_data = res.json()
@@ -373,7 +373,7 @@ async def test_search_tokenises_sentence_queries_and_keeps_instructions(temp_db_
 
     # Skills: sentence query matches via individual words
     skills = await store.search_skills(query="how do I avoid commission erosion on small orders?")
-    assert any(s["skill_id"] == "ibkr-tiered-fee-mitigation" for s in skills)
+    assert any(s["skill_id"] == "fee-drag-mitigation" for s in skills)
     assert await store.search_skills(query="%%%") == []
 
 
@@ -417,8 +417,8 @@ async def test_extractor_filters_stop_words_and_upserts_deterministically(temp_d
     # Trigger extraction must extract BESI.AS (not "for" or "entry" or "LIMIT_PULLBACK")
     r1 = await AssetExtractor.extract_from_text(
         "Armed order trigger #96 for BESI.AS (LIMIT_PULLBACK) at target price €175.88. "
-        "Est. IBKR round-trip commission: €1.79 (0.7% drag). "
-        "Enforced IBKR fee drag limit 3.8%.",
+        "Est. broker round-trip commission: €1.79 (0.7% drag). "
+        "Enforced broker fee drag limit 3.8%.",
         metadata={"ticker": "BESI.AS", "action": "BUY", "consensus_score": 85}
     )
     subjects = [a["subject"] for a in r1["extracted_atoms"]]
@@ -427,14 +427,14 @@ async def test_extractor_filters_stop_words_and_upserts_deterministically(temp_d
         assert bad not in subjects
 
     # Routine per-trade commission (€1.79 / 0.7%) is skipped; the 3.8% fee rule is extracted once
-    fee_atoms = [a for a in r1["extracted_atoms"] if a["subject"] == "IBKR_Broker_Fee"]
+    fee_atoms = [a for a in r1["extracted_atoms"] if a["subject"] == "Broker_Fee"]
     assert len(fee_atoms) == 1
     assert fee_atoms[0]["object"] == "3.8%"
 
     # Repeated extraction upserts the same deterministic atom_ids instead of multiplying rows
     await AssetExtractor.extract_from_text(
         "Armed order trigger #96 for BESI.AS (LIMIT_PULLBACK) at target price €174.50. "
-        "Enforced IBKR fee drag limit 3.8%.",
+        "Enforced broker fee drag limit 3.8%.",
         metadata={"ticker": "BESI.AS", "action": "HOLD", "consensus_score": 60}
     )
     besi_verdicts = [
@@ -481,7 +481,7 @@ async def test_l1_ranking_and_prune_and_compact(temp_db_path):
     ))
     for i, obj in enumerate(("3.8% max drag", "€100 minimum order")):
         await store.add_l1_atom(L1Atom(
-            atom_id=f"fee_{i}", type="instruction", subject="IBKR_Broker_Fee",
+            atom_id=f"fee_{i}", type="instruction", subject="Broker_Fee",
             predicate="fee_constraint_observed", object=obj, content=f"Fee constraint: {obj}."
         ))
     await store.add_l0_messages("sess_real", [L0Message(
@@ -493,7 +493,7 @@ async def test_l1_ranking_and_prune_and_compact(temp_db_path):
     assert "for" not in remaining_subjects
     assert "NVDA_FEE_TEST" not in remaining_subjects
     assert "POST" in remaining_subjects
-    fee_objs = {a["object"] for a in await store.search_l1_atoms(limit=100) if a["subject"] == "IBKR_Broker_Fee"}
+    fee_objs = {a["object"] for a in await store.search_l1_atoms(limit=100) if a["subject"] == "Broker_Fee"}
     assert {"3.8% max drag", "€100 minimum order"} <= fee_objs
     async with store._get_conn() as db:
         async with await db.execute("SELECT COUNT(*) FROM memory_l0_conversations WHERE session_id = 'sess_real'") as c:

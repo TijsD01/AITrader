@@ -94,7 +94,7 @@ class Settings(BaseSettings):
     TRADING_MODE: str = "PAPER"             # "PAPER" or "LIVE"
     LIVE_TRADING_ENABLED: bool = False      # Explicit safety interlock for real money
     FULL_BUDGET_UTILIZATION: bool = True    # Fully deploy available capital across active slots
-    LIVE_BROKER: str = "ibkr"               # "ibkr" (Interactive Brokers), "trading212" or "alpaca"
+    LIVE_BROKER: str = "trading212"         # "trading212" or "alpaca"
     KILL_SWITCH_ACTIVE: bool = False        # Emergency trading halt
     MAX_DAILY_LOSS_EUR: float = 500.0       # Daily drawdown stop: past it the kill switch turns on (buys halt, stops keep working)
     MAX_DAILY_LOSS_PCT: float = 3.0         # Same stop as % of account value; the lower of the two limits applies (0 = EUR only)
@@ -116,22 +116,15 @@ class Settings(BaseSettings):
     SENTIMENT_ANONYMIZE: bool = True        # Hide company name and ticker from the news-sentiment prompt
     SENTIMENT_VETO_SCORE: float = -0.4      # News sentiment at or below this blocks a buy; positive news adds nothing
     LEARNER_MIN_TRADES: int = 20            # Closed trades required between automatic learner recalibrations
-    # Buy whole shares only. Unset: on for IBKR (its API rejects fractional quantities, error 10243), off for Trading 212.
+    # Buy whole shares only. Unset: off for Trading 212 (fractional shares), on for other brokers.
     # Paper mirrors live.
     WHOLE_SHARES_ONLY: bool = True
     WHOLE_SHARE_ROUND_UP_PCT: float = 10.0  # May round up to one extra share if that costs at most this % above the allocation
     MAX_POSITION_PCT: float = 60.0          # A position may grow past its slot (e.g. one share costs more) up to this % of portfolio value
 
-    # Interactive Brokers (IBKR) Config (Supports EU & US equities)
-    IBKR_HOST: str = "172.17.0.2"
-    IBKR_PORT: int = 4003                   # 4003 via socat gateway bridge
-    IBKR_CLIENT_ID: int = 1
-    IBKR_ACCOUNT_ID: Optional[str] = None
-    IBKR_PRICING_TIER: str = "tiered"       # "tiered" (low min for retail) or "fixed"
+    # Fee guardrails
     MAX_FEE_DRAG_PCT: float = 3.8           # Max allowed round-trip fee as % of order (3.8% allows €100 EU orders)
     MAX_PROFIT_EROSION_PCT: float = 48.0    # Max allowed profit consumed by commissions
-    MIN_ORDER_EUR_IBKR_EU: float = 100.0    # Floor order size for European equities on IBKR
-    MIN_ORDER_EUR_IBKR_US: float = 35.0     # Recommended min order for US equities on IBKR
 
     # Trading 212 Config (Invest account; EU & US equities, fractional shares)
     TRADING212_API_KEY: Optional[str] = None

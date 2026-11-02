@@ -231,7 +231,6 @@ class PaperBroker(BaseBroker):
                 price_native=price_native,
                 currency=currency,
                 broker=settings.LIVE_BROKER,
-                pricing_tier=getattr(settings, "IBKR_PRICING_TIER", "tiered"),
                 order_action="BUY"
             )
             fee_eur = fee_info["fee_eur"]
@@ -364,7 +363,6 @@ class PaperBroker(BaseBroker):
                 price_native=exit_price_native,
                 currency=pos.currency,
                 broker=settings.LIVE_BROKER,
-                pricing_tier=getattr(settings, "IBKR_PRICING_TIER", "tiered"),
                 order_action="SELL"
             )
             exit_fee_eur = exit_fee_info["fee_eur"]
@@ -650,7 +648,6 @@ class PaperBroker(BaseBroker):
                 stop_loss_native=sl,
                 take_profit_native=tp,
                 broker="paper",
-                pricing_tier=getattr(settings, "IBKR_PRICING_TIER", "tiered"),
                 max_fee_drag_pct=getattr(settings, "MAX_FEE_DRAG_PCT", 3.8),
                 max_profit_erosion_pct=getattr(settings, "MAX_PROFIT_EROSION_PCT", 48.0)
             )

@@ -34,7 +34,7 @@ Turn one on with `/plugin install <name>@<marketplace>` or by adding it to `enab
 | `code-simplifier@claude-plugins-official` | Cleanup pass on recent changes. Overlaps with ponytail. |
 | `feature-dev@claude-plugins-official` | Explore, design, review workflow for bigger features. Overlaps with superpowers. |
 | `playwright@claude-plugins-official` | Drive the FastAPI web dashboard in a browser for end-to-end checks. |
-| `context7@claude-plugins-official` | Up-to-date docs for yfinance, ib_async, alpaca-py, FastAPI. |
+| `context7@claude-plugins-official` | Up-to-date docs for yfinance, alpaca-py, FastAPI. |
 | `duckdb-skills@claude-plugins-official` | Query `data/*.db` SQLite files and CSV/Parquet price data with SQL. |
 | `financial-analysis@claude-for-financial-services` | Anthropic's DCF, comps and 3-statement modelling skills. Useful for the fundamental agent. |
 | `equity-research@claude-for-financial-services` | Earnings analysis and research workflows. |

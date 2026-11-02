@@ -446,7 +446,7 @@ class AgentMemoryStore:
         default_profile = (
             "Institutional Hedge Fund Quantitative & Discretionary Committee. "
             "Governs capital allocation across European and US equities with rigorous risk management, "
-            "strict IBKR fee drag mitigation, and dynamic slot consolidation."
+            "strict fee drag mitigation, and dynamic slot consolidation."
         )
         default_wisdom = (
             "1. Avoid micro-allocations: Never trade below €100 on Euronext/XETRA to prevent fee erosion (>3.8% drag).\n"
@@ -748,20 +748,20 @@ class AgentMemoryStore:
             ),
             (
                 "LiveBroker", "class", "src/trading/live.py", 26, 1666,
-                "IBKR & Alpaca real-money broker handling live orders, triggers, and portfolio sync.",
+                "Trading 212 & Alpaca real-money broker handling live orders, triggers, and portfolio sync.",
                 ["validate_buy_order", "calculate_broker_fee", "evaluate_trigger_verdict"],
                 ["get_active_broker", "TradingScheduler", "routes"],
             ),
             (
                 "PaperBroker", "class", "src/trading/paper.py", 19, 949,
-                "Simulated paper broker with realistic IBKR fee deduction and trigger execution.",
+                "Simulated paper broker with realistic broker fee deduction and trigger execution.",
                 ["calculate_broker_fee", "evaluate_trigger_verdict", "validate_buy_order"],
                 ["get_active_broker", "TradingScheduler", "routes"],
             ),
             (
                 "calculate_broker_fee", "function", "src/trading/fees.py", 42, 153,
-                "Accurate IBKR commission calculation for EU, US, and UK equities.",
-                ["settings.IBKR_PRICING_TIER"],
+                "Broker fee calculation (Trading 212 FX fee, FTT, SDRT; Alpaca regulatory fees).",
+                ["settings.LIVE_BROKER"],
                 ["validate_buy_order", "evaluate_trade_economic_viability", "LiveBroker.execute_buy", "PaperBroker.execute_buy"],
             ),
             (
@@ -773,7 +773,7 @@ class AgentMemoryStore:
             (
                 "calculate_position_allocation", "function", "src/trading/risk.py", 31, 102,
                 "Dynamic slot consolidation and risk-capped position sizing.",
-                ["settings.FULL_BUDGET_UTILIZATION", "settings.MIN_ORDER_EUR_IBKR_EU"],
+                ["settings.FULL_BUDGET_UTILIZATION", "settings.MAX_FEE_DRAG_PCT"],
                 ["RiskManagerAgent.evaluate_risk", "LiveBroker", "PaperBroker"],
             ),
             (
@@ -859,10 +859,10 @@ class AgentMemoryStore:
         if skills_cnt == 0:
             logger.info("Seeding initial TencentDB Agent Memory assets...")
             skill_fee = SkillAsset(
-                skill_id="ibkr-tiered-fee-mitigation",
-                name="IBKR Tiered Fee Mitigation Playbook",
+                skill_id="fee-drag-mitigation",
+                name="Fee Drag Mitigation Playbook",
                 category="risk-execution",
-                description="Prevent micro-trade commission erosion on Interactive Brokers for EU and US equities.",
+                description="Prevent micro-trade fee erosion (FX fee, FTT, stamp duty) for EU and US equities.",
                 trigger_conditions=[
                     "Account capital is small (e.g. €200 - €1,000)",
                     "Placing orders on Euronext (.AS, .PA), XETRA (.DE), or London (.L)",
@@ -898,33 +898,26 @@ class AgentMemoryStore:
             )
             await self.add_skill(skill_pullback)
 
-            wiki_ibkr = WikiPage(
-                page_id="wiki-ibkr-pricing",
-                title="Interactive Brokers Pricing & Fee Architecture",
-                content_md="""# Interactive Brokers Pricing Architecture
+            wiki_fees = WikiPage(
+                page_id="wiki-broker-fees",
+                title="Broker Fee Architecture",
+                content_md="""# Broker Fee Architecture
 
-## Commission Structure
-- **European Equities (Euronext Amsterdam / Paris / Brussels / Lisbon, XETRA)**:
-  - Tiered: 0.05% of trade value, with a €1.25 broker minimum + ~€0.65 exchange/clearing fee (€1.90/order min).
-  - Round-trip cost: ~€3.80.
-  - On a €33.33 order, fee drag is **11.4%**, guaranteeing a net loss.
-  - Safe minimum order size: **€100.00** (drag ≤ 3.8%).
-- **US Equities**:
-  - Tiered: $0.0035/share ($0.35 minimum) + FINRA/SEC fees (~$0.38/order).
-  - Safe minimum order size: **€35.00** (~$38.00).
-- **UK Equities (.L)**:
-  - 0.5% SDRT Stamp Duty on purchases + £1.00 minimum base fee.
+## Fee Structure
+- **Trading 212**: no commission; 0.15% FX fee on non-EUR instruments (buy and sell).
+- **French equities (.PA)**: 0.4% FTT on purchases.
+- **UK Equities (.L)**: 0.5% SDRT Stamp Duty on purchases.
+- **Alpaca (US)**: no commission; SEC/FINRA regulatory fee on sells.
 
 ## Guardrail Rules
 1. `MAX_FEE_DRAG_PCT = 3.8%`
-2. `MIN_ORDER_EUR_IBKR_EU = 100.0`
-3. `MIN_ORDER_EUR_IBKR_US = 35.0`
-4. `FULL_BUDGET_UTILIZATION`: Dynamically consolidates small budgets into viable €100 slots instead of splitting into toxic micro-orders.
+2. `MAX_PROFIT_EROSION_PCT = 48%`
+3. `FULL_BUDGET_UTILIZATION`: Dynamically consolidates small budgets into viable slots instead of splitting into micro-orders.
 """,
-                tags=["ibkr", "fees", "broker", "pricing", "risk"],
-                links=["wiki-portfolio-architecture", "skill-ibkr-tiered-fee-mitigation"]
+                tags=["fees", "broker", "pricing", "risk"],
+                links=["wiki-portfolio-architecture", "skill-fee-drag-mitigation"]
             )
-            await self.add_wiki_page(wiki_ibkr)
+            await self.add_wiki_page(wiki_fees)
 
             wiki_portfolio = WikiPage(
                 page_id="wiki-portfolio-architecture",
@@ -941,7 +934,7 @@ class AgentMemoryStore:
 When total capital is small (€200), rather than dividing into `MAX_POSITIONS = 6` micro-slots (€33.33 each), the system concentrates funds into viable order slots (2 slots of €100.00 for EU equities).
 """,
                 tags=["portfolio", "cash", "triggers", "architecture"],
-                links=["wiki-ibkr-pricing"]
+                links=["wiki-broker-fees"]
             )
             await self.add_wiki_page(wiki_portfolio)
 

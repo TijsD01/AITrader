@@ -19,7 +19,7 @@ _STOP_TICKERS = {
     "BREAKOUT_BUY", "ORDER", "TRIGGER", "ENTRY", "PRICE", "TARGET", "HIT", "STOP", "LOSS",
     "EUR", "USD", "GBP", "EU", "UK", "NL", "DE", "FR", "VETO", "RISK", "NEWS", "SCORE",
     "USER", "AI", "PM", "EMA", "SMA", "RSI", "MACD", "ATR", "PEG", "ROE", "PE", "PB", "PS",
-    "EV", "EPS", "FCF", "YOY", "QOQ", "ETF", "AEX", "DAX", "CAC", "XETRA", "NYSE", "IBKR",
+    "EV", "EPS", "FCF", "YOY", "QOQ", "ETF", "AEX", "DAX", "CAC", "XETRA", "NYSE",
     "SEC", "SDRT", "WIN", "HIGH", "LOW", "FAIR", "STRONG", "WEAK", "POOR", "GOOD", "FLAT",
     "MIXED", "BULL", "BEAR", "BULLISH", "BEARISH", "NEUTRAL", "WAIT", "PASS", "LONG", "SHORT",
     "CASH", "SPOT", "FILL", "OPEN", "CLOSE", "LEAD", "ARMED", "VERDICT", "TECHNICAL",
@@ -145,7 +145,7 @@ class AssetExtractor:
                 team_id=team_id,
                 agent_id=agent_id,
                 type="instruction",
-                subject="IBKR_Broker_Fee",
+                subject="Broker_Fee",
                 predicate="fee_constraint_observed",
                 object=val,
                 content=f"Fee constraint: {snippet}.",
@@ -255,7 +255,7 @@ class AssetExtractor:
                 category="execution",
                 description="Identified automated pullback protocol from live committee action.",
                 trigger_conditions=["Oversold conditions met", "Consensus score >= 70"],
-                execution_steps=["Arm limit order", "Check IBKR fee minimums", "Monitor fill"],
+                execution_steps=["Arm limit order", "Check broker fee drag", "Monitor fill"],
                 version="1.0.0"
             ))
 

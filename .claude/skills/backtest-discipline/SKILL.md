@@ -18,7 +18,7 @@ A backtest result is only worth something if it would have been possible to trad
 ## Costs and fills
 
 - Charge fees with the real fee model: `calculate_broker_fee` / `calculate_round_trip_fee` in `src/trading/fees.py`. Small accounts lose most of their edge to the minimum fee; skip trades that `evaluate_trade_economic_viability` rejects.
-- Respect `WHOLE_SHARES_ONLY` (IBKR rejects fractional quantities). A position that cannot afford one share is not opened. Fractional sizing is only valid for a broker that supports it (Alpaca).
+- Respect `WHOLE_SHARES_ONLY`. A position that cannot afford one share is not opened. Fractional sizing is only valid for a broker that supports it (Trading 212).
 - Add slippage (at least a few basis points per side) and fill stops at the next available price, not at the stop level, when the bar gaps through it.
 - Respect `MAX_POSITIONS`, `MAX_POSITION_PCT` and available cash. No leverage unless the account has it.
 

@@ -71,20 +71,12 @@ async def test_portfolio_summary_refreshes_unrealized_pnl():
 
 @pytest.mark.asyncio
 async def test_live_sync_fills_levels_from_latest_trigger():
-    from types import SimpleNamespace
-    from unittest.mock import AsyncMock, MagicMock
     from sqlalchemy import select, delete
     from src.db.models import Position, OrderTrigger
     from src.db.session import AsyncSessionLocal
     from src.trading.live import LiveBroker
 
     await init_db()
-    ib = MagicMock()
-    ib.isConnected.return_value = True
-    ib.positions.return_value = [
-        SimpleNamespace(contract=SimpleNamespace(symbol=s, currency="USD"), position=1.0, avgCost=221.37)
-        for s in ("SYNCNEW", "SYNCOLD")
-    ]
     async with AsyncSessionLocal() as s:
         s.add_all([
             OrderTrigger(ticker=t, target_price=221.0, current_price_at_creation=225.0, stop_loss=215.02,
@@ -97,18 +89,16 @@ async def test_live_sync_fills_levels_from_latest_trigger():
         await s.commit()
     broker = LiveBroker()
     try:
-        with patch.object(broker, "_get_ib", AsyncMock(return_value=ib)), \
-             patch.object(broker, "_fetch_ibkr_account_values", AsyncMock(return_value=(None, None, None))), \
-             patch.object(broker, "refresh_positions_pnl", AsyncMock()), \
-             patch.object(broker, "get_portfolio_summary", AsyncMock(return_value={"cash_eur": 0, "equity_eur": 0, "total_value_eur": 0})), \
-             patch("src.telegram.bot.telegram_bot.send_message", AsyncMock()) as notify, \
-             patch.object(settings, "LIVE_BROKER", "ibkr"):
-            await broker.sync_account_state()
+        # The two helpers a broker sync runs per holding: tracked (SYNCOLD) and adopted (SYNCNEW)
+        async with AsyncSessionLocal() as s:
+            old = (await s.execute(select(Position).where(Position.ticker == "SYNCOLD"))).scalars().first()
+            await broker._update_tracked_holding(s, old, "SYNCOLD", 1.0, 221.37, "USD")
+            await broker._adopt_holding(s, "SYNCNEW", "SYNCNEW", "USD", 1.0, 221.37, 0.0, [], [])
+            await s.commit()
         async with AsyncSessionLocal() as s:
             rows = (await s.execute(select(Position).where(Position.ticker.in_(["SYNCNEW", "SYNCOLD"]), Position.is_live == True))).scalars().all()
             assert {p.ticker: (p.stop_loss_native, p.take_profit_native) for p in rows} == {
                 "SYNCNEW": (215.02, 230.18), "SYNCOLD": (215.02, 230.18)}
-        assert notify.await_count == 1
     finally:
         async with AsyncSessionLocal() as s:
             await s.execute(delete(Position).where(Position.ticker.in_(["SYNCNEW", "SYNCOLD"])))

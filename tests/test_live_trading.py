@@ -117,7 +117,7 @@ async def test_live_broker_full_execution_lifecycle():
     settings.LIVE_TRADING_ENABLED = True
     settings.KILL_SWITCH_ACTIVE = False
     settings.ENFORCE_MARKET_HOURS = False
-    settings.LIVE_BROKER = "ibkr"
+    settings.LIVE_BROKER = "trading212"
 
     ticker = "NVDA_LIVE_TEST"
     try:
@@ -140,8 +140,8 @@ async def test_live_broker_full_execution_lifecycle():
         # Mock quote for NVDA_LIVE_TEST so it doesn't make slow network calls
         mock_quote = {"price": 120.0, "currency": "USD", "name": "NVIDIA Corp"}
         with patch("src.trading.live.market_data_provider.get_stock_data", return_value=mock_quote), \
-             patch.object(live_broker, "_dispatch_real_order", side_effect=lambda **kw: ("ibkr_1001", kw["shares"], kw["price"])), \
-             patch.object(live_broker, "_dispatch_real_close", return_value="ibkr_exit_1002"):
+             patch.object(live_broker, "_dispatch_real_order", side_effect=lambda **kw: ("t212_1001", kw["shares"], kw["price"])), \
+             patch.object(live_broker, "_dispatch_real_close", return_value="t212_exit_1002"):
             # 1. Execute live buy
             buy_res = await live_broker.execute_buy(
                 ticker=ticker,
@@ -157,8 +157,8 @@ async def test_live_broker_full_execution_lifecycle():
             )
             assert buy_res["success"] is True, buy_res
             assert buy_res["is_live"] is True
-            assert buy_res["broker"] == "IBKR"
-            assert buy_res["broker_order_id"].startswith("ibkr_")
+            assert buy_res["broker"] == "TRADING212"
+            assert buy_res["broker_order_id"].startswith("t212_")
 
             # 2. Check position record in database
             positions = await live_broker.get_positions()
@@ -171,13 +171,13 @@ async def test_live_broker_full_execution_lifecycle():
             summary = await live_broker.get_portfolio_summary()
             assert summary["trading_mode"] == "LIVE"
             assert summary["live_trading_enabled"] is True
-            assert summary["broker"] == "IBKR"
+            assert summary["broker"] == "TRADING212"
 
             # 4. Execute live sell
             sell_res = await live_broker.execute_sell(ticker, reason="Profit Target Hit")
             assert sell_res["success"] is True
             assert sell_res["is_live"] is True
-            assert sell_res["broker_order_id"].startswith("ibkr_exit_")
+            assert sell_res["broker_order_id"].startswith("t212_exit_")
 
             # 5. Verify position is now closed
             positions_after = await live_broker.get_positions()
@@ -220,7 +220,7 @@ async def test_live_broker_get_triggers_has_current_price_and_distance():
         await session.commit()
 
     try:
-        with patch.object(live_broker, "_fetch_ibkr_prices", return_value={ticker: 95.0}):
+        with patch("src.trading.live.market_data_provider.get_stock_data", return_value={"price": 95.0}):
             triggers = await live_broker.get_triggers()
             found = next((tr for tr in triggers if tr["ticker"] == ticker), None)
             assert found is not None
@@ -244,7 +244,7 @@ async def test_live_buy_not_recorded_when_broker_rejects():
     settings.TRADING_MODE = "LIVE"
     settings.LIVE_TRADING_ENABLED = True
     settings.KILL_SWITCH_ACTIVE = False
-    settings.LIVE_BROKER = "ibkr"
+    settings.LIVE_BROKER = "trading212"
     ticker = "REJ_LIVE_TEST"
     try:
         async with AsyncSessionLocal() as session:
@@ -273,9 +273,9 @@ async def test_live_buy_not_recorded_when_broker_rejects():
 
 
 @pytest.mark.asyncio
-async def test_portfolio_summary_uses_ibkr_values():
-    """Dashboard total/equity come from IBKR account summary, not local quotes."""
-    from types import SimpleNamespace as NS
+async def test_portfolio_summary_uses_broker_values():
+    """Dashboard total/equity come from the Trading 212 account summary, not local quotes."""
+    from unittest.mock import AsyncMock
     await init_db()
     async with AsyncSessionLocal() as session:
         await session.execute(delete(Position).where(Position.is_live == True))
@@ -284,21 +284,13 @@ async def test_portfolio_summary_uses_ibkr_values():
                                       daily_pnl_pct=0.0, open_positions_count=0, is_live=True))
         await session.commit()
 
-    class FakeIB:
-        def isConnected(self):
-            return True
-        async def accountSummaryAsync(self):
-            return [NS(tag="TotalCashValue", value="100.0", currency="EUR"),
-                    NS(tag="NetLiquidation", value="431.69", currency="EUR"),
-                    NS(tag="GrossPositionValue", value="331.69", currency="EUR")]
-
     try:
-        with patch.object(settings, "LIVE_BROKER", "ibkr"), patch.object(live_broker, "_get_ib", return_value=FakeIB()):
+        with patch.object(settings, "LIVE_BROKER", "trading212"),              patch.object(live_broker, "_fetch_t212_account_values", AsyncMock(return_value=(100.0, 431.69, 331.69))):
             s = await live_broker.get_portfolio_summary()
-            assert s["value_source"] == "ibkr"
+            assert s["value_source"] == "trading212"
             assert s["total_value_eur"] == 431.69 and s["equity_eur"] == 331.69
-        # Gateway down: falls back to the stored snapshot
-        with patch.object(settings, "LIVE_BROKER", "ibkr"), patch.object(live_broker, "_get_ib", side_effect=ConnectionError):
+        # Broker down: falls back to the stored snapshot
+        with patch.object(settings, "LIVE_BROKER", "trading212"),              patch.object(live_broker, "_fetch_t212_account_values", AsyncMock(side_effect=ConnectionError)):
             s = await live_broker.get_portfolio_summary()
             assert s["value_source"] == "snapshot" and s["total_value_eur"] == 400.0
     finally:
@@ -308,24 +300,12 @@ async def test_portfolio_summary_uses_ibkr_values():
 
 
 @pytest.mark.asyncio
-async def test_ibkr_cash_capped_at_available_funds():
-    """Snapshots keep the real TotalCashValue; buys may only spend up to AvailableFunds."""
-    from types import SimpleNamespace as NS
-
-    class FakeIB:
-        def __init__(self, rows):
-            self.rows = rows
-        async def accountSummaryAsync(self):
-            return self.rows
-
-    base = [NS(tag="TotalCashValue", value="500.0", currency="EUR"),
-            NS(tag="NetLiquidation", value="900.0", currency="EUR"),
-            NS(tag="GrossPositionValue", value="400.0", currency="EUR")]
+async def test_cash_capped_at_broker_buying_power():
+    """Buys may only spend up to the broker's buying power (T212 availableToTrade) once it is known."""
     live_broker._available_funds_eur = None
     try:
-        assert live_broker._spendable_cash(500.0) == 500.0  # AvailableFunds not seen yet
-        values = await live_broker._fetch_ibkr_account_values(FakeIB(base + [NS(tag="AvailableFunds", value="320.0", currency="EUR")]))
-        assert values == (500.0, 900.0, 400.0)
+        assert live_broker._spendable_cash(500.0) == 500.0  # buying power not seen yet
+        live_broker._available_funds_eur = 320.0
         assert live_broker._spendable_cash(500.0) == 320.0
         assert live_broker._spendable_cash(200.0) == 200.0
     finally:
@@ -333,35 +313,22 @@ async def test_ibkr_cash_capped_at_available_funds():
 
 
 @pytest.mark.asyncio
-async def test_sync_keeps_cost_basis_and_adopts_with_fees():
-    """Sync must not re-convert an existing position's cost at today's FX, and adoption books fees from fills."""
-    from types import SimpleNamespace as NS
-    from unittest.mock import AsyncMock, MagicMock
+async def test_sync_keeps_cost_basis_and_adopts_hand_bought_holdings():
+    """Sync must not re-convert an existing position's cost at today's FX; a hand-bought holding gets no stop/target."""
     await init_db()
-    orig_broker = settings.LIVE_BROKER
-    settings.LIVE_BROKER = "ibkr"
     tickers = ("SYNCKEEP", "SYNCADOPT")
     try:
         async with AsyncSessionLocal() as session:
             await session.execute(delete(Position).where(Position.ticker.in_(tickers)))
-            session.add(Position(ticker="SYNCKEEP", name="k", currency="USD", shares=2.0, entry_price_native=100.0,
-                                 current_price_native=100.0, highest_price_native=100.0, entry_price_eur=90.0,
-                                 current_price_eur=90.0, cost_basis_eur=183.0, status="OPEN", is_live=True))
+            keep = Position(ticker="SYNCKEEP", name="k", currency="USD", shares=2.0, entry_price_native=100.0,
+                            current_price_native=100.0, highest_price_native=100.0, entry_price_eur=90.0,
+                            current_price_eur=90.0, cost_basis_eur=183.0, status="OPEN", is_live=True)
+            session.add(keep)
+            await session.flush()
+            with patch("src.trading.live.currency_service.to_eur", side_effect=lambda v, c: v * 0.5):
+                await live_broker._update_tracked_holding(session, keep, "SYNCKEEP", 2.0, 100.0, "USD")
+                await live_broker._adopt_holding(session, "SYNCADOPT", "SYNCADOPT", "USD", 1.0, 200.0, 0.5, [], [])
             await session.commit()
-
-        def ibpos(sym, n, avg, con):
-            return NS(contract=NS(symbol=sym, currency="USD", conId=con), position=n, avgCost=avg)
-        fill = NS(contract=NS(conId=2), execution=NS(side="BOT"), commissionReport=NS(commission=1.0, currency="USD"))
-        ib = MagicMock()
-        ib.isConnected.return_value = True
-        ib.positions.return_value = [ibpos("SYNCKEEP", 2.0, 100.0, 1), ibpos("SYNCADOPT", 1.0, 200.0, 2)]
-        ib.fills.return_value = [fill]
-        with patch.object(live_broker, "_get_ib", AsyncMock(return_value=ib)), \
-             patch.object(live_broker, "_fetch_ibkr_account_values", AsyncMock(return_value=(None, None, None))), \
-             patch.object(live_broker, "refresh_positions_pnl", AsyncMock()), \
-             patch.object(live_broker, "get_portfolio_summary", AsyncMock(return_value={"cash_eur": 0, "equity_eur": 0, "total_value_eur": 0})), \
-             patch("src.trading.live.currency_service.to_eur", side_effect=lambda v, c: v * 0.5):
-            await live_broker.sync_account_state()
 
         async with AsyncSessionLocal() as session:
             rows = {p.ticker: p for p in (await session.execute(select(Position).where(Position.ticker.in_(tickers)))).scalars()}
@@ -373,57 +340,6 @@ async def test_sync_keeps_cost_basis_and_adopts_with_fees():
         async with AsyncSessionLocal() as session:
             await session.execute(delete(Position).where(Position.ticker.in_(tickers)))
             await session.commit()
-        settings.LIVE_BROKER = orig_broker
-
-
-@pytest.mark.asyncio
-async def test_sync_books_sell_for_position_the_broker_closed():
-    """A bracket leg that filled at IBKR closes the local position with a SELL trade at the fill price, no new snapshot."""
-    from types import SimpleNamespace as NS
-    from unittest.mock import AsyncMock, MagicMock
-    await init_db()
-    orig_broker = settings.LIVE_BROKER
-    settings.LIVE_BROKER = "ibkr"
-    ticker = "SYNCGONE"
-    try:
-        async with AsyncSessionLocal() as session:
-            await session.execute(delete(Position).where(Position.ticker == ticker))
-            await session.execute(delete(Trade).where(Trade.ticker == ticker))
-            session.add(Position(ticker=ticker, name="g", currency="USD", shares=2.0, entry_price_native=100.0,
-                                 current_price_native=100.0, highest_price_native=100.0, entry_price_eur=100.0,
-                                 current_price_eur=100.0, cost_basis_eur=200.0, stop_loss_native=95.0, status="OPEN", is_live=True))
-            await session.commit()
-            snaps_before = len((await session.execute(select(PortfolioSnapshot))).scalars().all())
-
-        sold = NS(contract=NS(symbol=ticker, currency="USD"), execution=NS(side="SLD", avgPrice=96.0, time=1))
-        ib = MagicMock()
-        ib.isConnected.return_value = True
-        ib.positions.return_value = []
-        ib.reqPositionsAsync = AsyncMock(return_value=[])
-        ib.fills.return_value = [sold]
-        with patch.object(live_broker, "_get_ib", AsyncMock(return_value=ib)), \
-             patch.object(live_broker, "_fetch_ibkr_account_values", AsyncMock(return_value=(None, None, None))), \
-             patch.object(live_broker, "refresh_positions_pnl", AsyncMock()), \
-             patch.object(live_broker, "adjust_triggers_dynamically", AsyncMock(return_value=[])), \
-             patch.object(live_broker, "_dispatch_real_close", AsyncMock(side_effect=AssertionError("must not send an order"))), \
-             patch.object(live_broker, "get_portfolio_summary", AsyncMock(return_value={"cash_eur": 0, "equity_eur": 0, "total_value_eur": 0})), \
-             patch("src.telegram.bot.telegram_bot.notify_position_closed", AsyncMock()), \
-             patch("src.trading.live.currency_service.to_eur", side_effect=lambda v, c: v):
-            await live_broker.sync_account_state()
-
-        async with AsyncSessionLocal() as session:
-            pos = (await session.execute(select(Position).where(Position.ticker == ticker))).scalars().first()
-            sell = (await session.execute(select(Trade).where(Trade.ticker == ticker, Trade.order_type == "SELL"))).scalars().first()
-            snaps_after = len((await session.execute(select(PortfolioSnapshot))).scalars().all())
-        assert pos.status == "CLOSED"
-        assert sell is not None and sell.price_native == 96.0 and sell.realized_pnl_eur < 0
-        assert snaps_after == snaps_before
-    finally:
-        async with AsyncSessionLocal() as session:
-            await session.execute(delete(Position).where(Position.ticker == ticker))
-            await session.execute(delete(Trade).where(Trade.ticker == ticker))
-            await session.commit()
-        settings.LIVE_BROKER = orig_broker
 
 
 @pytest.mark.asyncio
@@ -478,33 +394,3 @@ async def test_daily_loss_limit_counts_only_todays_drop_and_turns_on_kill_switch
             await session.execute(delete(Position).where(Position.ticker == ticker))
             await session.execute(delete(CashFlow).where(CashFlow.is_live == True))
             await session.commit()
-
-
-@pytest.mark.asyncio
-async def test_delayed_ibkr_quotes_are_skipped_for_the_yfinance_fallback():
-    """A real-time quote is used; a delayed one (no subscription, e.g. US) is left out so callers fall back to yfinance."""
-    from types import SimpleNamespace as NS
-    from unittest.mock import AsyncMock
-
-    quotes = {"LIVEQ": (1, 100.0), "DELAYQ": (3, 50.0)}
-
-    class FakeIB:
-        def isConnected(self):
-            return True
-        def reqMarketDataType(self, t):
-            pass
-        async def qualifyContractsAsync(self, *cs):
-            return list(cs)
-        def reqMktData(self, c, *a):
-            md, price = quotes[c.symbol]
-            return NS(marketDataType=md, marketPrice=lambda: price, last=price, close=price)
-        def cancelMktData(self, c):
-            pass
-
-    live_broker._ibkr_price_cache.clear()
-    with patch.object(settings, "LIVE_BROKER", "ibkr"), \
-         patch.object(live_broker, "_get_ib", AsyncMock(return_value=FakeIB())), \
-         patch("asyncio.sleep", AsyncMock()):
-        prices = await live_broker._fetch_ibkr_prices([("LIVEQ", "EUR"), ("DELAYQ", "USD")])
-    live_broker._ibkr_price_cache.clear()
-    assert prices == {"LIVEQ": 100.0}

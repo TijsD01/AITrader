@@ -198,108 +198,6 @@ async def test_triggers_wait_while_auto_buy_is_paused():
         await _delete_paper_rows(ticker)
 
 
-# --- Live IBKR exit ---------------------------------------------------------------
-
-class _FakeTrade:
-    """An open IBKR order. After a cancel request it settles (cancelled, or filled first) after `settle_polls` polls."""
-
-    def __init__(self, contract, action, settle_polls=0, on_settle=None):
-        self.contract = contract
-        self.order = SimpleNamespace(action=action)
-        self.cancel_requested = False
-        self.done = False
-        self._settle_polls = settle_polls
-        self._on_settle = on_settle
-
-    def isDone(self):
-        if self.cancel_requested and not self.done:
-            if self._settle_polls > 0:
-                self._settle_polls -= 1
-            else:
-                self.done = True
-                if self._on_settle:
-                    self._on_settle()
-        return self.done
-
-
-class _FakeIB:
-    """Minimal stand-in for an ib_async IB client holding one NVDA position."""
-
-    def __init__(self, held: float):
-        self.held = held
-        self.trades = []
-        self.placed = []
-
-    def isConnected(self):
-        return True
-
-    async def qualifyContractsAsync(self, *contracts):
-        return list(contracts)
-
-    def openTrades(self):
-        return [t for t in self.trades if not t.done]
-
-    def cancelOrder(self, order):
-        for t in self.trades:
-            if t.order is order:
-                t.cancel_requested = True
-
-    async def reqPositionsAsync(self):
-        contract = SimpleNamespace(symbol="NVDA", currency="USD")
-        return [SimpleNamespace(contract=contract, position=self.held)] if self.held else []
-
-    def positions(self):
-        raise AssertionError("the exit must read fresh positions, not the cached list")
-
-    def placeOrder(self, contract, order):
-        self.placed.append(order)
-        return SimpleNamespace(order=SimpleNamespace(orderId=77))
-
-
-_NVDA = SimpleNamespace(symbol="NVDA", currency="USD")
-_AAPL = SimpleNamespace(symbol="AAPL", currency="USD")
-
-
-async def _ibkr_close(ib, shares):
-    orig_broker = settings.LIVE_BROKER
-    settings.LIVE_BROKER = "ibkr"
-    try:
-        with patch.object(live_broker, "_get_ib", AsyncMock(return_value=ib)):
-            return await live_broker._dispatch_real_close("NVDA", shares=shares, currency="USD")
-    finally:
-        settings.LIVE_BROKER = orig_broker
-
-
-@pytest.mark.asyncio
-async def test_live_exit_cancels_the_bracket_legs_then_sells_what_is_held():
-    ib = _FakeIB(held=10.0)
-    stop_leg, target_leg = _FakeTrade(_NVDA, "SELL"), _FakeTrade(_NVDA, "SELL")
-    other_leg = _FakeTrade(_AAPL, "SELL")
-    ib.trades = [stop_leg, target_leg, other_leg]
-
-    order_id = await _ibkr_close(ib, shares=12.0)
-
-    assert order_id == "ibkr_exit_77"
-    assert stop_leg.cancel_requested and target_leg.cancel_requested
-    assert not other_leg.cancel_requested
-    assert len(ib.placed) == 1
-    assert ib.placed[0].action == "SELL"
-    assert ib.placed[0].totalQuantity == 10.0  # never more than the broker holds
-
-
-@pytest.mark.asyncio
-async def test_live_exit_sends_nothing_when_a_leg_fills_while_being_cancelled():
-    """The stop leg fills during the cancel: selling the full size afterwards would open a short."""
-    ib = _FakeIB(held=10.0)
-    stop_leg = _FakeTrade(_NVDA, "SELL", settle_polls=3, on_settle=lambda: setattr(ib, "held", 0.0))
-    ib.trades = [stop_leg]
-
-    order_id = await _ibkr_close(ib, shares=10.0)
-
-    assert order_id == "ibkr_exit_already_flat"
-    assert ib.placed == []
-
-
 # --- Live Alpaca exit -------------------------------------------------------------
 
 class _FakeAlpacaClient:
@@ -375,7 +273,7 @@ class _LiveMode:
         settings.LIVE_TRADING_ENABLED = True
         settings.KILL_SWITCH_ACTIVE = False
         settings.ENFORCE_MARKET_HOURS = False
-        settings.LIVE_BROKER = "ibkr"
+        settings.LIVE_BROKER = "trading212"
         return self
 
     def __exit__(self, *exc):
@@ -392,7 +290,7 @@ def _live_position(ticker, **overrides):
         stop_loss_native=96.0, take_profit_native=120.0,
         entry_price_eur=100.0, current_price_eur=100.0, cost_basis_eur=100.0,
         unrealized_pnl_eur=0.0, unrealized_pnl_pct=0.0, status="OPEN", is_live=True,
-        broker_order_id="ibkr_1",
+        broker_order_id="t212_1",
     )
     values.update(overrides)
     return Position(**values)
@@ -433,7 +331,7 @@ async def test_live_positions_get_the_breakeven_stop_like_paper():
     gainer, synced, small = _unique("LIVEBE"), _unique("SYNCED"), _unique("SMALL")
     async with AsyncSessionLocal() as session:
         session.add(_live_position(gainer))
-        session.add(_live_position(synced, stop_loss_native=None, take_profit_native=None))  # holding synced from IBKR
+        session.add(_live_position(synced, stop_loss_native=None, take_profit_native=None))  # holding synced from the broker
         session.add(_live_position(small))
         await session.commit()
     previous = await _set_config("BREAKEVEN_TRIGGER_PCT", "0.025")
@@ -442,8 +340,8 @@ async def test_live_positions_get_the_breakeven_stop_like_paper():
         prices = {gainer: 106.0, synced: 106.0, small: 102.0}
         with _LiveMode(), \
              patch("src.trading.live.check_market_hours", return_value=(True, "Market is OPEN")), \
-             patch.object(live_broker, "_fetch_ibkr_prices", AsyncMock(return_value=prices)), \
-             patch("src.trading.live.market_data_provider.get_stock_data", return_value=None):
+             patch.object(live_broker, "_move_broker_stop", AsyncMock()), \
+             patch("src.trading.live.market_data_provider.get_stock_data", side_effect=lambda t: {"price": prices[t]}):
             await live_broker.refresh_positions_pnl()
 
         async with AsyncSessionLocal() as session:
