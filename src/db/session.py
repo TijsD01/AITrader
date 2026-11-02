@@ -36,7 +36,8 @@ def _run_migrations(connection):
         ("trades", "fee_eur", "FLOAT DEFAULT 0.0"),
         ("order_triggers", "is_live", "BOOLEAN DEFAULT 0"),
         ("order_triggers", "broker_order_id", "VARCHAR(100)"),
-        ("portfolio_snapshots", "is_live", "BOOLEAN DEFAULT 0")
+        ("portfolio_snapshots", "is_live", "BOOLEAN DEFAULT 0"),
+        ("cash_flows", "broker_ref", "VARCHAR(64)"),
     ]
     for table, col, col_type in migrations:
         try:

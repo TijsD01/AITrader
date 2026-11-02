@@ -168,6 +168,26 @@ class Trading212Client:
         res = await self._request("GET", "/equity/history/orders", params={"ticker": ticker, "limit": limit})
         return (res or {}).get("items", [])
 
+    async def history_transactions(self, known_refs: Optional[set] = None, max_pages: int = 20) -> List[Dict[str, Any]]:
+        """
+        Account cash movements (DEPOSIT, WITHDRAW, FEE, TRANSFER), newest first.
+        Stops at the first page holding a reference in known_refs: older pages were read before.
+        """
+        known_refs = known_refs or set()
+        items: List[Dict[str, Any]] = []
+        path: Optional[str] = "/equity/history/transactions?limit=50"
+        for _ in range(max_pages):
+            res = await self._request("GET", path) or {}
+            page = res.get("items") or []
+            items.extend(page)
+            path = res.get("nextPagePath")
+            if not path or any(str(i.get("reference")) in known_refs for i in page):
+                break
+            # nextPagePath is absolute ("/api/v0/..."); the client base URL already ends in /api/v0
+            if path.startswith("/api/v0"):
+                path = path[len("/api/v0"):]
+        return items
+
 
 _client: Optional[Trading212Client] = None
 _client_key: Optional[tuple] = None

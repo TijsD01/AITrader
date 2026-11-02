@@ -886,7 +886,7 @@ async function loadCashFlows() {
         <div class="ui-card ui-card-pad flex items-center justify-between gap-3">
           <div class="min-w-0">
             <div class="ui-num font-semibold ${isIn ? 'ui-gain' : 'ui-loss'}">${isIn ? 'Deposit' : 'Withdrawal'} ${esc(signedEur(f.amount_eur))}</div>
-            <div class="text-xs ui-faint ui-num">${esc(f.timestamp)} · ${f.source === 'manual' ? 'added by you' : 'detected'}</div>
+            <div class="text-xs ui-faint ui-num">${esc(f.timestamp)} · ${f.source === 'manual' ? 'added by you' : f.source === 'broker' ? 'from broker' : 'detected'}</div>
           </div>
           <button type="button" onclick="removeCashFlow(${Number(f.id)})" class="ui-btn ui-btn-quiet ui-icon-btn shrink-0" aria-label="Remove" title="Remove"><i class="fa-solid fa-trash-can"></i></button>
         </div>`;

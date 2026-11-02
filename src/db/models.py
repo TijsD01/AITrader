@@ -92,8 +92,9 @@ class CashFlow(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     timestamp = Column(DateTime, default=datetime.datetime.utcnow, index=True)
     amount_eur = Column(Float, nullable=False)
-    source = Column(String(10), default="auto")  # auto (detected from a broker cash jump) or manual
+    source = Column(String(10), default="auto")  # auto (guessed from a cash jump), broker (broker's own record) or manual
     snapshot_id = Column(Integer, nullable=True, unique=True)  # Broker snapshot that showed the jump (auto only)
+    broker_ref = Column(String(64), nullable=True, index=True)  # Broker transaction reference (broker only)
     note = Column(String(200), nullable=True)
     is_live = Column(Boolean, default=True, index=True)
 
