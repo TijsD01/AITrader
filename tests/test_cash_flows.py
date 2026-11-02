@@ -119,3 +119,85 @@ async def _check_api(transport):
         assert (await ac.delete(f"/api/cash-flows/{flow_id}")).status_code == 200
         assert (await ac.delete(f"/api/cash-flows/{flow_id}")).status_code == 404
         assert (await ac.get("/api/cash-flows")).json()["net_deposits_eur"] == 0.0
+
+
+def test_broker_flow_amount_signs():
+    from src.trading.cash_flows import broker_flow_amount
+    assert broker_flow_amount({"type": "DEPOSIT", "amount": 500, "currency": "EUR"}) == 500.0
+    # Withdrawal sign is taken from the type, whatever sign the amount has
+    assert broker_flow_amount({"type": "WITHDRAW", "amount": 200, "currency": "EUR"}) == -200.0
+    assert broker_flow_amount({"type": "WITHDRAW", "amount": -200, "currency": "EUR"}) == -200.0
+    assert broker_flow_amount({"type": "TRANSFER", "amount": -50, "currency": "EUR"}) == -50.0
+    # A fee is a cost, so it stays in the gain
+    assert broker_flow_amount({"type": "FEE", "amount": -1.5, "currency": "EUR"}) is None
+
+
+async def test_t212_history_transactions_pages_until_known_ref():
+    import httpx
+    from src.trading import trading212
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        if "cursor=2" in str(request.url):
+            return httpx.Response(200, json={"items": [{"reference": "b", "type": "DEPOSIT", "amount": 1}],
+                                             "nextPagePath": "/api/v0/equity/history/transactions?limit=50&cursor=3"})
+        return httpx.Response(200, json={"items": [{"reference": "a", "type": "DEPOSIT", "amount": 2}],
+                                         "nextPagePath": "/api/v0/equity/history/transactions?limit=50&cursor=2"})
+
+    client = trading212.Trading212Client("k", "s", transport=httpx.MockTransport(handler))
+    items = await client.history_transactions(known_refs={"b"})
+    assert [i["reference"] for i in items] == ["a", "b"]
+    assert len(calls) == 2
+    assert calls[1].endswith("/api/v0/equity/history/transactions?limit=50&cursor=2")
+
+
+async def test_t212_deposits_and_withdrawals_are_not_gain():
+    from src.trading import cash_flows
+    first_id = await _fresh_live_history()
+    soon = datetime.datetime.utcnow() + datetime.timedelta(minutes=5)
+    items = [
+        {"type": "DEPOSIT", "amount": 1000, "currency": "EUR", "reference": "d1", "dateTime": soon.isoformat() + "Z"},
+        {"type": "WITHDRAW", "amount": 300, "currency": "EUR", "reference": "w1", "dateTime": soon.isoformat() + "Z"},
+        {"type": "FEE", "amount": -2, "currency": "EUR", "reference": "f1", "dateTime": soon.isoformat() + "Z"},
+        # Before the first live snapshot: already part of the starting value
+        {"type": "DEPOSIT", "amount": 5000, "currency": "EUR", "reference": "old", "dateTime": "2000-01-01T00:00:00Z"},
+    ]
+    client = AsyncMock()
+    client.history_transactions.return_value = items
+    try:
+        async with db_session.AsyncSessionLocal() as session:
+            session.add(CashFlow(amount_eur=999.0, source="auto", is_live=True))  # an earlier guess
+            await session.commit()
+        cash_flows._broker_synced_at = 0.0
+        with patch("src.trading.trading212.get_client", return_value=client), \
+             patch.object(cash_flows.settings, "LIVE_BROKER", "trading212"):
+            assert await scan_live_cash_flows() == 2
+            assert await net_cash_flows_eur(is_live=True) == 700.0
+            # Throttled, then a later sync adds nothing twice
+            assert await scan_live_cash_flows() == 0
+            cash_flows._broker_synced_at = 0.0
+            assert await scan_live_cash_flows() == 0
+        assert await net_cash_flows_eur(is_live=True) == 700.0
+        assert {f["source"] for f in await cash_flows.list_cash_flows(is_live=True)} == {"broker"}
+    finally:
+        cash_flows._broker_synced_at = 0.0
+        await _cleanup(first_id)
+
+
+async def test_t212_failure_falls_back_to_snapshot_guess():
+    from src.trading import cash_flows
+    first_id = await _fresh_live_history()
+    client = AsyncMock()
+    client.history_transactions.side_effect = RuntimeError("HTTP 500")
+    try:
+        async with db_session.AsyncSessionLocal() as session:
+            session.add(_snap(3000.0, 3000.0))
+            await session.commit()
+        cash_flows._broker_synced_at = 0.0
+        with patch("src.trading.trading212.get_client", return_value=client), \
+             patch.object(cash_flows.settings, "LIVE_BROKER", "trading212"):
+            assert await scan_live_cash_flows() == 1
+        assert await net_cash_flows_eur(is_live=True) == 2000.0
+    finally:
+        await _cleanup(first_id)
