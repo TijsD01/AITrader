@@ -58,16 +58,18 @@ def calculate_broker_fee(
     curr = currency.upper()
 
     trade_value_native = round(shares * price_native, 4)
-    trade_value_eur = currency_service.to_eur(trade_value_native, curr)
+    # to_eur gets the raw code: upper() turns "GBp" (pence) into "GBP" (pounds)
+    trade_value_eur = currency_service.to_eur(trade_value_native, currency)
     is_eu = is_european_ticker(ticker, curr)
 
     if broker_name == "trading212":
         # Trading 212 Invest: no commission; 0.15% FX fee if instrument currency != EUR (buy and sell)
         fx = trade_value_native * 0.0015 if curr != "EUR" else 0.0
+        # shortcut: every .PA buy pays FTT (the official list is ~100 French firms over €1bn cap; also overcharges non-French .PA like AIR.PA), upgrade to the yearly DGFiP list when trading French small/mid caps
         ftt = trade_value_native * 0.004 if (ticker.upper().endswith(".PA") and action == "BUY") else 0.0
         stamp = trade_value_native * 0.005 if ((ticker.upper().endswith(".L") or curr == "GBP") and action == "BUY") else 0.0
         fee_native = round(fx + ftt + stamp, 2)
-        fee_eur = round(currency_service.to_eur(fee_native, curr), 2)
+        fee_eur = round(currency_service.to_eur(fee_native, currency), 2)
         breakdown = "Trading 212 (€0 commission + 0.15% FX)" + (f" + {ftt:.2f} FTT" if ftt else "") + (f" + {stamp:.2f} SDRT" if stamp else "")
 
     elif broker_name == "alpaca":

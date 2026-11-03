@@ -198,6 +198,25 @@ async def test_t212_failure_falls_back_to_snapshot_guess():
         with patch("src.trading.trading212.get_client", return_value=client), \
              patch.object(cash_flows.settings, "LIVE_BROKER", "trading212"):
             assert await scan_live_cash_flows() == 1
+            # A failed broker read is not retried on the next page load (a 429 would make it wait again)
+            assert await scan_live_cash_flows() == 0
+            assert client.history_transactions.await_count == 1
         assert await net_cash_flows_eur(is_live=True) == 2000.0
     finally:
+        cash_flows._broker_synced_at = 0.0
         await _cleanup(first_id)
+
+
+async def test_t212_history_transactions_stops_before_since():
+    import httpx
+    from src.trading import trading212
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(200, json={"items": [{"reference": str(len(calls)), "dateTime": "2026-01-01T00:00:00Z"}],
+                                         "nextPagePath": f"/api/v0/equity/history/transactions?cursor={len(calls)}"})
+
+    client = trading212.Trading212Client("k", "s", transport=httpx.MockTransport(handler))
+    await client.history_transactions(since=datetime.datetime(2026, 6, 1))
+    assert len(calls) == 1  # the first page already reaches back past since

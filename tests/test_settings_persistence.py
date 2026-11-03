@@ -93,3 +93,11 @@ async def test_kill_switch_persists_to_system_config():
                 assert res.scalars().first().value == str(state).lower()
     finally:
         await set_kill_switch(original)
+
+
+def test_unknown_live_broker_fails_at_startup():
+    from pydantic import ValidationError
+    from config.settings import Settings
+    with pytest.raises(ValidationError, match="not supported"):
+        Settings(_env_file=None, LIVE_BROKER="ibkr")
+    assert Settings(_env_file=None, LIVE_BROKER="Trading212").LIVE_BROKER == "Trading212"

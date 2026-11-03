@@ -38,7 +38,7 @@ BROKER_SYNC_INTERVAL = 60.0
 BROKER_FLOW_SIGN = {"DEPOSIT": 1.0, "WITHDRAW": -1.0, "TRANSFER": 0.0}
 
 _scan_lock = asyncio.Lock()
-_broker_synced_at = 0.0  # time.monotonic() of the last good broker sync, 0 = never
+_broker_synced_at = 0.0  # time.monotonic() of the last broker sync attempt, 0 = never
 
 
 def detect_flow(
@@ -104,7 +104,7 @@ async def sync_broker_cash_flows(client) -> int:
         )).scalars().all())
         if first is None:
             return 0
-        items = await client.history_transactions(known_refs=known)
+        items = await client.history_transactions(known_refs=known, since=first.timestamp)
 
         found = 0
         for item in items:
@@ -151,10 +151,10 @@ async def scan_live_cash_flows() -> int:
             if client is not None:
                 if _broker_synced_at and time.monotonic() - _broker_synced_at < BROKER_SYNC_INTERVAL:
                     return 0
+                # Set before the call: after a failure (e.g. 429) the next page load must not retry and wait again
+                _broker_synced_at = time.monotonic()
                 try:
-                    found = await sync_broker_cash_flows(client)
-                    _broker_synced_at = time.monotonic()
-                    return found
+                    return await sync_broker_cash_flows(client)
                 except Exception as e:
                     logger.warning(f"Trading 212 transactions unavailable, guessing deposits from balances: {e}")
         return await _scan_snapshots()

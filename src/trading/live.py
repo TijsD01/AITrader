@@ -1,6 +1,7 @@
 import logging
 import datetime
 import asyncio
+import contextlib
 import time
 import httpx
 from typing import Dict, Any, List, Optional, Tuple
@@ -42,6 +43,8 @@ class LiveBroker(BaseBroker):
         self._connection_lock = asyncio.Lock()
         # Trading 212: a sync must not adopt the shares of a buy that is still in flight
         self._t212_lock = asyncio.Lock()
+        # Trading 212 exit fill price per ticker, set by _t212_exit and taken by execute_sell to book the real price
+        self._t212_exit_prices: Dict[str, float] = {}
 
     async def disconnect(self):
         """Clears the cached connection status."""
@@ -258,7 +261,7 @@ class LiveBroker(BaseBroker):
         DAY limit BUY at price; cancels whatever has not filled after FILL_WAIT_SECONDS and books only the real fills.
         Places a GTC stop for the filled shares. No take-profit order at the broker: check_stops_and_targets
         sells at the target, and a resting TP next to it could sell the shares twice.
-        Runs under _t212_lock so a sync cannot adopt the shares of a buy still in flight.
+        The caller (execute_buy) holds _t212_lock until the position is booked, so a sync cannot adopt these shares.
         """
         client = trading212.get_client()
         if not client:
@@ -268,28 +271,27 @@ class LiveBroker(BaseBroker):
         if not t212_ticker:
             logger.error(f"Trading 212 BUY {shares} {ticker} refused: no unique T212 instrument for {ticker} ({currency}).")
             return None
-        async with self._t212_lock:
-            limit = self._t212_price(price)
-            order = await self._t212_post(
-                client, lambda: client.place_limit(t212_ticker, shares, limit), t212_ticker, shares, f"BUY {shares} {ticker}"
-            )
-            if not order:
-                return None
-            oid = order["id"]
-            status, done = await self._t212_follow(client, oid, order.get("status"))
-            if status == "REJECTED":
-                logger.error(f"Trading 212 rejected BUY {shares} {ticker} ({t212_ticker}).")
-                return None
-            if not done:
-                # Still pending (or unknown after a failed poll): cancel the rest so only real fills get booked
-                await self._t212_cancel(client, oid)
-            filled, avg_price, final = await self._t212_fills(client, t212_ticker, oid)
-            if filled <= 0 and final not in ("CANCELLED", "REJECTED"):
-                # Outcome unknown: the broker position is the truth
-                filled, avg_price = await self._t212_unbooked_shares(client, t212_ticker, ticker, shares)
-            if filled > 0:
-                await self._t212_place_stop(client, t212_ticker, ticker, filled, stop_loss or price * 0.95)
-            return f"t212_{oid}", filled, avg_price or limit
+        limit = self._t212_price(price)
+        order = await self._t212_post(
+            client, lambda: client.place_limit(t212_ticker, shares, limit), t212_ticker, shares, f"BUY {shares} {ticker}"
+        )
+        if not order:
+            return None
+        oid = order["id"]
+        status, done = await self._t212_follow(client, oid, order.get("status"))
+        if status == "REJECTED":
+            logger.error(f"Trading 212 rejected BUY {shares} {ticker} ({t212_ticker}).")
+            return None
+        if not done:
+            # Still pending (or unknown after a failed poll): cancel the rest so only real fills get booked
+            await self._t212_cancel(client, oid)
+        filled, avg_price, final = await self._t212_fills(client, t212_ticker, oid)
+        if filled <= 0 and final not in ("CANCELLED", "REJECTED"):
+            # Outcome unknown: the broker position is the truth
+            filled, avg_price = await self._t212_unbooked_shares(client, t212_ticker, ticker, shares)
+        if filled > 0:
+            await self._t212_place_stop(client, t212_ticker, ticker, filled, stop_loss or price * 0.95)
+        return f"t212_{oid}", filled, avg_price or limit
 
     async def _t212_move_stop(self, ticker: str, currency: str, shares: float, stop: float) -> None:
         """Replace the resting STOP, or add one only when the ticker has no SELL order."""
@@ -373,9 +375,12 @@ class LiveBroker(BaseBroker):
             await asyncio.sleep(1.1)  # positions allows 1 req/s
         if held <= 0:
             logger.info(f"Trading 212 position for {ticker} already flat (stop filled or sold by hand); no exit order sent.")
+            fill = await self._t212_last_sell_fill(client, t212_ticker)
+            if fill:
+                self._t212_exit_prices[ticker.upper()] = fill
             return "t212_exit_already_flat"
         if free < shares - 1e-6:
-            # execute_sell books all local shares as sold; the next sync aligns the local share count with the broker
+            # Nothing is booked; the next sync aligns the local share count with the broker
             logger.error(f"Trading 212 has only {free:g} of {shares:g} {ticker} free to sell; exit not sent.")
             return None
         order = await self._t212_post(
@@ -388,10 +393,12 @@ class LiveBroker(BaseBroker):
         if not done:
             # Not filled (e.g. queued while the market is closed): it must not fire after the stop is back
             await self._t212_cancel(client, oid)
-        filled, _, _ = await self._t212_fills(client, t212_ticker, oid)
+        filled, avg_price, _ = await self._t212_fills(client, t212_ticker, oid)
         if filled < shares - 1e-6:
             logger.error(f"Trading 212 SELL {shares:g} {ticker} filled {filled:g} (status {status}); exit not booked.")
             return None
+        if avg_price:
+            self._t212_exit_prices[ticker.upper()] = avg_price
         return f"t212_exit_{oid}"
 
     async def _fetch_t212_account_values(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
@@ -794,96 +801,98 @@ class LiveBroker(BaseBroker):
             if shares <= 0 or actual_cost_eur + fee_eur > cash_eur:
                 return {"success": False, "message": f"Insufficient cash (€{cash_eur:.2f}) for {ticker} cost €{actual_cost_eur:.2f} plus fee €{fee_eur:.2f}."}
 
-            # 9. Dispatch real order to broker API
-            dispatched = await self._dispatch_real_order(
-                ticker=ticker,
-                shares=shares,
-                price=price_native,
-                currency=currency,
-                stop_loss=stop_loss_native,
-                take_profit=take_profit_native
-            )
-            if not dispatched:
-                logger.error(f"[LIVE EXECUTION] BUY {ticker} was not accepted by {settings.LIVE_BROKER.upper()}; nothing recorded.")
-                return {"success": False, "message": f"Order for {ticker} could not be placed at {settings.LIVE_BROKER.upper()} (broker not connected or order rejected)."}
-            broker_order_id, filled, fill_price = dispatched
-            if filled <= 0:
-                msg = f"BUY {ticker} @ {price_native} {currency} did not fill within {FILL_WAIT_SECONDS:.0f}s and was cancelled; nothing recorded."
-                logger.warning(f"[LIVE EXECUTION] {msg}")
-                return {"success": False, "unfilled": True, "message": msg}
-            # Book what the broker filled, not what was asked
-            shares, price_native = filled, fill_price
-            price_eur = currency_service.to_eur(price_native, currency)
-            actual_cost_eur = round(shares * price_eur, 2)
-            fee_info = calculate_broker_fee(
-                ticker=ticker, shares=shares, price_native=price_native, currency=currency, broker=settings.LIVE_BROKER, order_action="BUY"
-            )
-            fee_eur = fee_info["fee_eur"]
-            logger.info(
-                f"[LIVE EXECUTION] Submitting real order to {settings.LIVE_BROKER.upper()}: "
-                f"BUY {shares} {ticker} @ {price_native} {currency} (Cost: €{actual_cost_eur}, Fee: €{fee_eur:.2f} [{fee_info['breakdown']}]) | "
-                f"SL: {stop_loss_native} | TP: {take_profit_native} | Order ID: {broker_order_id}"
-            )
+            # Trading 212: the lock holds until the position is committed, so a sync cannot adopt these shares as untracked
+            async with (self._t212_lock if settings.LIVE_BROKER.lower() == "trading212" else contextlib.nullcontext()):
+                # 9. Dispatch real order to broker API
+                dispatched = await self._dispatch_real_order(
+                    ticker=ticker,
+                    shares=shares,
+                    price=price_native,
+                    currency=currency,
+                    stop_loss=stop_loss_native,
+                    take_profit=take_profit_native
+                )
+                if not dispatched:
+                    logger.error(f"[LIVE EXECUTION] BUY {ticker} was not accepted by {settings.LIVE_BROKER.upper()}; nothing recorded.")
+                    return {"success": False, "message": f"Order for {ticker} could not be placed at {settings.LIVE_BROKER.upper()} (broker not connected or order rejected)."}
+                broker_order_id, filled, fill_price = dispatched
+                if filled <= 0:
+                    msg = f"BUY {ticker} @ {price_native} {currency} did not fill within {FILL_WAIT_SECONDS:.0f}s and was cancelled; nothing recorded."
+                    logger.warning(f"[LIVE EXECUTION] {msg}")
+                    return {"success": False, "unfilled": True, "message": msg}
+                # Book what the broker filled, not what was asked
+                shares, price_native = filled, fill_price
+                price_eur = currency_service.to_eur(price_native, currency)
+                actual_cost_eur = round(shares * price_eur, 2)
+                fee_info = calculate_broker_fee(
+                    ticker=ticker, shares=shares, price_native=price_native, currency=currency, broker=settings.LIVE_BROKER, order_action="BUY"
+                )
+                fee_eur = fee_info["fee_eur"]
+                logger.info(
+                    f"[LIVE EXECUTION] Submitting real order to {settings.LIVE_BROKER.upper()}: "
+                    f"BUY {shares} {ticker} @ {price_native} {currency} (Cost: €{actual_cost_eur}, Fee: €{fee_eur:.2f} [{fee_info['breakdown']}]) | "
+                    f"SL: {stop_loss_native} | TP: {take_profit_native} | Order ID: {broker_order_id}"
+                )
 
-            utc_now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+                utc_now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
-            # Record live position in database
-            new_pos = Position(
-                ticker=ticker.upper(),
-                name=name,
-                currency=currency,
-                shares=shares,
-                entry_price_native=price_native,
-                current_price_native=price_native,
-                highest_price_native=price_native,
-                stop_loss_native=stop_loss_native,
-                take_profit_native=take_profit_native,
-                entry_price_eur=price_eur,
-                current_price_eur=price_eur,
-                cost_basis_eur=actual_cost_eur,
-                fees_eur=fee_eur,
-                unrealized_pnl_eur=0.0,
-                unrealized_pnl_pct=0.0,
-                status="OPEN",
-                is_live=True,
-                broker_order_id=broker_order_id,
-                opened_at=utc_now
-            )
-            session.add(new_pos)
+                # Record live position in database
+                new_pos = Position(
+                    ticker=ticker.upper(),
+                    name=name,
+                    currency=currency,
+                    shares=shares,
+                    entry_price_native=price_native,
+                    current_price_native=price_native,
+                    highest_price_native=price_native,
+                    stop_loss_native=stop_loss_native,
+                    take_profit_native=take_profit_native,
+                    entry_price_eur=price_eur,
+                    current_price_eur=price_eur,
+                    cost_basis_eur=actual_cost_eur,
+                    fees_eur=fee_eur,
+                    unrealized_pnl_eur=0.0,
+                    unrealized_pnl_pct=0.0,
+                    status="OPEN",
+                    is_live=True,
+                    broker_order_id=broker_order_id,
+                    opened_at=utc_now
+                )
+                session.add(new_pos)
 
-            # Record Trade
-            trade = Trade(
-                ticker=ticker.upper(),
-                name=name,
-                order_type="BUY",
-                shares=shares,
-                currency=currency,
-                price_native=price_native,
-                price_eur=price_eur,
-                total_eur=actual_cost_eur,
-                fee_eur=fee_eur,
-                rationale=f"[LIVE {settings.LIVE_BROKER.upper()}] {rationale} (Fee: €{fee_eur:.2f})",
-                consensus_score=consensus_score,
-                is_live=True,
-                broker_order_id=broker_order_id,
-                executed_at=utc_now
-            )
-            session.add(trade)
+                # Record Trade
+                trade = Trade(
+                    ticker=ticker.upper(),
+                    name=name,
+                    order_type="BUY",
+                    shares=shares,
+                    currency=currency,
+                    price_native=price_native,
+                    price_eur=price_eur,
+                    total_eur=actual_cost_eur,
+                    fee_eur=fee_eur,
+                    rationale=f"[LIVE {settings.LIVE_BROKER.upper()}] {rationale} (Fee: €{fee_eur:.2f})",
+                    consensus_score=consensus_score,
+                    is_live=True,
+                    broker_order_id=broker_order_id,
+                    executed_at=utc_now
+                )
+                session.add(trade)
 
-            # Update Portfolio Snapshot (cash decreases by cost + commission fee)
-            new_cash_eur = round(cash_eur - actual_cost_eur - fee_eur, 2)
-            new_equity_eur = equity_eur + actual_cost_eur
-            new_snapshot = PortfolioSnapshot(
-                cash_eur=new_cash_eur,
-                equity_eur=new_equity_eur,
-                total_value_eur=round(new_cash_eur + new_equity_eur, 2),
-                open_positions_count=len(open_positions) + 1,
-                is_live=True,
-                timestamp=utc_now
-            )
-            session.add(new_snapshot)
+                # Update Portfolio Snapshot (cash decreases by cost + commission fee)
+                new_cash_eur = round(cash_eur - actual_cost_eur - fee_eur, 2)
+                new_equity_eur = equity_eur + actual_cost_eur
+                new_snapshot = PortfolioSnapshot(
+                    cash_eur=new_cash_eur,
+                    equity_eur=new_equity_eur,
+                    total_value_eur=round(new_cash_eur + new_equity_eur, 2),
+                    open_positions_count=len(open_positions) + 1,
+                    is_live=True,
+                    timestamp=utc_now
+                )
+                session.add(new_snapshot)
 
-            await session.commit()
+                await session.commit()
             self._last_pnl_refresh = 0.0
             await self.adjust_triggers_dynamically()
 
@@ -940,6 +949,15 @@ class LiveBroker(BaseBroker):
             if not pos:
                 return {"success": False, "message": f"No open live position found for {ticker}."}
 
+            self._t212_exit_prices.pop(ticker.upper(), None)
+            dispatched_id = "broker_flat" if broker_flat else await self._dispatch_real_close(ticker=ticker, shares=pos.shares, currency=pos.currency)
+            if not dispatched_id:
+                logger.error(f"[LIVE EXECUTION] SELL {ticker} was not accepted by {settings.LIVE_BROKER.upper()}; position left open.")
+                return {"success": False, "message": f"Exit order for {ticker} could not be placed at {settings.LIVE_BROKER.upper()} (broker not connected or order rejected)."}
+            # A stop that already filled at the broker is in its cash: book it like a broker-side exit
+            broker_flat = broker_flat or dispatched_id == "t212_exit_already_flat"
+            # Book the broker's fill price when it reported one, not the quote
+            exit_price_native = self._t212_exit_prices.pop(ticker.upper(), None) or exit_price_native
             if not exit_price_native:
                 quote = market_data_provider.get_stock_data(ticker)
                 exit_price_native = quote["price"] if quote else pos.current_price_native
@@ -963,10 +981,6 @@ class LiveBroker(BaseBroker):
             realized_pnl_eur = round(proceeds_eur - pos.cost_basis_eur - total_fees_eur, 2)
             realized_pnl_pct = round((realized_pnl_eur / pos.cost_basis_eur) * 100, 2) if pos.cost_basis_eur > 0 else 0.0
 
-            dispatched_id = "broker_flat" if broker_flat else await self._dispatch_real_close(ticker=ticker, shares=pos.shares, currency=pos.currency)
-            if not dispatched_id:
-                logger.error(f"[LIVE EXECUTION] SELL {ticker} was not accepted by {settings.LIVE_BROKER.upper()}; position left open.")
-                return {"success": False, "message": f"Exit order for {ticker} could not be placed at {settings.LIVE_BROKER.upper()} (broker not connected or order rejected)."}
             broker_order_id = dispatched_id
             logger.info(
                 f"[LIVE EXECUTION] Submitting exit order to {settings.LIVE_BROKER.upper()}: "

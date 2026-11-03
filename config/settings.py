@@ -60,6 +60,14 @@ class Settings(BaseSettings):
             self.WHOLE_SHARES_ONLY = False
         return self
 
+    @field_validator("LIVE_BROKER")
+    @classmethod
+    def _known_broker(cls, v):
+        # An old "ibkr" value would make every live order, exit and sync fall through silently
+        if v.lower() not in ("trading212", "alpaca"):
+            raise ValueError(f"LIVE_BROKER={v!r} is not supported; use 'trading212' or 'alpaca'.")
+        return v
+
     @field_validator("MAX_DEPLOYABLE_CAPITAL_EUR", mode="before")
     @classmethod
     def _parse_deployable_capital(cls, v):
