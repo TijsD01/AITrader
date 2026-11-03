@@ -28,13 +28,17 @@ Everything below runs only when `TRADING_MODE == "LIVE"`, `LIVE_TRADING_ENABLED`
 
 ### 1. Entry: place a resting order when a trigger is funded
 
-When a live trigger is PENDING, funded (`allocation_eur > 0`), its market is open or opening, and all buy gates pass, the bot places a GTC order at T212 and stores its id in the existing `OrderTrigger.broker_order_id` column (no migration):
+When a live trigger is PENDING, funded (`allocation_eur > 0`), its market has been open for at least 20 minutes, and all buy gates pass, the bot places a **DAY** order at T212 and stores its id in the existing `OrderTrigger.broker_order_id` column (no migration):
 
-- `LIMIT_PULLBACK` → GTC **limit buy** at `target_price`.
-- `BREAKOUT_BUY` → GTC **stop-limit buy**: stop = `target_price`, limit = `target_price * (1 + BREAKOUT_LIMIT_BUFFER_PCT / 100)`. New setting, default `0.5`. Caps slippage; a gap above the cap means no fill, which is the intended trade-off.
+- `LIMIT_PULLBACK` → DAY **limit buy** at `target_price`.
+- `BREAKOUT_BUY` → DAY **stop-limit buy**: stop = `target_price`, limit = `target_price * (1 + BREAKOUT_LIMIT_BUFFER_PCT / 100)`. New setting, default `0.5`. Caps slippage; a gap above the cap means no fill, which is the intended trade-off.
 - Quantity: the same sizing `execute_buy` uses today (allocation / limit price, whole or fractional per `WHOLE_SHARES_ONLY`), validated by `validate_buy_order` at placement time.
 
 "Buy gates" are the checks `check_and_execute_triggers` and `execute_buy` run today: kill switch / `is_live_armed`, daily loss limit, regime filter, trigger gate verdict, affordability, `MAX_SINGLE_ORDER_EUR`.
+
+Why DAY and not GTC: a GTC limit resting overnight can fill at a gap-down open far below the stop. A DAY order expires at the close; the sync places a new one the next day once the setup is still valid. Why 20 minutes: Yahoo lags EU quotes by about 15 minutes, so the validity check right after the open would use yesterday's price.
+
+Before placing, the sync looks for a pending BUY on the same T212 ticker and takes over its id instead of placing a second order (crash between POST and DB write).
 
 New client method: `Trading212Client.place_stop_limit(ticker, quantity, stop_price, limit_price, validity)`.
 
@@ -43,13 +47,15 @@ New client method: `Trading212Client.place_stop_limit(ticker, quantity, stop_pri
 New scheduler job `t212_order_sync`, interval 1 minute, runs under the existing `_monitor_lock`. Per PENDING live trigger with a `broker_order_id`:
 
 1. Read the order (`get_order`) and, when gone, its fills (`_t212_fills`).
-2. **Filled (fully or partly)** → book the position with the real filled quantity and average price, the trigger's stop/target, mark trigger TRIGGERED, place the GTC stop (`_t212_place_stop`). A partial fill keeps the rest resting until the next sync; the booked position grows on each sync.
+2. **Filled (fully or partly)** → a partial fill cancels the rest first. Then book the position with the real filled quantity and average price, the trigger's stop/target, mark trigger TRIGGERED, place the GTC stop (`_t212_place_stop`).
 3. **Cancelled/rejected at the broker** → clear `broker_order_id`; the trigger becomes eligible for placement again (or cancelled, see 3).
 4. **Still pending** → re-check the cancel rules below.
 
 Then place orders for funded triggers that have none (step 1).
 
-Order of jobs matters: `sync_account_state` adopts untracked holdings. The order sync must run first in the same locked block, so a fill is booked against its trigger and never adopted as a stray holding.
+Order of jobs matters: `sync_account_state` adopts untracked holdings. The order sync runs under `_t212_lock`, and the account sync skips adoption for a T212 ticker that has a trigger with a resting order, so a fill is booked against its trigger and never adopted as a stray holding.
+
+Cash: T212 moves cash for a pending buy from `availableToTrade` to `reservedForOrders`. `_spendable_cash` caps at `availableToTrade`, so it adds back `reservedForOrders`; otherwise a resting order's own cash would defund its trigger and the sync would cancel and re-place it every minute.
 
 ### 3. Cancel rules (checked every sync)
 
@@ -86,7 +92,7 @@ Paper already fills triggers at `target_price` (limit semantics). Breakouts also
 - Never retry an order POST. On timeout or 5xx, look up pending orders for the ticker (`_t212_find_recent`) before deciding, as `_t212_post` does today.
 - Treat every broker answer as untrusted: zero/None fill prices and unknown statuses leave the trigger untouched and log an error.
 - A sync failure leaves resting orders in place. Stops already at T212 still protect open positions.
-- Bot offline while a resting buy fills: the position has no stop until the bot comes back. On start, `check_and_run_startup_sessions` runs the order sync first, which books it and places the stop. This risk is accepted and stated in the PR.
+- Bot offline while a resting buy fills: the position has no stop until the bot comes back (at most until the close, as orders are DAY). On start the order sync runs first, books it and places the stop. This risk is accepted and stated in the PR.
 
 ## Settings
 
