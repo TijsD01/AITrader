@@ -13,6 +13,9 @@ _CACHE_TTL_OPEN: float = 60.0
 _CACHE_TTL_CLOSED: float = 1800.0
 _regime_cache: Dict[str, tuple[float, Optional[Dict[str, Any]]]] = {}
 _REGIME_CACHE_TTL: float = 3600.0
+# ticker.info (fundamentals) is the slowest Yahoo call and the first to hit 429; it barely moves intraday
+_info_cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
+_INFO_CACHE_TTL: float = 24 * 3600.0
 
 class MarketDataProvider:
     @staticmethod
@@ -42,11 +45,17 @@ class MarketDataProvider:
             currency = fast_info.get("currency", "USD")
 
             # Try to get comprehensive fundamental info
-            info = {}
-            try:
-                info = ticker.info or {}
-            except Exception as e:
-                logger.debug(f"Could not load full ticker.info for {ticker_symbol}: {e}")
+            cached_info = _info_cache.get(sym)
+            if cached_info and (now - cached_info[0]) < _INFO_CACHE_TTL:
+                info = cached_info[1]
+            else:
+                info = {}
+                try:
+                    info = ticker.info or {}
+                except Exception as e:
+                    logger.debug(f"Could not load full ticker.info for {ticker_symbol}: {e}")
+                if info:
+                    _info_cache[sym] = (now, info)
 
             # Calculate Technical Indicators
             closes = hist["Close"]
