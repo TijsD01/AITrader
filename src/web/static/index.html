@@ -232,7 +232,7 @@
           </section>
 
           <!-- Hero: total value, return, allocation bar -->
-          <section class="ui-card p-[18px] sm:p-6 space-y-4" aria-label="Portfolio value">
+          <section class="ui-card p-4 sm:p-6 space-y-3 sm:space-y-4" aria-label="Portfolio value">
             <div class="space-y-1">
               <div class="ui-label text-[13px]">Portfolio value</div>
               <div id="metricTotalVal" class="hero-value truncate">&euro;0.00</div>
@@ -249,7 +249,7 @@
           </section>
 
           <!-- KPIs -->
-          <section class="grid grid-cols-2 gap-2.5" aria-label="Key figures">
+          <section class="grid grid-cols-3 gap-2" aria-label="Key figures">
             <div class="ui-card kpi">
               <span class="ui-label">Deployable cash</span>
               <span id="metricCash" class="kpi-value">&euro;0.00</span>
@@ -260,19 +260,13 @@
               <span id="metricUnrealizedPnl" class="kpi-value">&euro;0.00</span>
               <span class="kpi-sub"><span id="metricPosCount">0 open positions</span><span id="metricUnrealizedPnlSub" class="sr-only">Open paper positions</span></span>
             </div>
+            <!-- Pending triggers (opens the Triggers tab) -->
+            <button type="button" onclick="switchTab('triggers')" id="pendingTriggersSummary" class="trigger-link">
+              <span class="ui-label"><i class="fa-solid fa-crosshairs"></i> Triggers</span>
+              <span id="pendingTriggersSummaryText" class="trigger-text">0 pending triggers</span>
+              <span id="pendingTriggersSummarySub" class="kpi-sub max-md:sr-only">Limit orders waiting for their price</span>
+            </button>
           </section>
-
-          <!-- Pending triggers (opens the Triggers tab) -->
-          <button type="button" onclick="switchTab('triggers')" id="pendingTriggersSummary" class="trigger-link">
-            <span class="flex items-center gap-3 min-w-0">
-              <span class="icon-well"><i class="fa-solid fa-crosshairs"></i></span>
-              <span class="min-w-0">
-                <span id="pendingTriggersSummaryText" class="block font-semibold text-[15px] text-white">0 pending triggers</span>
-                <span id="pendingTriggersSummarySub" class="block text-xs text-slate-400">Limit orders waiting for their price</span>
-              </span>
-            </span>
-            <i class="fa-solid fa-chevron-right text-xs text-slate-400 shrink-0"></i>
-          </button>
 
           <!-- Positions -->
           <section class="space-y-2.5" aria-labelledby="positionsTitle">
