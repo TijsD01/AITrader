@@ -1,6 +1,13 @@
 import pytest
 from unittest.mock import patch, AsyncMock
 from src.telegram.bot import TelegramAssistant
+from config.settings import settings
+
+
+@pytest.fixture(autouse=True)
+def _owner_chat_id(monkeypatch):
+    """Commands are only accepted from the configured owner chat (12345 in these tests)."""
+    monkeypatch.setattr(settings, "TELEGRAM_CHAT_ID", "12345")
 
 @pytest.mark.asyncio
 async def test_telegram_register_bot_commands():
@@ -80,7 +87,8 @@ async def test_telegram_handle_slash_command():
     assert "/portfolio" in replies[2][1]
 
 @pytest.mark.asyncio
-async def test_telegram_calibrate_with_trades():
+async def test_telegram_calibrate_with_trades(monkeypatch):
+    monkeypatch.setattr(settings, "POSITION_SIZE_PCT", 0.06)  # /calibrate shows the manual setting
     bot = TelegramAssistant()
     bot.token = "123456789:ABCDEF_mock_token_for_test"
     bot.base_url = f"https://api.telegram.org/bot{bot.token}"
@@ -480,7 +488,7 @@ async def test_telegram_buy_command():
 
     # 1. Missing args
     await bot._handle_update({"message": {"chat": {"id": 12345}, "text": "/buy"}})
-    assert "Usage: <code>/buy TICKER [AMOUNT_EUR]</code>" in replies[-1][1]
+    assert "Usage: <code>/buy TICKER [AMOUNT_EUR] [force]</code>" in replies[-1][1]
 
     # 2. Market closed check
     with patch("src.trading.risk.check_market_hours", return_value=(False, "US Market is closed.")):
@@ -583,7 +591,8 @@ async def test_telegram_status_aliases():
         assert "European Markets" in replies[0][1]
 
 @pytest.mark.asyncio
-async def test_telegram_calibrate_string_types():
+async def test_telegram_calibrate_string_types(monkeypatch):
+    monkeypatch.setattr(settings, "POSITION_SIZE_PCT", 0.08)  # /calibrate shows the manual setting
     bot = TelegramAssistant()
     bot.token = "mock_token"
     bot.base_url = "https://api.telegram.org/botmock_token"
@@ -609,3 +618,139 @@ async def test_telegram_calibrate_string_types():
         assert len(replies) >= 2
         assert "CALIBRATION COMPLETE" in replies[-1][1]
         assert "8.0%" in replies[-1][1]
+
+
+def _capture_bot():
+    bot = TelegramAssistant()
+    replies = []
+
+    async def mock_reply(chat_id, text):
+        replies.append((chat_id, text))
+
+    bot._reply_chat = mock_reply
+    return bot, replies
+
+
+@pytest.mark.asyncio
+async def test_telegram_ignores_unauthorized_chat():
+    bot, replies = _capture_bot()
+    await bot._handle_update({"message": {"chat": {"id": 999}, "text": "/killswitch"}})
+    await bot._handle_update({"message": {"chat": {"id": 999}, "text": "/help"}})
+    assert replies == []
+
+
+@pytest.mark.asyncio
+async def test_telegram_unconfigured_chat_id_not_adopted(monkeypatch, caplog):
+    monkeypatch.setattr(settings, "TELEGRAM_CHAT_ID", None)
+    bot, replies = _capture_bot()
+    bot.chat_id = None
+    with caplog.at_level("WARNING"):
+        await bot._handle_update({"message": {"chat": {"id": 777}, "text": "/help"}})
+    assert replies == []
+    assert bot.chat_id is None
+    assert "777" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_telegram_ignores_edited_message():
+    bot, replies = _capture_bot()
+    await bot._handle_update({"edited_message": {"chat": {"id": 12345}, "text": "/help"}})
+    assert replies == []
+
+
+@pytest.mark.asyncio
+async def test_telegram_requires_leading_slash():
+    bot, replies = _capture_bot()
+    before = settings.KILL_SWITCH_ACTIVE
+    await bot._handle_update({"message": {"chat": {"id": 12345}, "text": "halt"}})
+    await bot._handle_update({"message": {"chat": {"id": 12345}, "text": "stop"}})
+    await bot._handle_update({"message": {"chat": {"id": 12345}, "text": "hi"}})
+    assert replies == []
+    assert settings.KILL_SWITCH_ACTIVE == before
+
+
+@pytest.mark.asyncio
+async def test_telegram_ignores_stale_messages():
+    import time
+    bot, replies = _capture_bot()
+    await bot._handle_update({"message": {"chat": {"id": 12345}, "text": "/help", "date": int(time.time()) - 600}})
+    assert replies == []
+    await bot._handle_update({"message": {"chat": {"id": 12345}, "text": "/help", "date": int(time.time()) - 5}})
+    assert len(replies) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("amount", ["abc", "0", "-5", "nan", "inf"])
+async def test_telegram_buy_invalid_amount_rejected(amount):
+    bot, replies = _capture_bot()
+    with patch("src.trading.risk.check_market_hours", return_value=(True, "Open")), \
+         patch("src.telegram.bot.market_data_provider.get_stock_data") as mock_data:
+        await bot._handle_update({"message": {"chat": {"id": 12345}, "text": f"/buy NVDA {amount}"}})
+        mock_data.assert_not_called()
+    assert len(replies) == 1
+    assert "Invalid amount" in replies[0][1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("price", ["abc", "0", "-5", "nan"])
+async def test_telegram_trigger_invalid_price_rejected(price):
+    bot, replies = _capture_bot()
+    with patch("src.telegram.bot.market_data_provider.get_stock_data") as mock_data:
+        await bot._handle_update({"message": {"chat": {"id": 12345}, "text": f"/trigger NVDA {price}"}})
+        mock_data.assert_not_called()
+    assert len(replies) == 1
+    assert "Invalid price" in replies[0][1]
+
+
+@pytest.mark.asyncio
+async def test_telegram_trades_filters_live_mode_and_single_pnl_sign():
+    import datetime
+    from types import SimpleNamespace
+    bot = TelegramAssistant()
+    bot.token = "mock_token"
+    bot.base_url = "https://api.telegram.org/botmock_token"
+    replies = []
+    bot._reply_chat = AsyncMock(side_effect=lambda cid, txt: replies.append((cid, txt)))
+
+    trade = SimpleNamespace(
+        order_type="SELL", ticker="NVDA", shares=2, price_native=100.0, currency="USD",
+        total_eur=180.0, realized_pnl_eur=3.5, realized_pnl_pct=2.1,
+        executed_at=datetime.datetime(2026, 1, 2, 10, 0),
+    )
+    stmts = []
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        async def execute(self, stmt):
+            stmts.append(stmt)
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [trade]))
+
+    with patch("src.db.session.AsyncSessionLocal", lambda: FakeSession()), \
+         patch.object(settings, "TRADING_MODE", "LIVE"), \
+         patch.object(settings, "LIVE_TRADING_ENABLED", True):
+        await bot._handle_update({"message": {"chat": {"id": 12345}, "text": "/trades"}})
+
+    sql = str(stmts[0].compile(compile_kwargs={"literal_binds": True})).lower()
+    assert "is_live = 1" in sql or "is_live = true" in sql
+    assert "+2.1%" in replies[-1][1]
+    assert "++" not in replies[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_telegram_status_shows_mode_and_kill_switch():
+    bot = TelegramAssistant()
+    bot.token = "mock_token"
+    bot.base_url = "https://api.telegram.org/botmock_token"
+    replies = []
+    bot._reply_chat = AsyncMock(side_effect=lambda cid, txt: replies.append((cid, txt)))
+
+    with patch.object(settings, "KILL_SWITCH_ACTIVE", True), \
+         patch.object(settings, "TRADING_MODE", "PAPER"):
+        await bot._handle_update({"message": {"chat": {"id": 12345}, "text": "/status"}})
+    text = replies[-1][1]
+    assert "Trading Mode: PAPER" in text
+    assert "Kill Switch: 🚨 ACTIVE" in text
+    assert "Zero Cost" not in text

@@ -1,5 +1,10 @@
+import asyncio
 import logging
+import math
+import re
+import time
 from typing import Dict, Any, Optional
+from config.settings import settings
 from src.agents.base import llm_client
 from src.agents.technical import TechnicalAnalystAgent
 from src.agents.fundamental import FundamentalAnalystAgent
@@ -12,12 +17,55 @@ class InvestmentCommittee:
     name: str = "Hedge Fund Investment Committee"
 
     @staticmethod
+    def _parse_llm_verdict(res: Any) -> Optional[tuple]:
+        """Returns (action, score 0-100) from a raw LLM verdict, or None if malformed (caller falls back to rules)."""
+        if not isinstance(res, dict) or "action" not in res or "consensus_score" not in res:
+            return None
+        action = str(res["action"] or "").strip().upper().replace(" ", "_")
+        if action not in ("STRONG_BUY", "BUY", "HOLD", "SELL"):
+            return None
+        raw = res["consensus_score"]
+        if isinstance(raw, bool):
+            return None
+        score = None
+        if isinstance(raw, (int, float)):
+            score = float(raw)
+        elif isinstance(raw, str):
+            m = re.match(r"\s*([-+]?\d+(?:\.\d+)?)", raw)
+            if m:
+                score = float(m.group(1))
+        if score is None or not math.isfinite(score):
+            return None
+        return action, int(max(0, min(100, round(score))))
+
+    @staticmethod
+    def _sentiment_veto(sent_rep: Dict[str, Any]) -> bool:
+        """
+        News sentiment counts only as a red flag (Lopez-Lira & Tang 2023: for large caps the signal sits
+        mostly in negative news). At or below SENTIMENT_VETO_SCORE it blocks a buy.
+        """
+        try:
+            return float(sent_rep.get("score", 0.0)) <= settings.SENTIMENT_VETO_SCORE
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
     async def evaluate_ticker(stock_data: Dict[str, Any], portfolio_equity_eur: float = 10000.0) -> Dict[str, Any]:
         ticker = stock_data["ticker"]
         price = stock_data["price"]
         curr = stock_data.get("currency", "USD")
 
-        # 1. Fetch trade learning context and dynamic calibrated parameters
+        # 1. Fetch TencentDB Agent Memory Cold Start & trade learning context
+        memory_context = ""
+        try:
+            from src.memory.client import agent_memory_client
+            cold_start = await agent_memory_client.get_cold_start_loadout(
+                query=ticker, char_budget=2400, include_lessons=False
+            )
+            memory_context = cold_start.full_prompt_context
+        except Exception as e:
+            logger.debug(f"Memory client context load note: {e}")
+
         try:
             from src.trading.learner import trade_learner
             learning_context = await trade_learner.get_learning_context_for_agents()
@@ -42,23 +90,28 @@ class InvestmentCommittee:
         except Exception:
             pass
 
-        # 2. Run Specialist Agents in parallel or sequence
-        tech_rep = await TechnicalAnalystAgent.analyze(stock_data)
-        fund_rep = await FundamentalAnalystAgent.analyze(stock_data)
-        sent_rep = await SentimentAnalystAgent.analyze(stock_data)
+        # 2. Run the independent specialists in parallel; risk needs tech and fund
+        tech_rep, fund_rep, sent_rep = await asyncio.gather(
+            TechnicalAnalystAgent.analyze(stock_data),
+            FundamentalAnalystAgent.analyze(stock_data),
+            SentimentAnalystAgent.analyze(stock_data),
+        )
         risk_rep = await RiskManagerAgent.evaluate_risk(stock_data, tech_rep, fund_rep, portfolio_equity_eur)
+        sentiment_veto = InvestmentCommittee._sentiment_veto(sent_rep)
 
         # 3. Conduct LLM Committee Debate (if LLM active)
         system_prompt = (
             "You are the Lead Portfolio Manager presiding over the Investment Committee of a top hedge fund. "
             "You have received specialized reports from Technical, Fundamental, Sentiment, and Risk analysts, "
-            "along with historical lessons learned from previous winning and losing trades. "
+            "along with historical lessons learned from previous winning and losing trades and full memory loadout. "
             "Simulate an authentic, insightful debate between these agents discussing trade-offs, factoring in "
             "where previous trades went wrong or succeeded, and render your final verdict."
         )
 
         user_prompt = f"""
 Ticker: {ticker} ({stock_data.get('name')}) at {price} {curr}
+
+{memory_context}
 
 {learning_context}
 
@@ -76,6 +129,8 @@ Analyst Reports:
 3. Sentiment Analyst:
    Mood: {sent_rep.get('mood')} (Score: {sent_rep.get('score')})
    Summary: {sent_rep.get('sentiment_summary')}
+   Note: for these large caps news is only a red flag. Clearly negative news is a reason not to buy;
+   positive news is not a reason to buy or to raise the score.
 
 4. Risk Officer:
    Approved: {risk_rep.get('approved')}
@@ -91,68 +146,103 @@ Synthesize the debate and return JSON with:
   "debate_transcript": string formatted multi-turn debate between Technical, Fundamental, Sentiment, and Risk agents concluding with PM decision
 }}
 """
+        parsed = None
         if llm_client.has_active_key():
             res = await llm_client.generate_json(system_prompt, user_prompt)
-            if res and "action" in res and "consensus_score" in res:
-                return {
-                    "ticker": ticker,
-                    "name": stock_data.get("name"),
-                    "currency": curr,
-                    "price": price,
-                    "action": res["action"],
-                    "consensus_score": int(res["consensus_score"]),
-                    "summary": res.get("verdict_summary", ""),
-                    "debate_transcript": res.get("debate_transcript", ""),
-                    "entry_trigger_price": risk_rep.get("entry_trigger_price", price),
-                    "trigger_type": risk_rep.get("trigger_type", "LIMIT_PULLBACK"),
-                    "trigger_rationale": risk_rep.get("trigger_rationale", ""),
-                    "technical": tech_rep,
-                    "fundamental": fund_rep,
-                    "sentiment": sent_rep,
-                    "risk": risk_rep,
-                }
-
-        # Structured Synthetic Debate Generator Fallback with Dynamic Weights
-        tech_score = tech_rep["confidence"] if tech_rep["bias"] == "BULLISH" else (30 if tech_rep["bias"] == "BEARISH" else 50)
-        fund_score = fund_rep["confidence"] if fund_rep["valuation"] in ("UNDERVALUED", "FAIR") else 35
-        sent_score = int(50 + (sent_rep["score"] * 40))
-        
-        # Weighted score with dynamically adapted weights
-        final_score = int((tech_score * tech_w) + (fund_score * fund_w) + (sent_score * sent_w) + (75 * risk_w))
-        final_score = min(98, max(20, final_score))
-
-        buy_threshold = max(65, min_buy_score)
-        strong_buy_threshold = max(80, buy_threshold + 10)
-
-        if final_score >= strong_buy_threshold:
-            action = "STRONG_BUY"
-        elif final_score >= buy_threshold:
-            action = "BUY"
-        elif final_score >= 45:
-            action = "HOLD"
-        else:
-            action = "SELL"
+            parsed = InvestmentCommittee._parse_llm_verdict(res)
 
         trigger_pr = risk_rep.get("entry_trigger_price", price)
         trig_type = risk_rep.get("trigger_type", "LIMIT_PULLBACK")
 
-        transcript = (
-            f"**[Technical Analyst]**: \"We are seeing a {tech_rep['bias']} posture with {tech_rep['confidence']}% conviction. "
-            f"{tech_rep['analysis_summary']}\"\n\n"
-            f"**[Fundamental Analyst]**: \"From a balance sheet perspective, valuation is {fund_rep['valuation']} and solvency is {fund_rep['health']}. "
-            f"{fund_rep['analysis_summary']}\"\n\n"
-            f"**[Sentiment Analyst]**: \"News sentiment registers as {sent_rep['mood']}. {sent_rep['sentiment_summary']}\"\n\n"
-            f"**[Risk Officer]**: \"Risk parameters allow this setup. {risk_rep['risk_summary']}\"\n\n"
-            f"**[Portfolio Manager]**: \"Committee consensus reached: **{action}** with score {final_score}/100. "
-            f"AI Trigger armed: {trig_type} at {trigger_pr} with Stop-Loss at {risk_rep['stop_loss_price']} and Take-Profit at {risk_rep['take_profit_price']}.\""
-        )
+        if parsed is not None:
+            action, final_score = parsed
+            # Risk Officer veto: downgrade and cap the score, since triggers are armed on score alone
+            if not risk_rep.get("approved", True):
+                if action in ("BUY", "STRONG_BUY"):
+                    action = "HOLD"
+                final_score = min(final_score, 55)
+            # Negative-news veto: downgrade a buy to HOLD (the score cap below then applies)
+            if sentiment_veto and action in ("BUY", "STRONG_BUY"):
+                action = "HOLD"
+            # A non-buy verdict must not carry a buy-level score either
+            if action in ("HOLD", "SELL"):
+                final_score = min(final_score, 55)
+            summary = res.get("verdict_summary", "")
+            transcript = res.get("debate_transcript", "")
+            score_source = "llm"  # Portfolio Manager LLM judgement
+        else:
+            # Structured Synthetic Debate Generator Fallback with Dynamic Weights
+            tech_score = tech_rep["confidence"] if tech_rep["bias"] == "BULLISH" else (30 if tech_rep["bias"] == "BEARISH" else 50)
+            fund_score = fund_rep["confidence"] if fund_rep["valuation"] in ("UNDERVALUED", "FAIR") else 35
+            # Sentiment can only pull the score down: positive news is not a buy reason
+            sent_score = int(50 + (min(0.0, sent_rep["score"]) * 40))
 
-        summary = (
-            f"Committee assigns **{action}** (Score {final_score}/100) for {ticker}. "
-            f"AI Trigger: {trig_type} @ {trigger_pr}. Technical: {tech_rep['bias']}; "
-            f"Fundamental: {fund_rep['valuation']}; Sentiment: {sent_rep['mood']}. "
-            f"Target R:R is {risk_rep['risk_reward_ratio']}:1."
-        )
+            # Weighted score with dynamically adapted weights
+            final_score = int((tech_score * tech_w) + (fund_score * fund_w) + (sent_score * sent_w) + (75 * risk_w))
+            final_score = min(98, max(20, final_score))
+
+            buy_threshold = max(65, min_buy_score)
+            strong_buy_threshold = max(80, buy_threshold + 10)
+
+            if final_score >= strong_buy_threshold:
+                action = "STRONG_BUY"
+            elif final_score >= buy_threshold:
+                action = "BUY"
+            elif final_score >= 45:
+                action = "HOLD"
+            else:
+                action = "SELL"
+
+            # Risk Officer Veto Power (e.g. excessive fee drag or unviable trade economics)
+            risk_veto = not risk_rep.get("approved", True)
+            if risk_veto and action in ("BUY", "STRONG_BUY"):
+                action = "HOLD"
+                final_score = min(final_score, 55)
+            news_veto = sentiment_veto and action in ("BUY", "STRONG_BUY")
+            if news_veto:
+                action = "HOLD"
+                final_score = min(final_score, 55)
+
+            risk_officer_line = (
+                f"\"Risk parameters allow this setup. {risk_rep['risk_summary']}\""
+                if not risk_veto
+                else f"\"VETO: Setup rejected due to risk / fee constraints. {risk_rep['risk_summary']}\""
+            )
+
+            transcript = (
+                f"**[Technical Analyst]**: \"We are seeing a {tech_rep['bias']} posture with {tech_rep['confidence']}% conviction. "
+                f"{tech_rep['analysis_summary']}\"\n\n"
+                f"**[Fundamental Analyst]**: \"From a balance sheet perspective, valuation is {fund_rep['valuation']} and solvency is {fund_rep['health']}. "
+                f"{fund_rep['analysis_summary']}\"\n\n"
+                f"**[Sentiment Analyst]**: \"News sentiment registers as {sent_rep['mood']}. {sent_rep['sentiment_summary']}\"\n\n"
+                f"**[Risk Officer]**: {risk_officer_line}\n\n"
+                f"**[Portfolio Manager]**: \"Committee consensus reached: **{action}** with score {final_score}/100. "
+                f"{'Trade downgraded to HOLD due to Risk Officer veto. ' if risk_veto else ''}"
+                f"AI Trigger armed: {trig_type} at {trigger_pr} with Stop-Loss at {risk_rep['stop_loss_price']} and Take-Profit at {risk_rep['take_profit_price']}.\""
+            )
+
+            summary = (
+                f"Committee assigns **{action}** (Score {final_score}/100) for {ticker}. "
+                f"{'Vetoed to HOLD by Risk Officer. ' if risk_veto else ''}"
+                f"{'Vetoed to HOLD on negative news. ' if news_veto else ''}"
+                f"AI Trigger: {trig_type} @ {trigger_pr}. Technical: {tech_rep['bias']}; "
+                f"Fundamental: {fund_rep['valuation']}; Sentiment: {sent_rep['mood']}. "
+                f"Target R:R is {risk_rep['risk_reward_ratio']}:1."
+            )
+            score_source = "rules"  # weighted formula (LLM unavailable or invalid)
+
+        # Asynchronously log decision to TencentDB Agent Memory L0 and trigger asset extraction
+        try:
+            from src.memory.client import agent_memory_client
+            asyncio.create_task(agent_memory_client.log_interaction(
+                session_id=f"committee_{ticker}_{int(time.time())}",
+                role="assistant",
+                content=f"Deliberation on {ticker} ({action}, Score {final_score}/100):\n{transcript}\n\nVerdict: {summary}",
+                metadata={"ticker": ticker, "action": action, "consensus_score": final_score, "price": price},
+                trigger_extraction=True
+            ))
+        except Exception:
+            pass
 
         return {
             "ticker": ticker,
@@ -161,6 +251,7 @@ Synthesize the debate and return JSON with:
             "price": price,
             "action": action,
             "consensus_score": final_score,
+            "score_source": score_source,
             "summary": summary,
             "debate_transcript": transcript,
             "entry_trigger_price": trigger_pr,

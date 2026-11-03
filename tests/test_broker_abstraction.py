@@ -30,9 +30,11 @@ def test_get_active_broker_mode_switching():
         settings.KILL_SWITCH_ACTIVE = False
         assert get_active_broker() is live_broker
 
-        # When kill switch is active, fallback to paper (or halted)
+        # Kill switch halts new buys but keeps the live broker so real positions stay managed
         settings.KILL_SWITCH_ACTIVE = True
-        assert get_active_broker() is paper_broker
+        assert get_active_broker() is live_broker
+        armed, _ = live_broker.is_live_armed()
+        assert armed is False
 
         # When LIVE_TRADING_ENABLED is False, fallback to paper
         settings.KILL_SWITCH_ACTIVE = False

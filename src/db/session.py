@@ -1,11 +1,16 @@
+import asyncio
 import os
 from pathlib import Path
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy import select
 
+import logging
 from config.settings import settings
 from config.default_universe import DEFAULT_WATCHLIST, EU_STOCKS, US_STOCKS
+
 from src.db.models import Base, WatchlistItem, PortfolioSnapshot, SystemConfig
+
+logger = logging.getLogger(__name__)
 
 engine = create_async_engine(
     settings.DATABASE_URL,
@@ -30,11 +35,16 @@ def _run_migrations(connection):
     migrations = [
         ("positions", "is_live", "BOOLEAN DEFAULT 0"),
         ("positions", "broker_order_id", "VARCHAR(100)"),
+        ("positions", "fees_eur", "FLOAT DEFAULT 0.0"),
         ("trades", "is_live", "BOOLEAN DEFAULT 0"),
         ("trades", "broker_order_id", "VARCHAR(100)"),
+        ("trades", "fee_eur", "FLOAT DEFAULT 0.0"),
         ("order_triggers", "is_live", "BOOLEAN DEFAULT 0"),
         ("order_triggers", "broker_order_id", "VARCHAR(100)"),
-        ("portfolio_snapshots", "is_live", "BOOLEAN DEFAULT 0")
+        ("portfolio_snapshots", "is_live", "BOOLEAN DEFAULT 0"),
+        ("cash_flows", "broker_ref", "VARCHAR(64)"),
+        ("portfolio_snapshots", "broker", "VARCHAR(20)"),
+        ("shadow_accounts", "cash_flows_eur", "FLOAT DEFAULT 0.0"),
     ]
     for table, col, col_type in migrations:
         try:
@@ -84,23 +94,110 @@ async def init_db():
                 )
                 session.add(item)
                 
-        # Check system config
-        res = await session.execute(select(SystemConfig).where(SystemConfig.key == "AUTO_BUY_ENABLED"))
-        cfg = res.scalars().first()
-        if not cfg:
-            session.add(SystemConfig(key="AUTO_BUY_ENABLED", value=str(settings.AUTO_BUY_ENABLED).lower()))
-            session.add(SystemConfig(key="MIN_CONSENSUS_SCORE", value=str(settings.MIN_CONSENSUS_SCORE)))
-            session.add(SystemConfig(key="TRIGGER_MIN_SCORE", value=str(settings.TRIGGER_MIN_SCORE)))
-            session.add(SystemConfig(key="POSITION_SIZE_PCT", value=str(settings.POSITION_SIZE_PCT)))
-        else:
-            # Check if TRIGGER_MIN_SCORE already exists
-            trig_cfg = await session.execute(select(SystemConfig).where(SystemConfig.key == "TRIGGER_MIN_SCORE"))
-            if not trig_cfg.scalars().first():
-                session.add(SystemConfig(key="TRIGGER_MIN_SCORE", value=str(settings.TRIGGER_MIN_SCORE)))
+        # Check and seed system configs
+        cfg_res = await session.execute(select(SystemConfig))
+        db_configs = {c.key: c.value for c in cfg_res.scalars().all()}
 
-            # Check if ENFORCE_MARKET_HOURS already exists in DB
-            emh_cfg = await session.execute(select(SystemConfig).where(SystemConfig.key == "ENFORCE_MARKET_HOURS"))
-            if not emh_cfg.scalars().first():
-                session.add(SystemConfig(key="ENFORCE_MARKET_HOURS", value="true"))
+        # Seed missing keys with settings defaults
+        defaults_to_seed = {
+            "AUTO_BUY_ENABLED": str(settings.AUTO_BUY_ENABLED).lower(),
+            "KILL_SWITCH_ACTIVE": str(settings.KILL_SWITCH_ACTIVE).lower(),
+            "MIN_CONSENSUS_SCORE": str(settings.MIN_CONSENSUS_SCORE),
+            "TRIGGER_MIN_SCORE": str(settings.TRIGGER_MIN_SCORE),
+            "POSITION_SIZE_PCT": str(settings.POSITION_SIZE_PCT),
+            "ENFORCE_MARKET_HOURS": str(settings.ENFORCE_MARKET_HOURS).lower(),
+            "MAX_CAPITAL_USAGE_PCT": str(settings.MAX_CAPITAL_USAGE_PCT),
+            "MAX_DEPLOYABLE_CAPITAL_EUR": str(settings.MAX_DEPLOYABLE_CAPITAL_EUR) if settings.MAX_DEPLOYABLE_CAPITAL_EUR is not None else "",
+            "MAX_POSITIONS": str(settings.MAX_POSITIONS),
+            "TRADING_MODE": settings.TRADING_MODE,
+            "LIVE_TRADING_ENABLED": str(settings.LIVE_TRADING_ENABLED).lower(),
+        }
+
+        seeded_any = False
+        for k, v in defaults_to_seed.items():
+            if k not in db_configs:
+                session.add(SystemConfig(key=k, value=v))
+                db_configs[k] = v
+                seeded_any = True
+
+        if seeded_any:
+            await session.commit()
+
+        # Synchronize all persisted DB configurations into in-memory settings singleton
+        if "AUTO_BUY_ENABLED" in db_configs:
+            settings.AUTO_BUY_ENABLED = db_configs["AUTO_BUY_ENABLED"].strip().lower() == "true"
+        if "KILL_SWITCH_ACTIVE" in db_configs:
+            settings.KILL_SWITCH_ACTIVE = db_configs["KILL_SWITCH_ACTIVE"].strip().lower() == "true"
+        if "MIN_CONSENSUS_SCORE" in db_configs:
+            try:
+                settings.MIN_CONSENSUS_SCORE = int(db_configs["MIN_CONSENSUS_SCORE"])
+            except Exception:
+                pass
+        if "TRIGGER_MIN_SCORE" in db_configs:
+            try:
+                settings.TRIGGER_MIN_SCORE = int(db_configs["TRIGGER_MIN_SCORE"])
+            except Exception:
+                pass
+        if "POSITION_SIZE_PCT" in db_configs:
+            try:
+                # Cap stale DB values (e.g. old 0.55 from the 100% slider); matches web endpoint cap
+                settings.POSITION_SIZE_PCT = min(0.15, float(db_configs["POSITION_SIZE_PCT"]))
+            except Exception:
+                pass
+        if "ENFORCE_MARKET_HOURS" in db_configs:
+            settings.ENFORCE_MARKET_HOURS = db_configs["ENFORCE_MARKET_HOURS"].strip().lower() == "true"
+        if "MAX_CAPITAL_USAGE_PCT" in db_configs:
+            try:
+                settings.MAX_CAPITAL_USAGE_PCT = float(db_configs["MAX_CAPITAL_USAGE_PCT"])
+            except Exception:
+                pass
+        if "MAX_DEPLOYABLE_CAPITAL_EUR" in db_configs:
+            try:
+                v = db_configs["MAX_DEPLOYABLE_CAPITAL_EUR"].strip()
+                settings.MAX_DEPLOYABLE_CAPITAL_EUR = float(v) if v and v not in ("None", "null") else None
+            except Exception:
+                pass
+        if "MAX_POSITIONS" in db_configs:
+            try:
+                settings.MAX_POSITIONS = max(1, int(db_configs["MAX_POSITIONS"]))
+            except Exception:
+                pass
+        if "TRADING_MODE" in db_configs:
+            m = db_configs["TRADING_MODE"].strip().upper()
+            if m in ("PAPER", "LIVE"):
+                settings.TRADING_MODE = m
+        if "LIVE_TRADING_ENABLED" in db_configs:
+            settings.LIVE_TRADING_ENABLED = db_configs["LIVE_TRADING_ENABLED"].strip().lower() == "true"
 
         await session.commit()
+
+
+
+async def set_kill_switch(active: bool) -> bool:
+    """Set the emergency kill switch in memory and persist it so it survives restarts."""
+    active = bool(active)
+    async with AsyncSessionLocal() as session:
+        res = await session.execute(select(SystemConfig).where(SystemConfig.key == "KILL_SWITCH_ACTIVE"))
+        cfg = res.scalars().first()
+        if cfg:
+            cfg.value = str(active).lower()
+        else:
+            session.add(SystemConfig(key="KILL_SWITCH_ACTIVE", value=str(active).lower()))
+        await session.commit()
+    settings.KILL_SWITCH_ACTIVE = active
+    if active:
+        # A task, not an await: sync_resting_entries can reach here holding the broker's T212 lock, which the cancel needs
+        from src.trading.broker import live_broker
+        task = asyncio.create_task(live_broker.cancel_resting_entries("kill switch on"))
+        _cancel_tasks.add(task)
+        task.add_done_callback(_cancel_done)
+    return active
+
+
+_cancel_tasks: set = set()
+
+
+def _cancel_done(task: "asyncio.Task") -> None:
+    _cancel_tasks.discard(task)
+    if not task.cancelled() and task.exception():
+        logger.error(f"Cancelling resting orders on kill switch failed: {task.exception()}")

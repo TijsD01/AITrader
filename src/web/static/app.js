@@ -1,41 +1,269 @@
 // Global State
 let allocationChart = null;
 let currentScreenerMarket = 'ALL';
+let currentAccountCash = 10000.0;
+let killSwitchActive = false;        // last known kill-switch state
+let lastSavedTradingMode = 'PAPER';  // used to revert the mode <select> when a switch is cancelled
+let currentTab = 'portfolio';
+let adviceReportsCache = [];         // keeps report objects out of the DOM (no JSON in attributes)
+
+// ------------------------------------------------------------------
+// Security helpers: every string that comes from the server (LLM text,
+// news-derived text, tickers, names, ...) must go through esc() before it
+// is interpolated into an innerHTML template.
+// ------------------------------------------------------------------
+function esc(value) {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/`/g, '&#96;');
+}
+
+// Escapes everything, then re-enables a tiny whitelist of attribute-less
+// formatting tags (the Telegram-style <b>/<i>/<code> markup used in review text).
+function safeRichText(value) {
+  return esc(value).replace(/&lt;(\/?)(b|strong|i|em|u|s|code|pre)&gt;/gi, '<$1$2>');
+}
+
+// Number formatting that tolerates null/undefined/strings from the API
+function num(value, digits = 2) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n.toFixed(digits) : (0).toFixed(digits);
+}
+function eur(value, digits = 2) {
+  const n = Number(value);
+  const v = Number.isFinite(n) ? n : 0;
+  return `€${v.toLocaleString('en-US', {minimumFractionDigits: digits, maximumFractionDigits: digits})}`;
+}
+
+// Euro amount with an explicit + or - sign
+function signedEur(value, digits = 2) {
+  const n = Number(value) || 0;
+  return `${n > 0 ? '+' : n < 0 ? '-' : ''}${eur(Math.abs(n), digits)}`;
+}
+
+// Segmented bar: one slice per holding, cash last
+function renderAllocationBar(cashEur, positions) {
+  const bar = document.getElementById('allocationBar');
+  const legend = document.getElementById('allocationLegend');
+  if (!bar) return;
+  const parts = positions.map((p, i) => ({
+    label: String(p.ticker || ''),
+    value: Math.max(0, Number(p.current_value_eur) || 0),
+    color: ALLOC_COLORS[i % ALLOC_COLORS.length]
+  }));
+  parts.push({ label: 'Cash', value: Math.max(0, cashEur), color: ALLOC_CASH_COLOR });
+  const total = parts.reduce((s, p) => s + p.value, 0);
+  if (total <= 0) {
+    bar.innerHTML = '<span style="flex:1;background:var(--line-strong)"></span>';
+    if (legend) legend.innerHTML = '';
+    return;
+  }
+  const shown = parts.filter(p => p.value > 0);
+  bar.innerHTML = shown.map(p => `<span style="flex:${(p.value / total * 1000).toFixed(0)};background:${p.color}" title="${esc(p.label)}"></span>`).join('');
+  bar.setAttribute('aria-label', 'Capital allocation: ' + shown.map(p => `${p.label} ${(p.value / total * 100).toFixed(0)}%`).join(', '));
+  if (legend) {
+    legend.innerHTML = positions.length === 0 ? '' : shown.map(p =>
+      `<span><i style="background:${p.color}"></i>${esc(p.label)} <span class="ui-num text-slate-300">${(p.value / total * 100).toFixed(0)}%</span></span>`
+    ).join('');
+  }
+}
+
+// Small badge showing where a committee score came from ("llm" | "rules")
+function scoreSourceBadge(source) {
+  if (!source) return '';
+  const key = String(source).toLowerCase();
+  const label = key === 'llm' ? 'AI score' : (key === 'rules' ? 'Rule score' : null);
+  if (!label) return '';
+  return `<span class="block ui-faint text-[12px] mt-1" title="Score source: ${esc(key)}">${esc(label)}</span>`;
+}
+
+// Verdict badge for a committee action (BUY / STRONG_BUY / HOLD / SELL); arrow + word, never colour alone
+function adviceVerdictBadge(action) {
+  const a = String(action || '').toUpperCase();
+  const text = a.replace('_', ' ');
+  if (!text) return '';
+  if (a === 'STRONG_BUY' || a === 'BUY') return `<span class="ui-badge ui-badge-gain">▲ ${esc(text)}</span>`;
+  if (a === 'SELL' || a === 'STRONG_SELL') return `<span class="ui-badge ui-badge-loss">▼ ${esc(text)}</span>`;
+  return `<span class="ui-badge">${esc(text)}</span>`;
+}
+
+// Mono score out of 100 with a small bar underneath
+function adviceScoreBlock(score, label, sourceHtml = '') {
+  const n = Number(score);
+  const pct = Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0;
+  const shown = Number.isFinite(n) ? esc(Math.round(n)) : '--';
+  return `
+    <div class="adv-score" title="${esc(label)}">
+      <div class="ui-num text-[22px] font-semibold text-white leading-none">${shown}<span class="ui-faint text-[12px] font-normal">/100</span></div>
+      <div class="ui-track mt-2" aria-hidden="true"><span style="width:${pct}%"></span></div>
+      <div class="ui-faint text-[12px] mt-1">${esc(label)}</div>
+      ${sourceHtml}
+    </div>`;
+}
+
+// Price-like value from the API, or a dash when missing
+function advicePrice(value, suffix = '') {
+  if (value === null || value === undefined || value === '') return '—';
+  return `${esc(value)}${suffix ? ' ' + esc(suffix) : ''}`;
+}
 
 // Initialize on DOM Load
 document.addEventListener('DOMContentLoaded', () => {
   initChart();
   loadAllData();
-  // Auto-refresh every 30 seconds
+  switchTabUi('portfolio');
+  resumePendingJob();
+
+  // Enter key submits the ticker inputs (on-screen keyboard "Go")
+  const analyzeInput = document.getElementById('analyzeInput');
+  if (analyzeInput) analyzeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); runOnDemandAnalysis(); } });
+  const triggerInput = document.getElementById('triggerTickerInput');
+  if (triggerInput) triggerInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); armTriggerFromInput(); } });
+
+  // Auto-refresh every 30 seconds (skipped while the browser tab is in the background)
   setInterval(() => {
+    if (document.hidden) return;
     loadPortfolio();
     loadMarketStatus();
+    loadBrokerStatus();
+    refreshSystemStatus();
   }, 30000);
 });
 
-function showToast(message, isError = false) {
+// Event delegation for all dynamically rendered buttons (no inline handlers with data in them)
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('[data-action]');
+  if (!el) return;
+  const action = el.dataset.action;
+  const ticker = el.dataset.ticker || '';
+  switch (action) {
+    case 'close-position': closePosition(ticker); break;
+    case 'toggle-position': {
+      const row = el.closest('.pos-row');
+      if (row) {
+        const open = row.classList.toggle('open');
+        el.setAttribute('aria-expanded', open ? 'true' : 'false');
+        if (open) openPositions.add(ticker); else openPositions.delete(ticker);
+      }
+      break;
+    }
+    case 'buy': executePaperBuy(ticker); break;
+    case 'arm-trigger': armAITrigger(ticker); break;
+    case 'analyze': analyzeDirect(ticker); break;
+    case 'inspect': inspectReport(Number(el.dataset.idx)); break;
+    case 'cancel-trigger': cancelTrigger(Number(el.dataset.id), ticker); break;
+    case 'reset-shadow': resetShadow(el.dataset.key || ''); break;
+    default: break;
+  }
+});
+
+let toastTimer = null;
+function showToast(message, kind = false) {
+  // kind: true | 'error' => error styling; false | 'info' | 'success' => normal
+  const isError = kind === true || kind === 'error';
   const toast = document.getElementById('toast');
   const msg = document.getElementById('toastMsg');
   const icon = document.getElementById('toastIcon');
 
   msg.textContent = message;
   if (isError) {
-    icon.className = 'fa-solid fa-circle-exclamation text-rose-400';
+    icon.className = 'fa-solid fa-circle-exclamation ui-loss';
+  } else if (kind === 'info') {
+    icon.className = 'fa-solid fa-circle-info text-accent';
   } else {
-    icon.className = 'fa-solid fa-circle-check text-emerald-400';
+    icon.className = 'fa-solid fa-circle-check ui-gain';
   }
 
   toast.classList.remove('translate-y-[-100px]', 'opacity-0');
   toast.classList.add('translate-y-0', 'opacity-100');
 
-  setTimeout(() => {
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
     toast.classList.remove('translate-y-0', 'opacity-100');
     toast.classList.add('translate-y-[-100px]', 'opacity-0');
-  }, 3500);
+  }, isError ? 6000 : 3500);
 }
 
+// Tab Metadata for Mobile Dropdown & Navigation
+const TAB_CONFIG = {
+  portfolio: { label: 'Home', icon: 'fa-solid fa-house' },
+  advice: { label: 'Daily Advice', icon: 'fa-solid fa-lightbulb' },
+  screener: { label: 'Market Screener', icon: 'fa-solid fa-magnifying-glass-chart' },
+  debate: { label: 'Committee Debate', icon: 'fa-solid fa-comments' },
+  triggers: { label: 'AI Triggers', icon: 'fa-solid fa-crosshairs' },
+  history: { label: 'Trade History', icon: 'fa-solid fa-clock-rotate-left' },
+  shadow: { label: 'Shadow Paper', icon: 'fa-solid fa-flask' },
+  memory: { label: 'Memory Hub', icon: 'fa-solid fa-brain' },
+  settings: { label: 'Settings', icon: 'fa-solid fa-sliders' }
+};
+
+// Toggle Mobile Dropdown Menu
+function toggleMobileDropdown() {
+  const menu = document.getElementById('mobileDropdownMenu');
+  const backdrop = document.getElementById('mobileDropdownBackdrop');
+  const chevron = document.getElementById('mobileDropdownChevron');
+  if (!menu) return;
+  const moreBtn = document.getElementById('mobileMenuDropdownBtn');
+  const isHidden = menu.classList.contains('hidden');
+  if (isHidden) {
+    menu.classList.remove('hidden');
+    if (backdrop) backdrop.classList.remove('hidden');
+    if (chevron) chevron.classList.add('rotate-180');
+    if (moreBtn) moreBtn.setAttribute('aria-expanded', 'true');
+  } else {
+    closeMobileDropdown();
+  }
+}
+
+// Close Mobile Dropdown Menu
+function closeMobileDropdown() {
+  const menu = document.getElementById('mobileDropdownMenu');
+  const backdrop = document.getElementById('mobileDropdownBackdrop');
+  const chevron = document.getElementById('mobileDropdownChevron');
+  const moreBtn = document.getElementById('mobileMenuDropdownBtn');
+  if (menu) menu.classList.add('hidden');
+  if (backdrop) backdrop.classList.add('hidden');
+  if (chevron) chevron.classList.remove('rotate-180');
+  if (moreBtn) moreBtn.setAttribute('aria-expanded', 'false');
+}
+
+// Global click-outside listener to close mobile dropdown
+document.addEventListener('click', (e) => {
+  const menu = document.getElementById('mobileDropdownMenu');
+  const btn = document.getElementById('mobileMenuDropdownBtn');
+  if (menu && !menu.classList.contains('hidden')) {
+    if (!menu.contains(e.target) && !btn?.contains(e.target)) {
+      closeMobileDropdown();
+    }
+  }
+});
+
+// Escape key listener to close dropdown
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeMobileDropdown();
+});
+
 // Tab Switching
+const MORE_TABS = ['screener', 'debate', 'shadow', 'memory', 'settings'];
+
+function switchTabUi(tabId) {
+  currentTab = tabId;
+  // Bottom nav active state ("More" lights up for the tabs that live inside it)
+  document.querySelectorAll('.bottom-nav-btn').forEach(btn => {
+    const isMore = btn.dataset.more === '1';
+    const active = isMore ? MORE_TABS.includes(tabId) : btn.dataset.tab === tabId;
+    btn.classList.toggle('active', active);
+    if (active) btn.setAttribute('aria-current', 'page'); else btn.removeAttribute('aria-current');
+  });
+}
+
 function switchTab(tabId) {
+  switchTabUi(tabId);
   // Hide all contents
   document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
   const target = document.getElementById(`tab-${tabId}`);
@@ -52,46 +280,70 @@ function switchTab(tabId) {
     }
   });
 
-  // Update mobile nav
-  document.querySelectorAll('.mobile-tab-btn').forEach(btn => {
-    if (btn.dataset.tab === tabId) {
-      btn.classList.add('text-emerald-400');
-      btn.classList.remove('text-slate-400');
-    } else {
-      btn.classList.remove('text-emerald-400');
-      btn.classList.add('text-slate-400');
-    }
+  // Update mobile dropdown button header label and icon
+  const cfg = TAB_CONFIG[tabId] || { label: tabId, icon: 'fa-solid fa-bars' };
+  const mobileLabel = document.getElementById('mobileDropdownActiveText');
+  const mobileIcon = document.getElementById('mobileDropdownActiveIcon');
+  const inMore = MORE_TABS.includes(tabId);
+  const SHORT = { screener: 'Screener', debate: 'Debate', shadow: 'Shadow', memory: 'Memory', settings: 'Settings' };
+  if (mobileLabel) mobileLabel.textContent = inMore ? (SHORT[tabId] || cfg.label) : 'More';
+  if (mobileIcon) mobileIcon.className = inMore ? cfg.icon : 'fa-solid fa-table-cells-large';
+
+  // Update the "More" sheet tiles: mark the current section
+  document.querySelectorAll('.mobile-dropdown-item').forEach(item => {
+    const isCurrent = item.dataset.tab === tabId;
+    item.classList.toggle('is-current', isCurrent);
+    const check = item.querySelector('.mobile-active-check');
+    if (check) check.classList.toggle('hidden', !isCurrent);
   });
 
+  // Auto-close dropdown menu
+  closeMobileDropdown();
+
+  // Start every section at the top (matters on phones where the page is long)
+  window.scrollTo(0, 0);
+
   // Load specific tab data on switch
-  if (tabId === 'portfolio') loadPortfolio();
+  if (tabId === 'portfolio') { loadPortfolio(); loadBrokerStatus(); }
   if (tabId === 'advice') { loadRecommendations(); loadMarketReview(); loadWeeklyReviewComparison(); }
   if (tabId === 'screener') loadScreener();
   if (tabId === 'triggers') loadTriggers();
-  if (tabId === 'history') { loadTrades(); loadLearningInsights(); }
-  if (tabId === 'settings') loadSettings();
+  if (tabId === 'history') { loadTrades(); loadLearningInsights(); loadCashFlows(); }
+  if (tabId === 'shadow') loadShadow();
+  if (tabId === 'memory') loadMemoryHub();
+  if (tabId === 'settings') { loadSettings(); loadBrokerStatus(); }
 }
 
 function loadAllData() {
+  refreshSystemStatus();
   loadMarketStatus();
+  loadBrokerStatus();
   loadPortfolio();
   loadRecommendations();
   loadMarketReview();
   loadWeeklyReviewComparison();
 }
 
+// Allocation colours: one per holding, cash is a neutral grey
+const ALLOC_COLORS = ['#8EA2FF', '#6ED3E8', '#F5B454', '#C4A6FF', '#4ADE9B', '#FF9F7A', '#7FB2FF', '#E9D86E'];
+const ALLOC_CASH_COLOR = '#3A4459';
+// Position rows the user expanded survive the 30 s refresh
+const openPositions = new Set();
+
 // 1. Chart Initialization
 function initChart() {
-  const ctx = document.getElementById('allocationChart').getContext('2d');
+  const canvas = document.getElementById('allocationChart');
+  if (!canvas || typeof Chart === 'undefined') return; // CDN blocked: the rest of the page still works
+  const ctx = canvas.getContext('2d');
   allocationChart = new Chart(ctx, {
     type: 'doughnut',
     data: {
       labels: ['Cash', 'Invested'],
       datasets: [{
         data: [10000, 0],
-        backgroundColor: ['#059669', '#3b82f6'],
+        backgroundColor: [ALLOC_CASH_COLOR, ALLOC_COLORS[0]],
         borderWidth: 2,
-        borderColor: '#131b2e'
+        borderColor: '#121722'
       }]
     },
     options: {
@@ -100,7 +352,7 @@ function initChart() {
       plugins: {
         legend: {
           position: 'bottom',
-          labels: { color: '#94a3b8', font: { size: 11 } }
+          labels: { color: '#A3ADBD', font: { size: 12, family: "'IBM Plex Sans', system-ui, sans-serif" }, boxWidth: 12 }
         }
       },
       cutout: '72%'
@@ -123,96 +375,164 @@ async function loadPortfolio() {
     const pnlVal = positions.reduce((s, p) => s + (p.unrealized_pnl_eur || 0), 0);
     const equityVal = positions.reduce((s, p) => s + (p.current_value_eur || 0), 0);
     const totalVal = (summary.cash_eur || 0) + equityVal;
-    const rawReturn = summary.initial_capital_eur ? (((totalVal / summary.initial_capital_eur) - 1.0) * 100) : (summary.total_return_pct ?? 0);
+    // Measure against everything put in (start value plus deposits), so a deposit is not shown as gain
+    const investedCap = Number(summary.invested_capital_eur ?? summary.initial_capital_eur) || 0;
+    const rawReturn = investedCap > 0 ? (((totalVal / investedCap) - 1.0) * 100) : (summary.total_return_pct ?? 0);
     const totalReturnPct = Number.isFinite(rawReturn) ? rawReturn : 0;
 
     const isLive = (summary.trading_mode || '').toUpperCase() === 'LIVE';
     const modeBadge = document.getElementById('tradingModeBadge');
     if (modeBadge) {
       modeBadge.textContent = isLive ? 'LIVE' : 'PAPER';
-      modeBadge.className = isLive
-        ? 'text-xs px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-400 font-semibold uppercase border border-rose-500/30'
-        : 'text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-semibold uppercase border border-emerald-500/30';
+      modeBadge.className = isLive ? 'mode-tag is-live' : 'mode-tag';
     }
     const pnlSub = document.getElementById('metricUnrealizedPnlSub');
     if (pnlSub) {
       pnlSub.textContent = `Open ${isLive ? 'live' : 'paper'} positions`;
     }
 
-    document.getElementById('metricTotalVal').textContent = `€${totalVal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
-    document.getElementById('metricCash').textContent = `€${summary.cash_eur.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
-    document.getElementById('metricEquity').textContent = `€${equityVal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+    currentAccountCash = summary.total_account_cash_eur ?? summary.cash_eur ?? 0;
+    const deployableCash = Number(summary.available_cash_eur ?? summary.usable_capital_eur ?? summary.cash_eur) || 0;
+    const protectedReserve = summary.protected_reserve_eur || 0;
+    const maxUsagePct = summary.max_capital_usage_pct ?? 100;
+    const maxCapEur = summary.max_deployable_capital_eur;
+
+    document.getElementById('metricTotalVal').textContent = eur(totalVal);
+    document.getElementById('metricCash').textContent = eur(deployableCash);
+    document.getElementById('metricEquity').textContent = eur(equityVal);
+    const totalCashEl = document.getElementById('metricTotalCash');
+    if (totalCashEl) totalCashEl.textContent = eur(Number(summary.cash_eur) || 0);
+
+    // Pending triggers summary (tap to open the Triggers tab)
+    const trigCount = Number(summary.pending_triggers_count) || 0;
+    const trigReserved = Number(summary.reserved_triggers_eur) || 0;
+    const trigText = document.getElementById('pendingTriggersSummaryText');
+    const trigSub = document.getElementById('pendingTriggersSummarySub');
+    if (trigText) trigText.textContent = `${trigCount} pending trigger${trigCount === 1 ? '' : 's'}`;
+    if (trigSub) trigSub.textContent = trigCount > 0 && trigReserved > 0
+      ? `${eur(trigReserved)} reserved for limit orders`
+      : 'Limit orders waiting for their price';
+    setTriggerNavBadge(trigCount);
+
+    const limitBadge = document.getElementById('capitalLimitBadge');
+    if (limitBadge) {
+      if (maxUsagePct < 100 || (maxCapEur && maxCapEur > 0)) {
+        limitBadge.textContent = `${maxUsagePct}%${maxCapEur ? ` · cap ${eur(maxCapEur, 0)}` : ''}`;
+        limitBadge.className = 'ui-num text-amber-300';
+      } else {
+        limitBadge.textContent = '100%';
+        limitBadge.className = 'ui-num text-slate-200';
+      }
+    }
+
+    const cashSub = document.getElementById('metricCashSub');
+    if (cashSub) {
+      const reservedTriggers = summary.reserved_triggers_eur || 0;
+      const triggersCount = summary.pending_triggers_count || 0;
+      const subParts = [];
+
+      if (reservedTriggers > 0) {
+        subParts.push(`<span title="Capital earmarked for pending order triggers">${eur(reservedTriggers)} held for ${triggersCount} trigger${triggersCount > 1 ? 's' : ''}</span>`);
+      }
+      if (protectedReserve > 0) {
+        subParts.push(`<span class="text-amber-300">${eur(protectedReserve)} protected</span>`);
+      }
+
+      if (subParts.length > 0) {
+        cashSub.innerHTML = subParts.join(' · ');
+      } else {
+        cashSub.textContent = `of ${eur(currentAccountCash)} account cash`;
+      }
+    }
+
+    recalcCapitalPreview();
     
     const pnlElem = document.getElementById('metricUnrealizedPnl');
     const returnElem = document.getElementById('metricReturnBadge');
 
-    const sign = pnlVal >= 0 ? '+' : '';
-    pnlElem.textContent = `${sign}€${pnlVal.toFixed(2)}`;
-    pnlElem.className = `text-xl sm:text-2xl font-bold mt-1 ${pnlVal >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
+    pnlElem.textContent = signedEur(pnlVal);
+    pnlElem.className = `kpi-value ${pnlVal > 0 ? 'ui-gain' : pnlVal < 0 ? 'ui-loss' : ''}`;
 
-    const retSign = totalReturnPct >= 0 ? '+' : '';
-    returnElem.innerHTML = `<i class="fa-solid fa-arrow-trend-${totalReturnPct >= 0 ? 'up' : 'down'}"></i> ${retSign}${totalReturnPct.toFixed(2)}% total return`;
-    returnElem.className = `text-xs font-semibold mt-2 flex items-center gap-1 ${totalReturnPct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
-    
-    document.getElementById('metricPosCount').textContent = `${positions.length} open holdings`;
+    const up = totalReturnPct >= 0;
+    const absReturn = investedCap ? totalVal - investedCap : null;
+    const netDeposits = Number(summary.net_deposits_eur) || 0;
+    returnElem.innerHTML = `<i class="fa-solid fa-arrow-${up ? 'up' : 'down'}-long text-xs" aria-hidden="true"></i>`
+      + (absReturn !== null ? `<span class="ui-num">${signedEur(absReturn)}</span>` : '')
+      + `<span class="ui-num">${up ? '+' : ''}${totalReturnPct.toFixed(2)}%</span>`
+      + `<span class="text-slate-500 font-medium">all time</span>`
+      + (Math.abs(netDeposits) >= 0.01
+        ? `<span class="text-slate-500 font-medium ui-num" title="Deposits minus withdrawals, not counted as gain">· excl. ${eur(netDeposits)} deposits</span>`
+        : '');
+    returnElem.className = `flex flex-wrap items-center gap-x-2 gap-y-0.5 text-sm font-semibold ${up ? 'ui-gain' : 'ui-loss'}`;
+
+    document.getElementById('metricPosCount').textContent = `${positions.length} open position${positions.length === 1 ? '' : 's'}`;
+    const posCount = document.getElementById('positionsCount');
+    if (posCount) posCount.textContent = String(positions.length);
+
+    // Allocation bar (all screens) + doughnut (desktop)
+    renderAllocationBar(Number(summary.cash_eur) || 0, positions);
 
     // Update Chart
     if (allocationChart) {
       if (positions.length > 0) {
         const labels = ['Cash', ...positions.map(p => p.ticker)];
-        const dataVals = [summary.cash_eur, ...positions.map(p => p.current_value_eur)];
-        const colors = ['#059669', '#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#f97316', '#6366f1'];
+        const dataVals = [Number(summary.cash_eur) || 0, ...positions.map(p => Number(p.current_value_eur) || 0)];
         allocationChart.data.labels = labels;
         allocationChart.data.datasets[0].data = dataVals;
-        allocationChart.data.datasets[0].backgroundColor = colors.slice(0, labels.length);
+        allocationChart.data.datasets[0].backgroundColor = [ALLOC_CASH_COLOR, ...positions.map((_, i) => ALLOC_COLORS[i % ALLOC_COLORS.length])];
       } else {
         allocationChart.data.labels = ['Cash', 'Invested'];
-        allocationChart.data.datasets[0].data = [summary.cash_eur, 0];
-        allocationChart.data.datasets[0].backgroundColor = ['#059669', '#3b82f6'];
+        allocationChart.data.datasets[0].data = [Number(summary.cash_eur) || 0, 0];
+        allocationChart.data.datasets[0].backgroundColor = [ALLOC_CASH_COLOR, ALLOC_COLORS[0]];
       }
       allocationChart.update();
     }
 
-    // Render Position Cards
+    // Render position rows (tap a row to see entry, stops and the sell button)
     const container = document.getElementById('positionsContainer');
     if (positions.length === 0) {
       container.innerHTML = `
-        <div class="text-center py-10 text-slate-400 text-xs sm:text-sm">
-          <i class="fa-solid fa-hourglass-start text-2xl mb-2 text-slate-500 block"></i>
-          No active holdings yet. The automated agent committee will open positions during market hours or on-demand!
+        <div class="text-center px-6 py-10 text-slate-400 text-sm">
+          <i class="fa-solid fa-seedling text-xl mb-2 text-slate-500 block"></i>
+          No open positions yet. The committee opens positions during market hours or when you buy from Advice.
         </div>`;
       return;
     }
 
-    container.innerHTML = positions.map(pos => {
-      const pnlColor = pos.unrealized_pnl_eur >= 0 ? 'text-emerald-400' : 'text-rose-400';
-      const pnlSign = pos.unrealized_pnl_eur >= 0 ? '+' : '';
+    container.innerHTML = positions.map((pos, i) => {
+      const pnl = Number(pos.unrealized_pnl_eur) || 0;
+      const pnlPct = Number(pos.unrealized_pnl_pct);
+      const tone = pnl > 0 ? 'ui-gain' : pnl < 0 ? 'ui-loss' : 'ui-muted';
+      const arrow = pnl > 0 ? '▲' : pnl < 0 ? '▼' : '';
+      const pctText = Number.isFinite(pnlPct) ? `${arrow} ${Math.abs(pnlPct).toFixed(2)}%` : esc(pos.unrealized_pnl_pct);
+      const mono = String(pos.ticker || '').split('.')[0].slice(0, 4);
+      const color = ALLOC_COLORS[i % ALLOC_COLORS.length];
+      const isOpen = openPositions.has(pos.ticker);
+      const shares = `${esc(pos.shares)} share${Number(pos.shares) === 1 ? '' : 's'}`;
       return `
-        <div class="p-3.5 sm:p-4 rounded-xl bg-slate-900/70 border border-borderCol hover:border-slate-700 transition-colors flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div>
-            <div class="flex items-center gap-2">
-              <span class="font-bold text-white text-sm sm:text-base">${pos.ticker}</span>
-              <span class="text-xs text-slate-400 hidden sm:inline">${pos.name || ''}</span>
-              <span class="text-[11px] px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">${pos.shares} shs</span>
+        <div class="pos-row${isOpen ? ' open' : ''}">
+          <button type="button" class="pos-head" data-action="toggle-position" data-ticker="${esc(pos.ticker)}" aria-expanded="${isOpen ? 'true' : 'false'}">
+            <span class="pos-mono" style="color:${color}">${esc(mono)}</span>
+            <span class="flex-1 min-w-0">
+              <span class="block font-semibold text-[15px] text-white truncate">${esc(pos.ticker)}</span>
+              <span class="block text-xs text-slate-500 truncate">${shares}${pos.name ? ` · ${esc(pos.name)}` : ''}</span>
+            </span>
+            <span class="text-right shrink-0">
+              <span class="block ui-num font-semibold text-[15px] text-white">${eur(pos.current_value_eur)}</span>
+              <span class="block ui-num text-xs font-semibold ${tone}">${pctText}</span>
+            </span>
+            <i class="fa-solid fa-chevron-down pos-chevron" aria-hidden="true"></i>
+          </button>
+          <div class="pos-detail">
+            <div class="grid grid-cols-2 gap-x-4 gap-y-2 pt-2">
+              <div class="kv"><span>Entry</span><span>${esc(pos.entry_price_native)} ${esc(pos.currency)}</span></div>
+              <div class="kv"><span>Now</span><span>${esc(pos.current_price_native)} ${esc(pos.currency)}</span></div>
+              <div class="kv"><span>Stop</span><span class="ui-loss">${pos.stop_loss_native ? esc(pos.stop_loss_native) : '–'}</span></div>
+              <div class="kv"><span>Target</span><span class="ui-gain">${pos.take_profit_native ? esc(pos.take_profit_native) : '–'}</span></div>
+              <div class="kv col-span-2"><span>P&amp;L</span><span class="${tone}">${signedEur(pnl)}</span></div>
             </div>
-            <div class="text-xs text-slate-400 mt-1 flex flex-wrap gap-x-3 gap-y-1">
-              <span>Entry: <strong class="text-slate-200">${pos.entry_price_native} ${pos.currency}</strong></span>
-              <span>Current: <strong class="text-white">${pos.current_price_native} ${pos.currency}</strong></span>
-              <span>Value: <strong class="text-emerald-400">€${pos.current_value_eur}</strong></span>
-            </div>
-            <div class="text-xs text-slate-400 mt-1.5 flex flex-wrap gap-2">
-              ${pos.stop_loss_native ? `<span class="px-2 py-0.5 rounded bg-rose-500/10 text-rose-400 border border-rose-500/20 text-[11px] font-medium"><i class="fa-solid fa-shield"></i> Stop: ${pos.stop_loss_native}</span>` : ''}
-              ${pos.take_profit_native ? `<span class="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[11px] font-medium"><i class="fa-solid fa-bullseye"></i> Target: ${pos.take_profit_native}</span>` : ''}
-            </div>
-          </div>
-
-          <div class="flex items-center justify-between sm:justify-end gap-4 border-t sm:border-t-0 border-borderCol/50 pt-2 sm:pt-0">
-            <div class="sm:text-right">
-              <div class="text-sm font-bold ${pnlColor}">${pnlSign}€${pos.unrealized_pnl_eur.toFixed(2)}</div>
-              <div class="text-xs font-semibold ${pnlColor}">${pnlSign}${pos.unrealized_pnl_pct}%</div>
-            </div>
-            <button onclick="closePosition('${pos.ticker}')" class="px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border border-rose-500/30 text-xs font-semibold flex items-center gap-1 active:scale-95 transition-all">
-              <i class="fa-solid fa-xmark"></i> Close
+            <button type="button" data-action="close-position" data-ticker="${esc(pos.ticker)}" class="ui-btn ui-btn-danger w-full mt-3" aria-label="Sell position ${esc(pos.ticker)}">
+              <i class="fa-solid fa-arrow-right-from-bracket"></i> Sell position
             </button>
           </div>
         </div>
@@ -229,63 +549,55 @@ async function loadRecommendations() {
   try {
     const res = await fetch('/api/recommendations');
     const reports = await res.json();
+    adviceReportsCache = Array.isArray(reports) ? reports : [];
     const container = document.getElementById('adviceContainer');
+    const countEl = document.getElementById('adviceCount');
+    if (countEl) countEl.textContent = adviceReportsCache.length ? String(adviceReportsCache.length) : '';
 
-    if (reports.length === 0) {
+    if (adviceReportsCache.length === 0) {
       container.innerHTML = `
-        <div class="col-span-full text-center py-12 text-slate-400 text-sm bg-cardBg border border-borderCol rounded-xl p-6">
-          <i class="fa-solid fa-compass text-3xl mb-3 text-slate-500 block"></i>
-          No daily reports generated yet today. Click <strong>"Run Scan"</strong> in the top bar to run your first candidate discovery & agent debate!
+        <div class="col-span-full ui-card ui-card-pad adv-prose">
+          No advice yet today. Tap <strong class="text-white">Run Scan</strong> in the top bar to find candidates and run the committee.
         </div>`;
       return;
     }
 
-    container.innerHTML = reports.map(r => {
-      const isBuy = r.action === 'STRONG_BUY' || r.action === 'BUY';
-      const actionBadge = isBuy
-        ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
-        : (r.action === 'SELL' ? 'bg-rose-500/20 text-rose-400 border-rose-500/30' : 'bg-slate-700 text-slate-300 border-slate-600');
+    container.innerHTML = adviceReportsCache.map((r, idx) => {
+      const source = scoreSourceBadge(r.score_source || (r.raw_signals && r.raw_signals.score_source));
+      const sub = r.name || r.created_at || '';
 
       return `
-        <div class="stock-card bg-cardBg border border-borderCol rounded-xl p-4 sm:p-5 shadow-sm space-y-4 flex flex-col justify-between">
-          <div class="space-y-2.5">
-            <div class="flex items-center justify-between">
-              <div class="flex items-center gap-2">
-                <span class="text-base font-bold text-white">${r.ticker}</span>
-                <span class="text-[11px] font-bold px-2.5 py-0.5 rounded-full border ${actionBadge}">${r.action.replace('_', ' ')}</span>
+        <article class="stock-card ui-card ui-card-pad flex flex-col gap-3">
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0 space-y-1">
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="text-[17px] font-bold text-white">${esc(r.ticker)}</span>
+                ${adviceVerdictBadge(r.action)}
               </div>
-              <div class="text-right">
-                <div class="text-xs font-bold text-emerald-400">${r.consensus_score} <span class="text-slate-400 text-[10px]">/ 100</span></div>
-                <div class="text-[10px] text-slate-500">Conviction</div>
-              </div>
+              ${sub ? `<div class="ui-faint text-[13px] truncate ${r.name ? '' : 'ui-num'}">${esc(sub)}</div>` : ''}
             </div>
-
-            <p class="text-xs text-slate-300 leading-relaxed">${r.summary || ''}</p>
-
-            <div class="grid grid-cols-2 gap-2 text-[11px] bg-slate-900/60 p-2.5 rounded-lg border border-borderCol">
-              <div>
-                <span class="text-slate-500 block">Target Profit</span>
-                <span class="text-emerald-400 font-semibold">${r.target_price ? r.target_price : 'N/A'}</span>
-              </div>
-              <div>
-                <span class="text-slate-500 block">Stop Loss</span>
-                <span class="text-rose-400 font-semibold">${r.stop_loss ? r.stop_loss : 'N/A'}</span>
-              </div>
-            </div>
+            ${adviceScoreBlock(r.consensus_score, 'Conviction', source)}
           </div>
 
-          <div class="flex items-center gap-1.5 pt-2 border-t border-borderCol/60">
-            <button onclick="inspectReport('${encodeURIComponent(JSON.stringify(r))}')" class="flex-1 py-1.5 px-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium flex items-center justify-center gap-1 transition-all" title="View multi-agent debate">
-              <i class="fa-solid fa-comments text-cyan-400"></i> Debate
-            </button>
-            <button onclick="armAITrigger('${r.ticker}')" class="flex-1 py-1.5 px-2 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 text-xs font-bold flex items-center justify-center gap-1 transition-all" title="Arm AI-calculated limit price trigger">
-              <i class="fa-solid fa-crosshairs text-indigo-400"></i> Trigger
-            </button>
-            <button onclick="executePaperBuy('${r.ticker}')" class="flex-1 py-1.5 px-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center justify-center gap-1 shadow-sm active:scale-95 transition-all" title="Execute immediate market buy">
+          ${r.summary ? `<p class="adv-prose adv-clamp">${esc(r.summary)}</p>` : ''}
+
+          <div class="ui-inset px-3.5 py-2.5 space-y-1.5">
+            <div class="kv"><span>Target</span><span class="${r.target_price ? 'ui-gain' : ''}">${r.target_price ? `▲ ${esc(r.target_price)}` : '—'}</span></div>
+            <div class="kv"><span>Stop loss</span><span class="${r.stop_loss ? 'ui-loss' : ''}">${r.stop_loss ? `▼ ${esc(r.stop_loss)}` : '—'}</span></div>
+          </div>
+
+          <div class="grid grid-cols-3 gap-2 mt-auto">
+            <button type="button" data-action="buy" data-ticker="${esc(r.ticker)}" class="ui-btn ui-btn-primary !px-2 !gap-1.5" title="Market buy now">
               <i class="fa-solid fa-cart-shopping"></i> Buy
             </button>
+            <button type="button" data-action="arm-trigger" data-ticker="${esc(r.ticker)}" class="ui-btn !px-2 !gap-1.5" title="Arm an AI-calculated limit trigger">
+              <i class="fa-solid fa-crosshairs"></i> Trigger
+            </button>
+            <button type="button" data-action="inspect" data-idx="${idx}" class="ui-btn !px-2 !gap-1.5" title="Open the committee debate">
+              <i class="fa-solid fa-comments"></i> Debate
+            </button>
           </div>
-        </div>
+        </article>
       `;
     }).join('');
 
@@ -298,65 +610,67 @@ async function loadRecommendations() {
 async function loadScreener() {
   const container = document.getElementById('screenerContainer');
   container.innerHTML = `
-    <div class="col-span-full text-center py-10 text-slate-400 text-xs sm:text-sm">
-      <i class="fa-solid fa-spinner fa-spin text-2xl mb-2 text-emerald-400 block"></i>
-      Scanning liquid universe for high momentum setups...
+    <div class="col-span-full ui-card ui-card-pad adv-prose flex items-center gap-3">
+      <i class="fa-solid fa-spinner fa-spin ui-faint"></i>
+      Scanning for momentum setups...
     </div>`;
 
   try {
     const res = await fetch(`/api/screener?market=${currentScreenerMarket}`);
     const candidates = await res.json();
 
-    if (candidates.length === 0) {
-      container.innerHTML = `<div class="col-span-full text-center py-8 text-slate-400 text-sm">No qualifying breakout candidates found in this session.</div>`;
+    if (!Array.isArray(candidates) || candidates.length === 0) {
+      container.innerHTML = `<div class="col-span-full ui-card ui-card-pad adv-prose">No qualifying candidates right now.</div>`;
       return;
     }
 
-    container.innerHTML = candidates.map(c => `
-      <div class="stock-card bg-cardBg border border-borderCol rounded-xl p-4 shadow-sm space-y-3 flex flex-col justify-between">
-        <div>
-          <div class="flex items-center justify-between">
-            <div>
-              <span class="font-bold text-white text-sm sm:text-base">${c.ticker}</span>
-              <span class="text-xs text-slate-400 ml-1.5">${c.name}</span>
-            </div>
-            <span class="text-xs font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
-              Score ${c.pre_score}
-            </span>
+    container.innerHTML = candidates.map(c => {
+      const ret = Number(c.return_5d_pct);
+      const retUp = Number.isFinite(ret) && ret >= 0;
+      const retHtml = Number.isFinite(ret)
+        ? `<span class="${retUp ? 'ui-gain' : 'ui-loss'}">${retUp ? '▲ +' : '▼ '}${esc(c.return_5d_pct)}%</span>`
+        : '<span>—</span>';
+      const hot = Number(c.rsi) > 70;
+      return `
+      <article class="stock-card ui-card ui-card-pad flex flex-col gap-3">
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0 space-y-1">
+            <div class="text-[17px] font-bold text-white">${esc(c.ticker)}</div>
+            <div class="ui-faint text-[13px] truncate">${esc(c.name)}</div>
           </div>
-
-          <div class="flex items-center justify-between text-xs text-slate-400 mt-2">
-            <span>Price: <strong class="text-white">${c.price} ${c.currency}</strong></span>
-            <span>RSI(14): <strong class="${c.rsi > 70 ? 'text-amber-400' : 'text-slate-200'}">${c.rsi}</strong></span>
-            <span>5d: <strong class="${c.return_5d_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${c.return_5d_pct >= 0 ? '+' : ''}${c.return_5d_pct}%</strong></span>
-          </div>
-
-          <div class="text-[11px] text-slate-300 mt-2 bg-slate-900/70 p-2 rounded border border-borderCol/60">
-            <div class="font-semibold text-cyan-400 mb-0.5">${c.setup_type}</div>
-            <div class="text-slate-400">${c.notes}</div>
-          </div>
+          ${adviceScoreBlock(c.pre_score, 'Scanner')}
         </div>
 
-        <button onclick="analyzeDirect('${c.ticker}')" class="w-full py-1.5 px-3 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 text-xs font-bold flex items-center justify-center gap-1.5 transition-all">
-          <i class="fa-solid fa-users-viewfinder"></i> Analyze with Committee
+        <div>
+          ${c.setup_type ? `<div class="text-[14px] font-semibold text-white">${esc(c.setup_type)}</div>` : ''}
+          ${c.notes ? `<p class="adv-prose adv-clamp mt-0.5">${esc(c.notes)}</p>` : ''}
+        </div>
+
+        <div class="ui-inset px-3.5 py-2.5 space-y-1.5">
+          <div class="kv"><span>Price</span><span>${advicePrice(c.price, c.currency)}</span></div>
+          <div class="kv"><span>RSI (14)</span><span${hot ? ' style="color: var(--warn)"' : ''}>${esc(c.rsi)}${hot ? ' · overbought' : ''}</span></div>
+          <div class="kv"><span>5 days</span>${retHtml}</div>
+        </div>
+
+        <button type="button" data-action="analyze" data-ticker="${esc(c.ticker)}" class="ui-btn ui-btn-primary w-full mt-auto">
+          <i class="fa-solid fa-users-viewfinder"></i> Analyze
         </button>
-      </div>
-    `).join('');
+      </article>
+    `;
+    }).join('');
 
   } catch (e) {
     console.error('Failed to load screener:', e);
-    container.innerHTML = `<div class="col-span-full text-center py-8 text-rose-400 text-sm">Failed to load screener.</div>`;
+    container.innerHTML = `<div class="col-span-full ui-card ui-card-pad adv-prose ui-loss">Failed to load the screener.</div>`;
   }
 }
 
 function filterScreener(market) {
   currentScreenerMarket = market;
   document.querySelectorAll('.screener-filter-btn').forEach(b => {
-    if (b.dataset.market === market) {
-      b.className = 'screener-filter-btn px-3 py-1 rounded-md bg-emerald-600 text-white';
-    } else {
-      b.className = 'screener-filter-btn px-3 py-1 rounded-md text-slate-400 hover:text-white';
-    }
+    const active = b.dataset.market === market;
+    b.classList.toggle('is-active', active);
+    b.setAttribute('aria-pressed', active ? 'true' : 'false');
   });
   loadScreener();
 }
@@ -372,30 +686,82 @@ async function runOnDemandAnalysis() {
   await analyzeDirect(ticker);
 }
 
-async function analyzeDirect(ticker) {
+// Committee runs take minutes and the server runs them as background jobs, so the page can be swiped away
+// and come back: the job is remembered in localStorage and polled until it is done.
+const JOB_KEY = 'pendingCommitteeJob';
+const JOB_LOST_MSG = 'Server restarted, the committee run was lost. Please try again.';
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// Resolves {status, data, jobId} like a plain request would. Pass `resume` ({job_id, ...}) to skip the POST.
+async function runJob(url, body, meta, resume = null) {
+  let job = resume;
+  if (!job) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (res.status !== 202) {
+      const raw = await res.text();
+      let data = null;
+      try { data = raw ? JSON.parse(raw) : null; } catch (e) { data = null; }
+      return { status: res.status, data, raw };
+    }
+    job = { ...meta, job_id: (await res.json()).job_id };
+    localStorage.setItem(JOB_KEY, JSON.stringify(job));
+  }
+  for (;;) {
+    try {
+      const res = await fetch(`/api/jobs/${job.job_id}`);
+      if (res.status === 404) {
+        localStorage.removeItem(JOB_KEY);
+        return { status: 404, data: { detail: JOB_LOST_MSG }, lost: true };
+      }
+      if (res.ok) {
+        const j = await res.json();
+        if (j.status === 'done') {
+          localStorage.removeItem(JOB_KEY);
+          return { status: j.status_code, data: j.body, jobId: job.job_id };
+        }
+      }
+    } catch (e) { /* app was backgrounded or offline: keep polling */ }
+    await sleep(3000);
+  }
+}
+
+function resumePendingJob() {
+  let job = null;
+  try { job = JSON.parse(localStorage.getItem(JOB_KEY)); } catch (e) { /* ignore */ }
+  if (!job || !job.job_id) return;
+  if (job.kind === 'arm') {
+    switchTab('triggers');
+    armTriggerFlow(job.ticker, { resume: job, button: document.getElementById('armTriggerBtn') });
+  }
+  else analyzeDirect(job.ticker, job);
+}
+
+// Last finished debate, so "Arm trigger" for that ticker reuses its committee report (server enforces max age)
+let lastDebateJob = null;
+
+async function analyzeDirect(ticker, resume = null) {
   switchTab('debate');
   document.getElementById('analyzeInput').value = ticker;
   const btn = document.getElementById('analyzeBtn');
   const outputArea = document.getElementById('debateOutputArea');
 
-  btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Convening Committee...`;
+  btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Convening...`;
   btn.disabled = true;
 
   try {
-    const res = await fetch('/api/analyze', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ticker: ticker })
-    });
+    const { status, data, jobId } = await runJob('/api/analyze', { ticker: ticker }, { kind: 'analyze', ticker }, resume);
 
-    if (!res.ok) {
-      const err = await res.json();
-      showToast(err.detail || 'Analysis failed', true);
+    if (status !== 200) {
+      showToast((data && data.detail) || 'Analysis failed', true);
       return;
     }
 
-    const report = await res.json();
-    renderDebateReport(report);
+    lastDebateJob = jobId ? { ticker: data.ticker || ticker, jobId } : null;
+    renderDebateReport(data);
     outputArea.classList.remove('hidden');
     showToast(`Committee completed review for ${ticker}!`);
 
@@ -403,73 +769,79 @@ async function analyzeDirect(ticker) {
     console.error('Analysis error:', e);
     showToast('Network error during analysis.', true);
   } finally {
-    btn.innerHTML = `<i class="fa-solid fa-users-viewfinder"></i> Convene Debate`;
+    btn.innerHTML = `<i class="fa-solid fa-users-viewfinder"></i> Convene debate`;
     btn.disabled = false;
   }
 }
 
 function renderDebateReport(report) {
-  const isBuy = report.action === 'STRONG_BUY' || report.action === 'BUY';
-  const actionColor = isBuy ? 'text-emerald-400 bg-emerald-500/20 border-emerald-500/30' : (report.action === 'SELL' ? 'text-rose-400 bg-rose-500/20 border-rose-500/30' : 'text-amber-400 bg-amber-500/20 border-amber-500/30');
-
   // Verdict Card
+  const risk = report.risk || {};
+  const rr = risk.risk_reward_ratio;
   document.getElementById('verdictCard').innerHTML = `
-    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-borderCol/60 pb-4">
-      <div>
-        <div class="flex items-center gap-3">
-          <h2 class="text-xl font-bold text-white">${report.ticker}</h2>
-          <span class="text-xs text-slate-400">${report.name || ''}</span>
-          <span class="text-xs px-2.5 py-0.5 rounded-full font-bold border ${actionColor}">${report.action.replace('_', ' ')}</span>
+    <div class="flex items-start justify-between gap-3">
+      <div class="min-w-0 space-y-1">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="text-[22px] font-bold text-white leading-tight">${esc(report.ticker)}</span>
+          ${adviceVerdictBadge(report.action)}
         </div>
-        <p class="text-xs text-slate-300 mt-1 max-w-2xl">${report.summary}</p>
+        ${report.name ? `<div class="ui-faint text-[13px] truncate">${esc(report.name)}</div>` : ''}
       </div>
-
-      <div class="flex items-center gap-3 self-start sm:self-auto">
-        <div class="text-right">
-          <div class="text-2xl font-black text-emerald-400">${report.consensus_score}</div>
-          <div class="text-[10px] text-slate-400 uppercase">Consensus Score</div>
-        </div>
-        <button onclick="executePaperBuy('${report.ticker}')" class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-md active:scale-95 transition-all">
-          <i class="fa-solid fa-cart-shopping mr-1"></i> Execute Trade
-        </button>
-      </div>
+      ${adviceScoreBlock(report.consensus_score, 'Consensus', scoreSourceBadge(report.score_source))}
     </div>
 
-    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs mt-3">
-      <div><span class="text-slate-500">Current Price:</span> <strong class="text-white">${report.price} ${report.currency}</strong></div>
-      <div><span class="text-slate-500">Target Profit:</span> <strong class="text-emerald-400">${report.risk.take_profit_price}</strong></div>
-      <div><span class="text-slate-500">Stop Loss:</span> <strong class="text-rose-400">${report.risk.stop_loss_price}</strong></div>
-      <div><span class="text-slate-500">Risk-to-Reward:</span> <strong class="text-cyan-400">${report.risk.risk_reward_ratio}:1</strong></div>
+    ${report.summary ? `<p class="adv-prose">${esc(report.summary)}</p>` : ''}
+
+    <div class="ui-inset px-3.5 py-2.5 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1.5">
+      <div class="kv"><span>Price</span><span>${advicePrice(report.price, report.currency)}</span></div>
+      <div class="kv"><span>Target</span><span class="${risk.take_profit_price ? 'ui-gain' : ''}">${risk.take_profit_price ? `▲ ${esc(risk.take_profit_price)}` : '—'}</span></div>
+      <div class="kv"><span>Stop loss</span><span class="${risk.stop_loss_price ? 'ui-loss' : ''}">${risk.stop_loss_price ? `▼ ${esc(risk.stop_loss_price)}` : '—'}</span></div>
+      <div class="kv"><span>Risk / reward</span><span>${rr !== null && rr !== undefined && rr !== '' ? `${esc(rr)} : 1` : '—'}</span></div>
+    </div>
+
+    <div class="grid grid-cols-2 gap-2">
+      <button type="button" data-action="buy" data-ticker="${esc(report.ticker)}" class="ui-btn ui-btn-primary" title="Market buy now">
+        <i class="fa-solid fa-cart-shopping"></i> Buy
+      </button>
+      <button type="button" data-action="arm-trigger" data-ticker="${esc(report.ticker)}" class="ui-btn" title="Arm an AI-calculated limit trigger">
+        <i class="fa-solid fa-crosshairs"></i> Arm trigger
+      </button>
     </div>
   `;
 
-  // Specialist Agents
-  const t = report.technical;
-  document.getElementById('techBiasBadge').textContent = t.bias;
-  document.getElementById('techBiasBadge').className = `text-xs px-2 py-0.5 rounded font-bold ${t.bias === 'BULLISH' ? 'bg-emerald-500/20 text-emerald-400' : (t.bias === 'BEARISH' ? 'bg-rose-500/20 text-rose-400' : 'bg-slate-700 text-slate-300')}`;
-  document.getElementById('techSummaryText').textContent = t.analysis_summary;
+  // Specialist agents: badge text via textContent (never innerHTML), arrow/word plus colour
+  const setBadge = (id, text, tone, mark) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const word = String(text || '');
+    const arrow = mark !== undefined ? mark : (tone === 'gain' ? '▲ ' : (tone === 'loss' ? '▼ ' : ''));
+    el.textContent = word ? arrow + word : '';
+    el.className = `ui-badge${tone ? ' ui-badge-' + tone : ''}${word ? '' : ' hidden'}`;
+  };
 
-  const f = report.fundamental;
-  document.getElementById('fundValuationBadge').textContent = f.valuation;
-  document.getElementById('fundValuationBadge').className = `text-xs px-2 py-0.5 rounded font-bold ${f.valuation === 'UNDERVALUED' ? 'bg-purple-500/20 text-purple-400' : 'bg-slate-700 text-slate-300'}`;
-  document.getElementById('fundSummaryText').textContent = f.analysis_summary;
+  const t = report.technical || {};
+  setBadge('techBiasBadge', t.bias, t.bias === 'BULLISH' ? 'gain' : (t.bias === 'BEARISH' ? 'loss' : ''));
+  document.getElementById('techSummaryText').textContent = t.analysis_summary || '';
 
-  const s = report.sentiment;
-  document.getElementById('sentMoodBadge').textContent = s.mood;
-  document.getElementById('sentMoodBadge').className = `text-xs px-2 py-0.5 rounded font-bold ${s.mood === 'POSITIVE' ? 'bg-amber-500/20 text-amber-400' : 'bg-slate-700 text-slate-300'}`;
-  document.getElementById('sentSummaryText').textContent = s.sentiment_summary;
+  const f = report.fundamental || {};
+  setBadge('fundValuationBadge', f.valuation, f.valuation === 'UNDERVALUED' ? 'gain' : (f.valuation === 'OVERVALUED' ? 'loss' : ''));
+  document.getElementById('fundSummaryText').textContent = f.analysis_summary || '';
 
-  const r = report.risk;
-  document.getElementById('riskApprovedBadge').textContent = r.approved ? 'APPROVED' : 'REJECTED';
-  document.getElementById('riskApprovedBadge').className = `text-xs px-2 py-0.5 rounded font-bold ${r.approved ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}`;
-  document.getElementById('riskSummaryText').textContent = r.risk_summary;
+  const s = report.sentiment || {};
+  setBadge('sentMoodBadge', s.mood, s.mood === 'POSITIVE' ? 'gain' : (s.mood === 'NEGATIVE' ? 'loss' : ''));
+  document.getElementById('sentSummaryText').textContent = s.sentiment_summary || '';
+
+  const r = report.risk || {};
+  setBadge('riskApprovedBadge', r.approved ? 'APPROVED' : 'REJECTED', r.approved ? 'gain' : 'loss', r.approved ? '✓ ' : '✕ ');
+  document.getElementById('riskSummaryText').textContent = r.risk_summary || '';
 
   // Transcript
   document.getElementById('debateTranscriptBox').textContent = report.debate_transcript;
 }
 
-function inspectReport(reportJsonStr) {
-  const r = JSON.parse(decodeURIComponent(reportJsonStr));
+function inspectReport(idx) {
+  const r = adviceReportsCache[idx];
+  if (!r) return;
   switchTab('debate');
   document.getElementById('analyzeInput').value = r.ticker;
   document.getElementById('debateOutputArea').classList.remove('hidden');
@@ -477,49 +849,123 @@ function inspectReport(reportJsonStr) {
     ticker: r.ticker,
     action: r.action,
     consensus_score: r.consensus_score,
+    score_source: r.score_source || (r.raw_signals && r.raw_signals.score_source),
     summary: r.summary,
-    price: r.target_price ? (r.target_price * 0.92).toFixed(2) : 100,
-    currency: 'USD',
-    technical: { bias: 'EVALUATED', analysis_summary: r.technical_summary || 'Analysis complete' },
-    fundamental: { valuation: 'ASSESSED', analysis_summary: r.fundamental_summary || 'Valuation recorded' },
-    sentiment: { mood: 'REVIEWED', sentiment_summary: r.sentiment_summary || 'Sentiment factored' },
-    risk: { approved: true, take_profit_price: r.target_price, stop_loss_price: r.stop_loss, risk_reward_ratio: 2.1, risk_summary: r.risk_summary || 'Risk guardrails applied' },
+    // Saved advice has no live price or R:R; show a dash instead of an estimate
+    price: null,
+    currency: '',
+    technical: { bias: '', analysis_summary: r.technical_summary || 'Analysis complete' },
+    fundamental: { valuation: '', analysis_summary: r.fundamental_summary || 'Valuation recorded' },
+    sentiment: { mood: '', sentiment_summary: r.sentiment_summary || 'Sentiment factored' },
+    risk: { approved: true, take_profit_price: r.target_price, stop_loss_price: r.stop_loss, risk_reward_ratio: null, risk_summary: r.risk_summary || 'Risk guardrails applied' },
     debate_transcript: r.debate_transcript || 'Full transcript archived.'
   });
+  const out = document.getElementById('debateOutputArea');
+  if (out && out.scrollIntoView) out.scrollIntoView({ block: 'start' });
 }
 
 // 6. Trade History
+// Deposits and withdrawals on the live account
+async function loadCashFlows() {
+  const list = document.getElementById('cashFlowList');
+  if (!list) return;
+  try {
+    const res = await fetch('/api/cash-flows');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const flows = data.flows || [];
+    const netEl = document.getElementById('cashFlowNet');
+    if (netEl) netEl.textContent = flows.length ? `net ${eur(data.net_deposits_eur)}` : '';
+    if (!flows.length) {
+      list.innerHTML = '<div class="ui-card ui-card-pad text-[13px] ui-muted">No deposits or withdrawals recorded.</div>';
+      return;
+    }
+    list.innerHTML = flows.map(f => {
+      const isIn = Number(f.amount_eur) >= 0;
+      return `
+        <div class="ui-card ui-card-pad flex items-center justify-between gap-3">
+          <div class="min-w-0">
+            <div class="ui-num font-semibold ${isIn ? 'ui-gain' : 'ui-loss'}">${isIn ? 'Deposit' : 'Withdrawal'} ${esc(signedEur(f.amount_eur))}</div>
+            <div class="text-xs ui-faint ui-num">${esc(f.timestamp)} · ${f.source === 'manual' ? 'added by you' : f.source === 'broker' ? 'from broker' : 'detected'}</div>
+          </div>
+          <button type="button" onclick="removeCashFlow(${Number(f.id)})" class="ui-btn ui-btn-quiet ui-icon-btn shrink-0" aria-label="Remove" title="Remove"><i class="fa-solid fa-trash-can"></i></button>
+        </div>`;
+    }).join('');
+  } catch (e) {
+    console.error('Error loading deposits', e);
+  }
+}
+
+async function addCashFlow(event) {
+  event.preventDefault();
+  const input = document.getElementById('cashFlowAmount');
+  const amount = Number(input.value);
+  if (!amount) { showToast('Enter an amount, negative for a withdrawal.', true); return; }
+  const label = amount > 0 ? `deposit of ${eur(amount)}` : `withdrawal of ${eur(-amount)}`;
+  if (!confirm(`Record a ${label}? It will no longer count as gain or loss.`)) return;
+  try {
+    const res = await fetch('/api/cash-flows', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ amount_eur: amount })
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || `HTTP ${res.status}`);
+    input.value = '';
+    showToast('Recorded.');
+    loadCashFlows(); loadPortfolio();
+  } catch (e) {
+    showToast(`Could not record it: ${e.message}`, true);
+  }
+}
+
+async function removeCashFlow(id) {
+  if (!confirm('Remove this entry? The amount will count as gain or loss again.')) return;
+  try {
+    const res = await fetch(`/api/cash-flows/${id}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    showToast('Removed.');
+    loadCashFlows(); loadPortfolio();
+  } catch (e) {
+    showToast(`Could not remove it: ${e.message}`, true);
+  }
+}
+
 async function loadTrades() {
   try {
     const res = await fetch('/api/trades');
     const trades = await res.json();
     const tbody = document.getElementById('tradeHistoryTableBody');
+    const countEl = document.getElementById('tradeHistoryCount');
+    if (countEl) countEl.textContent = trades.length ? String(trades.length) : '';
 
     if (trades.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="8" class="text-center py-8 text-slate-400">No trades executed yet.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="9" class="text-center py-8 ui-faint">No trades executed yet.</td></tr>`;
       return;
     }
 
     tbody.innerHTML = trades.map(t => {
       const isBuy = t.order_type === 'BUY';
       const typeBadge = isBuy
-        ? '<span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold text-xs">BUY</span>'
-        : '<span class="px-2 py-0.5 rounded bg-rose-500/20 text-rose-400 font-bold text-xs">SELL</span>';
+        ? '<span class="ui-badge ui-badge-accent">BUY</span>'
+        : '<span class="ui-badge">SELL</span>';
 
-      const pnlText = t.realized_pnl_eur !== null
-        ? `<span class="${t.realized_pnl_eur >= 0 ? 'text-emerald-400' : 'text-rose-400'} font-semibold">${t.realized_pnl_eur >= 0 ? '+' : ''}€${t.realized_pnl_eur.toFixed(2)} (${t.realized_pnl_pct}%)</span>`
-        : '<span class="text-slate-500">-</span>';
+      let pnlText = '<span class="ui-faint">-</span>';
+      if (t.realized_pnl_eur !== null && t.realized_pnl_eur !== undefined) {
+        const pnl = Number(t.realized_pnl_eur) || 0;
+        const up = pnl >= 0;
+        pnlText = `<span class="ui-num font-semibold ${up ? 'ui-gain' : 'ui-loss'}">${up ? '▲ +' : '▼ -'}${esc(eur(Math.abs(pnl)))} (${esc(t.realized_pnl_pct)}%)</span>`;
+      }
 
       return `
-        <tr class="hover:bg-slate-800/40 transition-colors">
-          <td class="py-3 px-4 text-slate-400 whitespace-nowrap">${t.executed_at}</td>
-          <td class="py-3 px-4">${typeBadge}</td>
-          <td class="py-3 px-4 font-bold text-white">${t.ticker}</td>
-          <td class="py-3 px-4 text-slate-300">${t.shares}</td>
-          <td class="py-3 px-4 text-slate-300">${t.price_native} ${t.currency}</td>
-          <td class="py-3 px-4 text-slate-200 font-semibold">€${t.total_eur.toFixed(2)}</td>
-          <td class="py-3 px-4">${pnlText}</td>
-          <td class="py-3 px-4 text-slate-400 text-xs truncate max-w-xs">${t.rationale || ''}</td>
+        <tr>
+          <td data-label="Date" class="py-3 px-4 ui-num ui-faint whitespace-nowrap">${esc(t.executed_at)}</td>
+          <td data-label="Type" class="py-3 px-4">${typeBadge}</td>
+          <td data-label="Asset" class="py-3 px-4 font-bold" style="color:var(--text)">${esc(t.ticker)}</td>
+          <td data-label="Shares" class="py-3 px-4 ui-num">${esc(t.shares)}</td>
+          <td data-label="Price" class="py-3 px-4 ui-num"><span>${esc(t.price_native)} <span class="ui-faint text-xs">${esc(t.currency)}</span></span></td>
+          <td data-label="Total (EUR)" class="py-3 px-4 ui-num font-semibold" style="color:var(--text)">€${num(t.total_eur)}</td>
+          <td data-label="Fee (€)" class="py-3 px-4 ui-num ui-faint">€${(t.fee_eur !== undefined && t.fee_eur !== null) ? num(t.fee_eur) : '0.00'}</td>
+          <td data-label="Realized PnL" class="py-3 px-4">${pnlText}</td>
+          <td data-label="Rationale" class="cell-wide py-3 px-4 truncate max-w-xs" title="${esc(t.rationale)}">${esc(t.rationale)}</td>
         </tr>
       `;
     }).join('');
@@ -530,8 +976,13 @@ async function loadTrades() {
 }
 
 // 7. Trading Actions
+function isLiveMode() {
+  return (lastBrokerStatus && String(lastBrokerStatus.trading_mode || '').toUpperCase() === 'LIVE') || lastSavedTradingMode === 'LIVE';
+}
+
 async function executePaperBuy(ticker) {
-  if (!confirm(`Execute paper trade BUY order for ${ticker}?`)) return;
+  const modeLabel = isLiveMode() ? 'LIVE (real money)' : 'paper';
+  if (!confirm(`Execute ${modeLabel} BUY order for ${ticker} at market price?`)) return;
 
   try {
     const res = await fetch('/api/trade/buy', {
@@ -553,7 +1004,8 @@ async function executePaperBuy(ticker) {
 }
 
 async function closePosition(ticker) {
-  if (!confirm(`Close open position for ${ticker} at market price?`)) return;
+  const modeLabel = isLiveMode() ? 'LIVE (real money)' : 'paper';
+  if (!confirm(`SELL: close the whole ${modeLabel} position in ${ticker} at market price?`)) return;
 
   try {
     const res = await fetch('/api/trade/sell', {
@@ -574,6 +1026,190 @@ async function closePosition(ticker) {
   }
 }
 
+async function syncAccountWithBroker() {
+  showToast('⏳ Synchronizing portfolio & balances with broker...');
+  try {
+    const res = await fetch('/api/portfolio/sync', { method: 'POST' });
+    if (res.ok) {
+      showToast('Broker account state synced successfully.');
+      await loadPortfolio();
+      await loadBrokerStatus();
+    } else {
+      showToast('Failed to sync account with broker.', true);
+    }
+  } catch (e) {
+    showToast('Network error syncing with broker.', true);
+  }
+}
+
+// Broker Connection Status & Diagnostics
+let lastBrokerStatus = null;
+
+async function pingBrokerStatus(force = false) {
+  return await loadBrokerStatus(force);
+}
+
+async function loadBrokerStatus(force = false) {
+  const badge = document.getElementById('brokerStatusBadge');
+  const dot = document.getElementById('brokerStatusDot');
+  const text = document.getElementById('brokerStatusText');
+  const mobDot = document.getElementById('mobileBrokerStatusDot');
+  const mobText = document.getElementById('mobileBrokerStatusText');
+  const pingBtn = document.getElementById('settingsPingBtn');
+  const pingIcon = document.getElementById('settingsPingIcon');
+
+  if (force) {
+    if (dot) dot.className = 'ui-dot bg-amber-400 animate-pulse';
+    if (text) text.textContent = 'Broker: Probing...';
+    if (mobDot) mobDot.className = 'ui-dot bg-amber-400 animate-pulse';
+    if (mobText) mobText.textContent = 'Checking broker...';
+    if (pingIcon) pingIcon.classList.add('fa-spin');
+    if (pingBtn) pingBtn.disabled = true;
+  }
+
+  try {
+    const url = force ? '/api/broker/ping' : '/api/broker/status';
+    const method = force ? 'POST' : 'GET';
+    const res = await fetch(url, { method });
+    let data;
+    if (res.ok) {
+      data = await res.json();
+    } else {
+      data = {
+        connected: false,
+        broker: lastBrokerStatus?.broker || 'BROKER',
+        trading_mode: lastBrokerStatus?.trading_mode || 'OFFLINE',
+        status: 'OFFLINE',
+        message: 'Broker status endpoint awaiting bot restart (HTTP ' + res.status + ').'
+      };
+    }
+    lastBrokerStatus = data;
+    if (typeof data.kill_switch_active === 'boolean') {
+      killSwitchActive = data.kill_switch_active;
+      renderKillSwitch();
+    }
+
+    const isConnected = !!data.connected;
+    const brokerName = data.broker || 'BROKER';
+    const isLive = (data.trading_mode || '').toUpperCase() === 'LIVE';
+
+    // 1. Update Header Badge & Mobile Pill
+    if (mobDot && mobText) {
+      if (isConnected) {
+        mobDot.className = 'ui-dot bg-emerald-400';
+        mobText.textContent = brokerName === 'PAPER' ? 'Simulated broker' : `${brokerName} online`;
+      } else {
+        mobDot.className = 'ui-dot bg-rose-400';
+        mobText.textContent = `${brokerName} offline`;
+      }
+    }
+
+    if (badge && dot && text) {
+      if (isConnected) {
+        dot.className = 'ui-dot bg-emerald-400';
+        text.textContent = isLive ? `${brokerName}: Online` : `${brokerName}: Active`;
+        badge.className = 'hidden';
+        badge.title = `${brokerName} Connected (${data.latency_ms !== null && data.latency_ms !== undefined ? data.latency_ms + 'ms' : 'Ready'})\nClick to test connection`;
+      } else {
+        dot.className = 'ui-dot bg-rose-400';
+        text.textContent = `${brokerName}: Offline`;
+        badge.className = 'hidden';
+        badge.title = `${brokerName} Disconnected: ${data.message || 'Unreachable'}\nClick to retest`;
+      }
+    }
+
+    // 2. Update Portfolio Tab Disconnect Alert Banner & Connected Strip
+    const banner = document.getElementById('brokerDisconnectBanner');
+    const bannerDetail = document.getElementById('brokerDisconnectDetail');
+    const bannerBroker = document.getElementById('bannerBrokerName');
+    const strip = document.getElementById('brokerConnectedStrip');
+    const stripBroker = document.getElementById('stripBrokerName');
+    const stripEndpoint = document.getElementById('stripBrokerEndpoint');
+    const stripLatency = document.getElementById('stripBrokerLatency');
+    const stripAccount = document.getElementById('stripBrokerAccount');
+
+    if (banner) {
+      if (isLive && !isConnected) {
+        banner.classList.remove('hidden');
+        if (bannerBroker) bannerBroker.textContent = brokerName;
+        if (bannerDetail) {
+          bannerDetail.textContent = data.message || `${brokerName} gateway is unreachable. Real-money orders cannot execute.`;
+        }
+      } else {
+        banner.classList.add('hidden');
+      }
+    }
+
+    if (strip) {
+      if (isLive && isConnected) {
+        strip.classList.remove('hidden');
+        if (stripBroker) stripBroker.textContent = brokerName;
+        if (stripEndpoint) stripEndpoint.textContent = data.host && data.port ? `${data.host}:${data.port}` : 'Connected';
+        if (stripLatency) stripLatency.textContent = data.latency_ms !== null && data.latency_ms !== undefined ? `${data.latency_ms} ms` : 'Ready';
+        if (stripAccount) stripAccount.textContent = data.account_id || (data.accounts && data.accounts.length ? data.accounts.join(', ') : 'Active');
+      } else {
+        strip.classList.add('hidden');
+      }
+    }
+
+    // 3. Update Settings Diagnostics Card (if present)
+    const diagName = document.getElementById('diagBrokerName');
+    const diagDot = document.getElementById('diagStatusDot');
+    const diagText = document.getElementById('diagStatusText');
+    const diagEndpoint = document.getElementById('diagBrokerEndpoint');
+    const diagLatency = document.getElementById('diagBrokerLatency');
+    const diagMsg = document.getElementById('diagBrokerMessage');
+
+    if (diagName) {
+      diagName.textContent = brokerName === 'TRADING212' ? 'Trading 212' : (brokerName === 'ALPACA' ? 'Alpaca Markets' : 'Paper Trading Engine');
+    }
+    if (diagDot && diagText) {
+      if (isConnected) {
+        diagDot.className = 'ui-dot bg-emerald-400';
+        diagText.textContent = 'Connected (Online)';
+        diagText.className = 'text-emerald-400 font-bold';
+      } else {
+        diagDot.className = 'ui-dot bg-rose-400';
+        diagText.textContent = 'Disconnected (Offline)';
+        diagText.className = 'text-rose-400 font-bold';
+      }
+    }
+    if (diagEndpoint) {
+      diagEndpoint.textContent = data.host && data.port ? `${data.host}:${data.port}` : (data.broker === 'PAPER' ? 'Local Memory DB' : 'Cloud REST API');
+    }
+    if (diagLatency) {
+      diagLatency.textContent = data.latency_ms !== null && data.latency_ms !== undefined ? `${data.latency_ms} ms` : 'N/A';
+    }
+    if (diagMsg) {
+      diagMsg.textContent = data.message || (isConnected ? 'Connection verified.' : 'Broker offline.');
+      diagMsg.className = isConnected ? 'text-emerald-300 font-mono text-[11px] leading-relaxed break-words' : 'text-rose-300 font-mono text-[11px] leading-relaxed break-words';
+    }
+
+    if (force) {
+      if (isConnected) {
+        showToast(`${brokerName} Connection Online (${data.latency_ms || 0}ms)`);
+      } else {
+        showToast(`${brokerName} Connection Offline: ${data.error || 'Check IB Gateway / 2FA'}`, true);
+      }
+    }
+  } catch (err) {
+    console.error('Failed to load broker status:', err);
+    const mobErrDot = document.getElementById('mobileBrokerStatusDot');
+    const mobErrText = document.getElementById('mobileBrokerStatusText');
+    if (mobErrDot) mobErrDot.className = 'ui-dot bg-rose-400';
+    if (mobErrText) mobErrText.textContent = 'Broker error';
+    if (badge && dot && text) {
+      dot.className = 'ui-dot bg-rose-400';
+      text.textContent = 'Broker: Error';
+      badge.className = 'hidden';
+    }
+    if (force) showToast('Failed to contact server for broker status', true);
+  } finally {
+    if (pingIcon) pingIcon.classList.remove('fa-spin');
+    if (pingBtn) pingBtn.disabled = false;
+  }
+}
+
 // Market Status Loader
 async function loadMarketStatus() {
   try {
@@ -583,15 +1219,23 @@ async function loadMarketStatus() {
     const textEl = document.getElementById('marketStatusText');
     if (!badge || !textEl) return;
 
+    const mobMarketText = document.getElementById('mobileMarketStatusText');
+    const mobMarketDot = document.getElementById('mobileMarketDot');
+    const euOpen = !!msData.eu_market?.is_open;
+    const usOpen = !!msData.us_market?.is_open;
+    if (mobMarketDot) mobMarketDot.className = (euOpen || usOpen) ? 'ui-dot bg-emerald-400' : 'ui-dot';
     if (msData.is_weekend) {
       textEl.textContent = 'Weekend (Markets Closed)';
-      badge.className = 'hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700 text-amber-400 text-xs font-medium';
+      badge.className = 'hidden xl:flex ui-chip text-amber-300';
+      if (mobMarketText) mobMarketText.textContent = 'Weekend · markets closed';
     } else if (msData.eu_market.is_open || msData.us_market.is_open) {
       textEl.textContent = `🇪🇺 EU: ${msData.eu_market.status} | 🇺🇸 US: ${msData.us_market.status}`;
-      badge.className = 'hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-medium';
+      badge.className = 'hidden xl:flex ui-chip text-emerald-300';
+      if (mobMarketText) mobMarketText.textContent = `EU ${euOpen ? 'open' : 'closed'} · US ${usOpen ? 'open' : 'closed'}`;
     } else {
       textEl.textContent = '🇪🇺 EU: CLOSED | 🇺🇸 US: CLOSED';
-      badge.className = 'hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700 text-slate-400 text-xs font-medium';
+      badge.className = 'hidden xl:flex ui-chip';
+      if (mobMarketText) mobMarketText.textContent = 'EU closed · US closed';
     }
   } catch (err) {
     console.debug('Failed to load market status:', err);
@@ -605,10 +1249,7 @@ async function loadSettings() {
     const data = await res.json();
 
     document.getElementById('settingAutoBuy').checked = data.auto_buy_enabled;
-    document.getElementById('autoBuyStatusText').textContent = data.auto_buy_enabled ? 'Active' : 'Paused';
-    document.getElementById('autoBuyBadge').className = data.auto_buy_enabled
-      ? 'flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-medium'
-      : 'flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700 text-slate-400 text-xs font-medium';
+    renderAutoBuyStatus(data.auto_buy_enabled);
 
     document.getElementById('settingMinScore').value = data.min_consensus_score;
     document.getElementById('consensusScoreLabel').textContent = `${data.min_consensus_score} / 100`;
@@ -617,31 +1258,52 @@ async function loadSettings() {
     document.getElementById('settingPosSize').value = posSizePct;
     document.getElementById('posSizeLabel').textContent = `${posSizePct}%`;
 
+    if (data.max_positions !== undefined) {
+      const mpInput = document.getElementById('settingMaxPositions');
+      const mpLabel = document.getElementById('maxPositionsLabel');
+      if (mpInput) mpInput.value = data.max_positions;
+      if (mpLabel) mpLabel.textContent = `${data.max_positions} slots`;
+    }
+
+    const capitalUsagePct = data.max_capital_usage_pct ?? 100;
+    const capitalCapEur = data.max_deployable_capital_eur;
+    if (document.getElementById('settingCapitalUsagePct')) {
+      document.getElementById('settingCapitalUsagePct').value = capitalUsagePct;
+      updateCapitalUsageDisplay(capitalUsagePct);
+    }
+    if (document.getElementById('settingMaxDeployableEur')) {
+      document.getElementById('settingMaxDeployableEur').value = (capitalCapEur !== null && capitalCapEur !== undefined) ? capitalCapEur : '';
+    }
+    recalcCapitalPreview();
+
     const tgBadge = document.getElementById('telegramStatusBadge');
-    if (data.has_telegram) {
-      tgBadge.textContent = 'Connected & Active';
-      tgBadge.className = 'px-2 py-0.5 rounded text-xs font-bold bg-emerald-500/20 text-emerald-400';
-    } else {
-      tgBadge.textContent = 'Not Configured (Optional)';
-      tgBadge.className = 'px-2 py-0.5 rounded text-xs font-bold bg-slate-800 text-slate-400';
+    if (tgBadge) {
+      if (data.has_telegram) {
+        tgBadge.textContent = 'Connected';
+        tgBadge.className = 'ui-badge ui-badge-gain shrink-0';
+      } else {
+        tgBadge.textContent = 'Not set up';
+        tgBadge.className = 'ui-badge shrink-0';
+      }
     }
 
     const aiBadge = document.getElementById('aiEngineStatusBadge');
     if (aiBadge) {
       if (data.has_antigravity) {
-        aiBadge.textContent = 'Antigravity Plan Active (Zero API Cost)';
-        aiBadge.className = 'px-2 py-0.5 rounded text-xs font-bold bg-emerald-500/20 text-emerald-400';
+        aiBadge.textContent = 'Antigravity';
+        aiBadge.className = 'ui-badge ui-badge-gain shrink-0';
       } else if (data.has_gemini_key) {
-        aiBadge.textContent = 'Gemini API Active';
-        aiBadge.className = 'px-2 py-0.5 rounded text-xs font-bold bg-emerald-500/20 text-emerald-400';
+        aiBadge.textContent = 'Gemini API';
+        aiBadge.className = 'ui-badge ui-badge-gain shrink-0';
       } else {
-        aiBadge.textContent = 'Active (Quant & LLM Ready)';
-        aiBadge.className = 'px-2 py-0.5 rounded text-xs font-bold bg-slate-800 text-slate-300';
+        aiBadge.textContent = 'Ready';
+        aiBadge.className = 'ui-badge shrink-0';
       }
     }
 
     if (document.getElementById('settingTradingMode') && data.trading_mode) {
       document.getElementById('settingTradingMode').value = data.trading_mode.toUpperCase();
+      lastSavedTradingMode = data.trading_mode.toUpperCase();
     }
 
     if (document.getElementById('settingMarketHours')) {
@@ -649,18 +1311,60 @@ async function loadSettings() {
     }
 
     await loadMarketStatus();
+    await loadBrokerStatus();
   } catch (e) {
     console.error('Failed to load settings:', e);
   }
+}
+
+function updateCapitalUsageDisplay(val) {
+  const lbl = document.getElementById('capitalUsagePctLabel');
+  if (lbl) {
+    lbl.textContent = `${val}%`;
+  }
+  recalcCapitalPreview();
+}
+
+function recalcCapitalPreview() {
+  const pctEl = document.getElementById('settingCapitalUsagePct');
+  const capEl = document.getElementById('settingMaxDeployableEur');
+  if (!pctEl) return;
+
+  const pct = parseFloat(pctEl.value) || 100;
+  const capRaw = capEl ? capEl.value.trim() : '';
+  const cap = (capRaw !== '' && !isNaN(parseFloat(capRaw)) && parseFloat(capRaw) > 0) ? parseFloat(capRaw) : null;
+
+  const totalCash = currentAccountCash || 10000.0;
+  let deployable = totalCash * (pct / 100.0);
+  if (cap !== null) {
+    deployable = Math.min(deployable, cap);
+  }
+  deployable = Math.max(0.0, Math.min(totalCash, deployable));
+  const reserve = Math.max(0.0, totalCash - deployable);
+
+  const previewTotal = document.getElementById('previewAccountTotal');
+  const previewDep = document.getElementById('previewDeployableCash');
+  const previewRes = document.getElementById('previewProtectedReserve');
+
+  if (previewTotal) previewTotal.textContent = `€${totalCash.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+  if (previewDep) previewDep.textContent = `€${deployable.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+  if (previewRes) previewRes.textContent = `€${reserve.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
 }
 
 async function saveSettings() {
   const autoBuy = document.getElementById('settingAutoBuy').checked;
   const minScore = parseInt(document.getElementById('settingMinScore').value);
   const posSizePct = parseFloat(document.getElementById('settingPosSize').value) / 100.0;
+  const maxPosEl = document.getElementById('settingMaxPositions');
+  const maxPositions = maxPosEl ? parseInt(maxPosEl.value, 10) : undefined;
   const enforceHours = document.getElementById('settingMarketHours') ? document.getElementById('settingMarketHours').checked : true;
   const tradingModeEl = document.getElementById('settingTradingMode');
   const tradingMode = tradingModeEl ? tradingModeEl.value : undefined;
+
+  const capPctEl = document.getElementById('settingCapitalUsagePct');
+  const capEurEl = document.getElementById('settingMaxDeployableEur');
+  const capitalUsagePct = capPctEl ? parseFloat(capPctEl.value) : undefined;
+  const capEurRaw = capEurEl ? capEurEl.value.trim() : '';
 
   try {
     const payload = {
@@ -669,6 +1373,19 @@ async function saveSettings() {
       position_size_pct: posSizePct,
       enforce_market_hours: enforceHours
     };
+    if (maxPositions !== undefined && !isNaN(maxPositions)) {
+      payload.max_positions = maxPositions;
+    }
+    if (capitalUsagePct !== undefined) {
+      payload.max_capital_usage_pct = capitalUsagePct;
+    }
+    if (capEurEl) {
+      if (capEurRaw === '' || parseFloat(capEurRaw) <= 0) {
+        payload.clear_max_deployable_capital = true;
+      } else {
+        payload.max_deployable_capital_eur = parseFloat(capEurRaw);
+      }
+    }
     if (tradingMode) {
       payload.trading_mode = tradingMode;
       payload.live_trading_enabled = (tradingMode === 'LIVE');
@@ -681,123 +1398,314 @@ async function saveSettings() {
     });
     if (res.ok) {
       showToast('Settings saved successfully.');
-      document.getElementById('autoBuyStatusText').textContent = autoBuy ? 'Active' : 'Paused';
+      renderAutoBuyStatus(autoBuy);
+      if (tradingMode) lastSavedTradingMode = tradingMode;
+      recalcCapitalPreview();
       await loadPortfolio();
+      await loadBrokerStatus();
+      if (typeof loadTriggers === 'function') await loadTriggers();
+    } else {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.detail || 'Failed to save settings.', true);
+      // Server refused: reload the real values so the form does not lie
+      loadSettings();
     }
   } catch (e) {
     showToast('Failed to save settings.', true);
   }
 }
 
+// Mode switch: LIVE trades real money, so ask first and revert the <select> on cancel
+function onTradingModeChange(selectEl) {
+  const wanted = String(selectEl.value || '').toUpperCase();
+  if (wanted === 'LIVE') {
+    const ok = confirm('Switch to LIVE trading?\n\nThe bot will place REAL orders with real money through your broker. Make sure the broker is connected and your risk limits are correct.');
+    if (!ok) {
+      selectEl.value = lastSavedTradingMode || 'PAPER';
+      return;
+    }
+  }
+  saveSettings();
+}
+
+// Enabling auto-buy while LIVE lets the bot spend real money without asking each time
+function onAutoBuyChange(checkboxEl) {
+  if (checkboxEl.checked && (isLiveMode() || lastSavedTradingMode === 'LIVE')) {
+    if (!confirm('Enable automated buying in LIVE mode? The committee will place real-money orders on its own.')) {
+      checkboxEl.checked = false;
+      return;
+    }
+  }
+  saveSettings();
+}
+
+// Auto-buy status in every place it is shown (desktop badge, mobile pill, settings)
+function renderAutoBuyStatus(enabled) {
+  const on = !!enabled;
+  const txt = document.getElementById('autoBuyStatusText');
+  if (txt) txt.textContent = on ? 'Active' : 'Paused';
+  const mobTxt = document.getElementById('mobileAutoBuyText');
+  if (mobTxt) mobTxt.textContent = on ? 'On' : 'Off';
+  const badge = document.getElementById('autoBuyBadge');
+  if (badge) badge.className = on ? 'hidden xl:flex ui-chip text-emerald-300' : 'hidden xl:flex ui-chip';
+  const dot = document.getElementById('autoBuyDot');
+  if (dot) dot.className = on ? 'ui-dot bg-emerald-400' : 'ui-dot';
+  const sw = document.getElementById('mobileAutoBuyDot');
+  if (sw) sw.classList.toggle('on', on);
+}
+
+// Lightweight status refresh (auto-buy + trading mode) that does not touch the settings form
+async function refreshSystemStatus() {
+  try {
+    const res = await fetch('/api/settings');
+    if (!res.ok) return;
+    const data = await res.json();
+    renderAutoBuyStatus(data.auto_buy_enabled);
+    if (data.trading_mode) lastSavedTradingMode = String(data.trading_mode).toUpperCase();
+  } catch (e) {
+    console.debug('System status refresh failed:', e);
+  }
+}
+
+// Kill switch ---------------------------------------------------------
+function renderKillSwitch() {
+  document.querySelectorAll('#killSwitchBtn, #killSwitchBtnDesktop').forEach(btn => {
+    const label = btn.querySelector('.kill-switch-label');
+    if (killSwitchActive) {
+      btn.classList.add('kill-switch-engaged');
+      if (label) label.textContent = 'Halted · resume';
+      btn.title = 'Kill switch is ACTIVE: new automated buying is blocked. Tap to resume.';
+    } else {
+      btn.classList.remove('kill-switch-engaged');
+      if (label) label.textContent = btn.id === 'killSwitchBtn' ? 'Stop buying' : 'Kill Switch';
+      btn.title = 'Emergency kill switch: halt or resume all new automated buying';
+    }
+  });
+}
+
+async function toggleKillSwitch() {
+  const activate = !killSwitchActive;
+  const msg = activate
+    ? 'ACTIVATE the kill switch?\n\nAll new automated buying will be blocked until you resume it. Open positions are not closed.'
+    : 'Resume trading? The kill switch will be released and the bot may place new buy orders again.';
+  if (!confirm(msg)) return;
+  try {
+    const res = await fetch(`/api/killswitch?active=${activate ? 'true' : 'false'}`, { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.success !== false) {
+      killSwitchActive = typeof data.kill_switch_active === 'boolean' ? data.kill_switch_active : activate;
+      renderKillSwitch();
+      showToast(killSwitchActive ? 'Kill switch ACTIVE: new buying halted.' : 'Kill switch released: trading resumed.', killSwitchActive ? true : false);
+    } else {
+      showToast(data.detail || 'Kill switch request failed.', true);
+    }
+  } catch (e) {
+    showToast('Network error toggling kill switch.', true);
+  }
+}
+
+function setTriggerNavBadge(count) {
+  const b = document.getElementById('bottomNavTriggerBadge');
+  if (!b) return;
+  if (count > 0) { b.textContent = String(count); b.classList.remove('hidden'); }
+  else { b.classList.add('hidden'); }
+}
+
+async function reconnectBroker() {
+  const btn = document.getElementById('settingsReconnectBtn');
+  const icon = document.getElementById('settingsReconnectIcon');
+  if (btn) btn.disabled = true;
+  if (icon) icon.className = 'fa-solid fa-spinner fa-spin';
+
+  showToast('Connecting to broker...');
+
+  try {
+    const res = await fetch('/api/broker/reconnect', { method: 'POST' });
+    const data = await res.json();
+    if (data.connected) {
+      showToast(`Broker connected (${data.latency_ms || 0}ms)!`);
+    } else {
+      showToast(`Broker connection failed: ${data.error || data.message || 'Offline'}`, true);
+    }
+    await loadBrokerStatus(true);
+    await loadPortfolio();
+  } catch (e) {
+    showToast('Network error requesting broker reconnection.', true);
+  } finally {
+    if (btn) btn.disabled = false;
+    if (icon) icon.className = 'fa-solid fa-bolt';
+  }
+}
+
 // 9. Quick Scan Trigger
 async function triggerQuickScan() {
   const btn = document.getElementById('scanBtn');
-  btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> <span>Scanning...</span>`;
+  const idleHtml = `<i class="fa-solid fa-satellite-dish"></i> <span>Scan</span>`;
+  btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> <span>Scanning</span>`;
   btn.disabled = true;
+  let delayReset = false;
 
   try {
     const res = await fetch('/api/scheduler/trigger', { method: 'POST' });
     if (res.ok) {
-      showToast('Market scan initiated! Inspecting candidates...');
+      showToast('Market scan started. Inspecting candidates...');
+      delayReset = true;
       setTimeout(() => {
         loadAllData();
-        btn.innerHTML = `<i class="fa-solid fa-radar"></i> <span class="hidden sm:inline">Run Scan</span>`;
+        btn.innerHTML = idleHtml;
         btn.disabled = false;
       }, 3500);
+    } else {
+      showToast('Scan could not start (HTTP ' + res.status + ').', true);
     }
   } catch (e) {
     showToast('Scan trigger failed.', true);
-    btn.innerHTML = `<i class="fa-solid fa-radar"></i> <span class="hidden sm:inline">Run Scan</span>`;
+  } finally {
+    if (!delayReset) {
+      btn.innerHTML = idleHtml;
+      btn.disabled = false;
+    }
+  }
+}
+
+// 9b. Manual Market Data Refresh
+async function refreshMarketData() {
+  const btn = document.getElementById('refreshDataBtn');
+  const idleHtml = `<i class="fa-solid fa-arrows-rotate"></i>`;
+  btn.innerHTML = `<i class="fa-solid fa-arrows-rotate fa-spin"></i>`;
+  btn.disabled = true;
+
+  try {
+    const res = await fetch('/api/market-data/refresh', { method: 'POST' });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      showToast(`Market data refreshed: ${data.tickers_refreshed} prices, ${data.triggers_resized} triggers resized, ${data.triggers_executed} bought, ${data.positions_closed} closed.`);
+      loadPortfolio();
+      loadTriggers();
+    } else {
+      showToast(data.detail || data.message || 'Market data refresh failed.', true);
+    }
+  } catch (e) {
+    showToast('Network error refreshing market data.', true);
+  } finally {
+    btn.innerHTML = idleHtml;
     btn.disabled = false;
   }
 }
 
 // 10. AI Order Triggers Handling
+// Trigger tab helpers
+const TRIGGER_TYPE_LABELS = { LIMIT_PULLBACK: 'Pullback buy', BREAKOUT_BUY: 'Breakout buy' };
+function triggerTypeLabel(type) {
+  return TRIGGER_TYPE_LABELS[type] || String(type || '').replace(/_/g, ' ').toLowerCase();
+}
+function hasNum(v) { return v !== undefined && v !== null && v !== '' && Number.isFinite(Number(v)); }
+function triggerStatusBadge(status) {
+  const s = String(status || '').toUpperCase();
+  const cls = s === 'TRIGGERED' ? 'ui-badge-gain' : (s === 'EXPIRED' ? 'ui-badge-warn' : '');
+  const label = s ? s.charAt(0) + s.slice(1).toLowerCase() : '-';
+  return `<span class="ui-badge ${cls}">${esc(label)}</span>`;
+}
+
 async function loadTriggers() {
   try {
     const res = await fetch('/api/triggers');
     const triggers = await res.json();
-    
+
     const pending = triggers.filter(t => t.status === 'PENDING');
     const history = triggers.filter(t => t.status !== 'PENDING');
 
-    // Update count badge
+    // Section counts
     const badge = document.getElementById('pendingTriggersCount');
-    if (badge) {
-      badge.textContent = `${pending.length} Active`;
+    if (badge) badge.textContent = String(pending.length);
+    const histCount = document.getElementById('triggerHistoryCount');
+    if (histCount) histCount.textContent = history.length ? String(history.length) : '';
+    setTriggerNavBadge(pending.length);
+    const sumText = document.getElementById('pendingTriggersSummaryText');
+    if (sumText) sumText.textContent = `${pending.length} pending trigger${pending.length === 1 ? '' : 's'}`;
+    const reservedEl = document.getElementById('pendingTriggersReserved');
+    if (reservedEl) {
+      const reserved = pending.reduce((acc, t) => acc + (Number(t.allocation_eur) || 0), 0);
+      reservedEl.textContent = pending.length ? `${eur(reserved)} reserved` : '';
     }
 
-    // Render Pending Triggers
+    // Pending triggers
     const pendingContainer = document.getElementById('pendingTriggersContainer');
     if (pendingContainer) {
       if (pending.length === 0) {
         pendingContainer.innerHTML = `
-          <div class="col-span-full text-center py-10 text-slate-400 text-xs sm:text-sm bg-slate-900/30 border border-borderCol/60 rounded-xl p-6">
-            <i class="fa-solid fa-crosshairs text-3xl mb-2 text-indigo-400/60 block"></i>
-            No active limit triggers armed.<br>
-            Enter a ticker above or click <strong>"Trigger"</strong> on any Daily Advice card to arm an AI limit order.
+          <div class="col-span-full ui-card ui-card-pad text-center text-[13px] ui-muted space-y-1">
+            <p class="font-semibold" style="color:var(--text)">No pending triggers</p>
+            <p>Enter a ticker above, or tap Trigger on a Daily Advice card.</p>
           </div>`;
       } else {
         pendingContainer.innerHTML = pending.map(t => {
-          const isPullback = t.trigger_type === 'LIMIT_PULLBACK';
-          const typeBadge = isPullback
-            ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40'
-            : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40';
-          const currPrice = (t.current_price !== undefined && t.current_price !== null)
-            ? t.current_price
-            : (t.current_price_at_creation !== undefined && t.current_price_at_creation !== null ? t.current_price_at_creation : t.target_price);
-          const distVal = (t.distance_pct !== undefined && t.distance_pct !== null)
-            ? t.distance_pct
-            : (currPrice > 0 ? Math.round(((t.target_price / currPrice) - 1.0) * 10000) / 100 : 0);
-          const distSign = distVal > 0 ? '+' : '';
-          const distColor = Math.abs(distVal) <= 1.0 ? 'text-emerald-400' : 'text-slate-300';
+          const cur = t.currency || 'EUR';
+          const currPrice = hasNum(t.current_price)
+            ? Number(t.current_price)
+            : (hasNum(t.current_price_at_creation) ? Number(t.current_price_at_creation) : Number(t.target_price));
+          const distVal = hasNum(t.distance_pct)
+            ? Number(t.distance_pct)
+            : (currPrice > 0 ? Math.round(((Number(t.target_price) / currPrice) - 1.0) * 10000) / 100 : 0);
+          // A pullback buys at or below the limit, a breakout at or above it
+          const isBreakout = t.trigger_type === 'BREAKOUT_BUY';
+          const reached = isBreakout ? currPrice >= Number(t.target_price) : currPrice <= Number(t.target_price);
+          const distAbs = reached ? 0 : Math.abs(distVal);
+          // Near the limit reads as accent; more than 5% away as warn
+          const isFar = distAbs > 5;
+          const distCls = reached ? 'ui-badge-gain' : (isFar ? 'ui-badge-warn' : 'ui-badge-accent');
+          const distLabel = reached
+            ? 'Limit reached'
+            : `${distAbs.toFixed(1)}% ${isBreakout ? 'rise' : 'drop'} to go`;
+          // Bar is full at the limit and empty at 10% or more away
+          const closeness = Math.max(0, Math.min(100, Math.round(100 - distAbs * 10)));
+          const barColor = isFar ? 'var(--warn)' : 'var(--accent)';
+
+          const allocEur = Number(t.allocation_eur) || 0;
+          // Shares the buy would get at the limit price (same sizing as the order and the Telegram alert)
+          let plannedLine = '';
+          if (allocEur > 0 && hasNum(t.planned_shares)) {
+            const plannedShares = Number(t.planned_shares);
+            plannedLine = plannedShares > 0
+              ? `<div class="ui-faint text-xs">≈ <span class="ui-num">${esc(String(plannedShares))}</span> share${plannedShares === 1 ? '' : 's'} · <span class="ui-num">${esc(eur(t.planned_cost_eur))}</span>${t.risk_capped ? ' · risk-capped' : ''}</div>`
+              : `<div class="text-xs" style="color:var(--warn)">Budget below 1 share</div>`;
+          }
+          const subParts = [triggerTypeLabel(t.trigger_type)];
+          if (hasNum(t.consensus_score)) subParts.push(`score ${Number(t.consensus_score)}`);
 
           return `
-            <div class="bg-cardBg border border-indigo-500/30 rounded-xl p-4 shadow-sm space-y-3.5 flex flex-col justify-between hover:border-indigo-500/60 transition-colors">
-              <div class="space-y-2">
-                <div class="flex items-center justify-between">
-                  <div class="flex items-center gap-2">
-                    <span class="text-base font-bold text-white">${t.ticker}</span>
-                    <span class="text-[10px] font-bold px-2 py-0.5 rounded-full border ${typeBadge}">
-                      ${isPullback ? '📉 Pullback' : '📈 Breakout'}
-                    </span>
-                  </div>
-                  <span class="text-[10px] text-slate-500 font-mono">#${t.id}</span>
+            <div class="ui-card ui-card-pad flex flex-col gap-3">
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="text-base font-bold truncate" style="color:var(--text)">${esc(t.ticker)}</div>
+                  <div class="text-[13px] ui-muted truncate">${esc(subParts.join(' · '))}${t.name ? ` · ${esc(t.name)}` : ''}</div>
                 </div>
-
-                <div class="grid grid-cols-2 gap-2 bg-slate-900/70 p-2.5 rounded-lg border border-borderCol text-xs">
-                  <div>
-                    <span class="text-slate-500 text-[10px] block">Trigger Price</span>
-                    <span class="text-indigo-400 font-bold">${t.target_price} ${t.currency}</span>
-                  </div>
-                  <div>
-                    <span class="text-slate-500 text-[10px] block">Current Live Price</span>
-                    <span class="text-white font-semibold">${currPrice} ${t.currency || 'EUR'}</span>
-                  </div>
-                  <div>
-                    <span class="text-slate-500 text-[10px] block">Distance to Trigger</span>
-                    <span class="${distColor} font-bold">${distSign}${distVal}%</span>
-                  </div>
-                  <div>
-                    <span class="text-slate-500 text-[10px] block">Alloc (EUR)</span>
-                    <span class="text-white font-semibold">€${t.allocation_eur.toLocaleString('en-US', {minimumFractionDigits: 2})}</span>
-                  </div>
-                </div>
-
-                <div class="flex justify-between text-[11px] text-slate-400 px-1">
-                  <span>SL: <strong class="text-rose-400">${t.stop_loss || 'N/A'}</strong></span>
-                  <span>TP: <strong class="text-emerald-400">${t.take_profit || 'N/A'}</strong></span>
-                  <span>Score: <strong class="text-indigo-300">${t.consensus_score || 75}</strong></span>
-                </div>
-
-                <p class="text-[11px] text-slate-300 bg-slate-900/40 p-2 rounded border border-borderCol/40 italic">
-                  "${t.ai_rationale || 'AI calculated tactical entry.'}"
-                </p>
+                <span class="ui-badge ${distCls} shrink-0">${esc(distLabel)}</span>
               </div>
 
-              <div class="pt-2 border-t border-borderCol/50 flex justify-end">
-                <button onclick="cancelTrigger(${t.id})" class="text-xs text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 px-2.5 py-1 rounded transition-colors flex items-center gap-1">
-                  <i class="fa-solid fa-ban"></i> Cancel Trigger
+              <div class="ui-track" role="img" aria-label="${esc(distLabel)}"><span style="width:${closeness}%;background:${barColor}"></span></div>
+
+              <div class="flex items-baseline justify-between gap-3 text-[13px]">
+                <span><span class="ui-faint">Now</span> <span class="ui-num" style="color:var(--text)">${esc(num(currPrice))}</span></span>
+                <span><span class="ui-faint">Limit</span> <span class="ui-num font-semibold" style="color:var(--accent-strong)">${esc(num(t.target_price))}</span> <span class="ui-faint text-xs">${esc(cur)}</span></span>
+              </div>
+
+              <div class="ui-inset px-3 py-2 space-y-1">
+                <div class="kv"><span>Stop loss</span><span>${hasNum(t.stop_loss) ? esc(num(t.stop_loss)) : '-'}</span></div>
+                <div class="kv"><span>Take profit</span><span>${hasNum(t.take_profit) ? esc(num(t.take_profit)) : '-'}</span></div>
+              </div>
+
+              ${t.ai_rationale ? `<p class="text-[13px] ui-muted line-clamp-2" title="${esc(t.ai_rationale)}">${esc(t.ai_rationale)}</p>` : ''}
+
+              <div class="flex items-center justify-between gap-3 pt-3 border-t border-borderCol">
+                <div class="min-w-0 text-[13px] leading-snug">
+                  ${allocEur > 0
+                    ? `<div class="ui-num font-semibold" style="color:var(--text)">${esc(eur(allocEur))}</div>${plannedLine}`
+                    : `<span class="ui-badge ui-badge-warn" title="Higher-scored triggers hold the available cash or position slots. This trigger is funded automatically when cash or a slot frees up."><i class="fa-solid fa-hourglass-half"></i> Unfunded</span>`}
+                  <div class="ui-faint text-xs truncate">Armed <span class="ui-num">${esc(t.created_at)}</span></div>
+                </div>
+                <button type="button" data-action="cancel-trigger" data-id="${esc(t.id)}" data-ticker="${esc(t.ticker)}" class="ui-btn ui-btn-sm ui-btn-danger shrink-0" style="min-height:44px" aria-label="Cancel trigger for ${esc(t.ticker)}">
+                  Cancel
                 </button>
               </div>
             </div>
@@ -806,28 +1714,22 @@ async function loadTriggers() {
       }
     }
 
-    // Render History
+    // History
     const historyBody = document.getElementById('triggerHistoryTableBody');
     if (historyBody) {
       if (history.length === 0) {
-        historyBody.innerHTML = `<tr><td colspan="6" class="text-center py-6 text-slate-500">No past triggers found.</td></tr>`;
+        historyBody.innerHTML = `<tr><td colspan="6" class="text-center py-8 ui-faint">No past triggers yet.</td></tr>`;
       } else {
-        historyBody.innerHTML = history.map(t => {
-          const statusBadge = t.status === 'TRIGGERED'
-            ? '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">TRIGGERED</span>'
-            : '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-700 text-slate-400">CANCELLED</span>';
-
-          return `
-            <tr class="hover:bg-slate-800/40 transition-colors">
-              <td class="py-2.5 px-3 font-bold text-white">${t.ticker}</td>
-              <td class="py-2.5 px-3 text-slate-400">${t.trigger_type}</td>
-              <td class="py-2.5 px-3 font-semibold text-indigo-300">${t.target_price} ${t.currency}</td>
-              <td class="py-2.5 px-3">${statusBadge}</td>
-              <td class="py-2.5 px-3 text-slate-400 font-mono text-[11px]">${t.triggered_at || t.created_at}</td>
-              <td class="py-2.5 px-3 text-slate-300 text-[11px] max-w-xs truncate" title="${t.ai_rationale || ''}">${t.ai_rationale || ''}</td>
+        historyBody.innerHTML = history.map(t => `
+            <tr>
+              <td data-label="Ticker" class="py-3 px-4 font-bold" style="color:var(--text)">${esc(t.ticker)}</td>
+              <td data-label="Type" class="py-3 px-4">${esc(triggerTypeLabel(t.trigger_type))}</td>
+              <td data-label="Target" class="py-3 px-4 ui-num" style="color:var(--text)"><span>${esc(num(t.target_price))} <span class="ui-faint text-xs">${esc(t.currency)}</span></span></td>
+              <td data-label="Status" class="py-3 px-4">${triggerStatusBadge(t.status)}</td>
+              <td data-label="When" class="py-3 px-4 ui-num ui-faint whitespace-nowrap">${esc(t.triggered_at || t.created_at)}</td>
+              <td data-label="Rationale" class="cell-wide py-3 px-4 max-w-xs truncate" title="${esc(t.ai_rationale)}">${esc(t.ai_rationale)}</td>
             </tr>
-          `;
-        }).join('');
+          `).join('');
       }
     }
 
@@ -836,67 +1738,205 @@ async function loadTriggers() {
   }
 }
 
-async function armTriggerFromInput() {
-  const input = document.getElementById('triggerTickerInput');
-  const ticker = input.value.trim().toUpperCase();
-  if (!ticker) {
-    showToast('Please enter a stock ticker.', true);
-    return;
-  }
+const ARM_BTN_HTML = `<i class="fa-solid fa-crosshairs"></i> Arm`;
 
-  const btn = document.getElementById('armTriggerBtn');
-  btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Analyzing...`;
-  btn.disabled = true;
+// Same shape the server accepts (src/trading/trigger_gate.normalize_ticker):
+// no ^ indices, =X currencies or spaces. Returns null when unusable.
+const TRIGGER_TICKER_RE = /^[A-Z0-9][A-Z0-9.\-]{0,14}$/;
+function normalizeTriggerTicker(raw) {
+  const t = String(raw || '').trim().toUpperCase().replace(/^\$+/, '');
+  return TRIGGER_TICKER_RE.test(t) ? t : null;
+}
+
+// Inline "why was this not armed" line under the ticker input
+function clearTriggerFeedback() {
+  const el = document.getElementById('triggerArmFeedback');
+  if (el) el.innerHTML = '';
+}
+
+// info: { title, message, tone: 'danger' | 'warn', armed, action, score, minScore, summary }
+function showTriggerFeedback(info) {
+  const el = document.getElementById('triggerArmFeedback');
+  if (!el) return;
+  const tone = info.tone === 'warn' ? 'warn' : 'danger';
+  const badges = [];
+  badges.push(`<span class="ui-badge ${tone === 'warn' ? 'ui-badge-warn' : 'ui-badge-loss'}"><i class="fa-solid ${info.armed ? 'fa-triangle-exclamation' : 'fa-ban'}"></i> ${esc(info.title || 'Not armed')}</span>`);
+  if (info.action) badges.push(`<span class="ui-badge">${esc(triggerVerdictLabel(info.action))}</span>`);
+  if (hasNum(info.score)) {
+    badges.push(`<span class="ui-badge ui-num">Score ${esc(info.score)}${hasNum(info.minScore) ? ` / min ${esc(info.minScore)}` : ''}</span>`);
+  }
+  const summary = info.summary ? String(info.summary).slice(0, 400) : '';
+  el.innerHTML = `
+    <div class="ui-notice ui-notice-${tone}">
+      <div class="flex flex-wrap items-center gap-2">${badges.join('')}</div>
+      <p class="mt-1.5" style="color:var(--text)">${esc(info.message)}</p>
+      ${summary ? `<p class="mt-1.5 text-xs ui-faint">Committee: ${esc(summary)}</p>` : ''}
+    </div>`;
+}
+
+function triggerVerdictLabel(action) {
+  return String(action || '').replace(/_/g, ' ').toUpperCase();
+}
+
+// Turns any failed /api/triggers/from-ai answer into one flat object.
+// `detail` can be a string (old FastAPI errors, 401s), an object from the
+// trigger gate ({code, message, overridable, action, ...}), a list of pydantic
+// validation errors, or missing entirely (non-JSON body from a proxy/crash).
+function parseTriggerFailure(status, data, raw) {
+  const info = { code: '', message: '', overridable: false, action: '', score: null, minScore: null, summary: '' };
+  const detail = data && typeof data === 'object' ? data.detail : undefined;
+  if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
+    info.code = detail.code ? String(detail.code) : '';
+    info.message = typeof detail.message === 'string' ? detail.message : '';
+    info.overridable = detail.overridable === true;
+    info.action = detail.action ? String(detail.action) : '';
+    info.score = hasNum(detail.consensus_score) ? Number(detail.consensus_score) : null;
+    info.minScore = hasNum(detail.trigger_min_score) ? Number(detail.trigger_min_score) : null;
+    info.summary = typeof detail.summary === 'string' ? detail.summary : '';
+  } else if (Array.isArray(detail)) {
+    const msgs = detail.map(d => (d && typeof d.msg === 'string') ? d.msg : '').filter(Boolean);
+    if (msgs.length) info.message = `Invalid request: ${msgs.join('; ')}`;
+  } else if (typeof detail === 'string') {
+    info.message = detail;
+  }
+  if (!info.message && data && typeof data.message === 'string') info.message = data.message;
+  if (!info.message) {
+    if (!data && raw) console.warn('Non-JSON response while arming a trigger:', status, String(raw).slice(0, 200));
+    info.message = status >= 500
+      ? `The server could not process this request (HTTP ${status}). Try again in a moment.`
+      : `Failed to arm trigger (HTTP ${status}).`;
+  }
+  return info;
+}
+
+async function postArmTrigger(ticker, force, reportJobId = null, resume = null) {
+  const { status, data, raw, jobId } = await runJob(
+    '/api/triggers/from-ai',
+    { ticker: ticker, force: !!force, report_job_id: reportJobId },
+    { kind: 'arm', ticker }, resume
+  );
+  if (status === 200 && data && data.success) return { ok: true, status, data, jobId };
+  return { ok: false, status, jobId, error: parseTriggerFailure(status, data, raw) };
+}
+
+// "Arm anyway?" text for a soft block (verdict is not a buy, or score too low)
+function overrideConfirmText(ticker, err) {
+  const facts = [];
+  if (err.action) facts.push(`verdict ${triggerVerdictLabel(err.action)}`);
+  if (hasNum(err.score)) facts.push(hasNum(err.minScore) ? `score ${err.score}, minimum ${err.minScore}` : `score ${err.score}`);
+  const head = facts.length ? `${ticker}: ${facts.join(', ')}.` : `${ticker} did not pass the committee check.`;
+  return `${head}\n\n${err.message}\n\nArm anyway?`;
+}
+
+let triggerArmBusy = false;
+
+// Shared by the Triggers tab input and the Trigger buttons on advice cards.
+// Resolves true when a trigger was armed.
+async function armTriggerFlow(rawTicker, { button = null, announce = false, resume = null, reportJobId = null } = {}) {
+  clearTriggerFeedback();
+  const typed = String(rawTicker || '').trim();
+  if (!typed) {
+    const message = 'Please enter a stock ticker.';
+    showTriggerFeedback({ title: 'Not armed', tone: 'danger', message });
+    showToast(message, true);
+    return false;
+  }
+  const ticker = normalizeTriggerTicker(typed);
+  if (!ticker) {
+    const message = `"${typed.slice(0, 20)}" is not a tradable stock ticker. Use a plain symbol such as NVDA or ASML.AS (no ^ indices, =X currencies or spaces).`;
+    showTriggerFeedback({ title: 'Not armed', tone: 'danger', message });
+    showToast(message, true);
+    return false;
+  }
+  if (triggerArmBusy) {
+    showToast('Already arming a trigger, please wait.', 'info');
+    return false;
+  }
+  if (!resume && !confirmArmTrigger(ticker)) return false;
+
+  triggerArmBusy = true;
+  if (button) {
+    button.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Arming`;
+    button.disabled = true;
+  }
+  if (announce) showToast(`Analysing ${ticker} and arming an entry trigger...`, 'info');
 
   try {
-    const res = await fetch('/api/triggers/from-ai', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ticker: ticker })
-    });
-    const data = await res.json();
-    if (res.ok && data.success) {
-      showToast(`🎯 AI Trigger armed for ${ticker}!`);
-      input.value = '';
-      loadTriggers();
-    } else {
-      showToast(data.detail || data.message || 'Failed to arm trigger.', true);
+    let out = await postArmTrigger(ticker, false, reportJobId, resume);
+    // Soft block (HOLD verdict, low score): the user may override it explicitly
+    if (!out.ok && out.status === 422 && out.error.overridable) {
+      const err = out.error;
+      if (!confirm(overrideConfirmText(ticker, err))) {
+        showTriggerFeedback({ title: 'Not armed', tone: 'warn', message: err.message, action: err.action, score: err.score, minScore: err.minScore, summary: err.summary });
+        showToast(`${ticker} was not armed.`, 'info');
+        return false;
+      }
+      out = await postArmTrigger(ticker, true, out.jobId);
     }
+
+    if (out.ok) {
+      const data = out.data;
+      const gate = (data.gate && typeof data.gate === 'object') ? data.gate : null;
+      const at = hasNum(data.target_price) ? ` at ${data.target_price}` : '';
+      if (gate && gate.code === 'OK_FORCED') {
+        const msg = (typeof gate.message === 'string' && gate.message) ? gate.message : `Armed ${ticker} against the committee verdict.`;
+        showTriggerFeedback({
+          title: 'Armed anyway', tone: 'warn', armed: true, message: msg,
+          action: gate.action, score: hasNum(gate.consensus_score) ? Number(gate.consensus_score) : null,
+          minScore: hasNum(gate.trigger_min_score) ? Number(gate.trigger_min_score) : null
+        });
+        showToast(`Trigger armed for ${ticker}${at}, against the committee verdict.`);
+      } else {
+        showToast(`Trigger armed for ${ticker}${at}.`);
+      }
+      loadTriggers();
+      return true;
+    }
+
+    const err = out.error;
+    showTriggerFeedback({ title: 'Not armed', tone: 'danger', message: err.message, action: err.action, score: err.score, minScore: err.minScore, summary: err.summary });
+    showToast(`${ticker}: ${err.message}`, true);
+    return false;
   } catch (e) {
-    showToast('Error arming trigger.', true);
+    const message = 'Could not reach the server. Check the connection and try again.';
+    showTriggerFeedback({ title: 'Not armed', tone: 'danger', message });
+    showToast(message, true);
+    return false;
   } finally {
-    btn.innerHTML = `<i class="fa-solid fa-wand-magic-sparkles"></i> AI Calculate & Arm Trigger`;
-    btn.disabled = false;
+    triggerArmBusy = false;
+    if (button) {
+      button.innerHTML = ARM_BTN_HTML;
+      button.disabled = false;
+    }
   }
+}
+
+async function armTriggerFromInput() {
+  const input = document.getElementById('triggerTickerInput');
+  const armed = await armTriggerFlow(input.value, { button: document.getElementById('armTriggerBtn') });
+  if (armed) input.value = '';
+}
+
+// Arming reserves cash and lets the bot buy on its own later, so ask first
+function confirmArmTrigger(ticker) {
+  return confirm(`Arm an entry trigger for ${ticker}?\n\nThe committee picks a limit price and cash is reserved for it. The bot buys automatically when the price is reached.`);
 }
 
 async function armAITrigger(ticker) {
-  showToast(`⏳ AI analyzing ${ticker} and arming optimal entry trigger...`);
-  try {
-    const res = await fetch('/api/triggers/from-ai', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ticker: ticker })
-    });
-    const data = await res.json();
-    if (res.ok && data.success) {
-      showToast(`🎯 AI Trigger armed for ${ticker} at ${data.target_price}!`);
-      loadTriggers();
-    } else {
-      showToast(data.detail || data.message || 'Failed to arm trigger.', true);
-    }
-  } catch (e) {
-    showToast('Error arming trigger.', true);
-  }
+  const reportJobId = lastDebateJob && lastDebateJob.ticker === ticker ? lastDebateJob.jobId : null;
+  await armTriggerFlow(ticker, { announce: true, reportJobId });
 }
 
-async function cancelTrigger(triggerId) {
+async function cancelTrigger(triggerId, ticker = '') {
+  if (!Number.isFinite(triggerId)) return;
+  if (!confirm(`Cancel the pending trigger${ticker ? ` for ${ticker}` : ''} (#${triggerId})? The reserved cash is released.`)) return;
   try {
     const res = await fetch(`/api/triggers/${triggerId}`, { method: 'DELETE' });
     const data = await res.json();
     if (res.ok && data.success) {
       showToast(`Trigger #${triggerId} cancelled.`);
-      loadTriggers();
+      await loadTriggers();
+      await loadPortfolio();
     } else {
       showToast(data.detail || data.message || 'Failed to cancel trigger.', true);
     }
@@ -922,9 +1962,9 @@ async function loadLearningInsights() {
 
     if (winRateEl) {
       winRateEl.innerText = `${data.win_rate_pct}%`;
-      winRateEl.className = data.win_rate_pct >= 50 ? 'text-lg font-bold text-emerald-400 mt-0.5' : 'text-lg font-bold text-rose-400 mt-0.5';
+      winRateEl.className = data.win_rate_pct >= 50 ? 'kpi-value ui-gain' : 'kpi-value ui-loss';
     }
-    if (countsEl) countsEl.innerText = `${data.total_closed_trades} Trades (${data.wins}W / ${data.losses}L)`;
+    if (countsEl) countsEl.innerText = `${data.total_closed_trades} trades · ${data.wins}W / ${data.losses}L`;
 
     const p = data.active_parameters || {};
     if (minScoreEl) minScoreEl.innerText = `${p.min_consensus_score || 70}/100`;
@@ -933,33 +1973,39 @@ async function loadLearningInsights() {
 
     if (container && data.recent_lessons) {
       if (data.recent_lessons.length === 0) {
-        container.innerHTML = `<div class="text-slate-500 italic p-3 bg-slate-900/40 rounded-lg border border-slate-800/80">
-          No trade post-mortems recorded yet. Lessons will appear here automatically when positions exit.
+        container.innerHTML = `<div class="ui-card ui-card-pad text-[13px] ui-muted">
+          No post-mortems yet. Lessons appear here when positions are closed.
         </div>`;
       } else {
         container.innerHTML = data.recent_lessons.slice(0, 4).map(l => {
           const isWin = l.outcome === 'WIN';
           const isLoss = l.outcome === 'LOSS';
-          const badgeCol = isWin ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : (isLoss ? 'bg-rose-500/10 text-rose-400 border-rose-500/20' : 'bg-slate-500/10 text-slate-400 border-slate-500/20');
-          const icon = isWin ? 'fa-arrow-trend-up' : (isLoss ? 'fa-arrow-trend-down' : 'fa-minus');
-          const pnlSign = (l.realized_pnl_eur >= 0) ? '+' : '';
+          const badgeCls = isWin ? 'ui-badge-gain' : (isLoss ? 'ui-badge-loss' : '');
+          const arrow = isWin ? '▲' : (isLoss ? '▼' : '•');
+          const pnl = Number(l.realized_pnl_eur) || 0;
+          const pnlSign = pnl >= 0 ? '+' : '-';
+          const pnlCls = pnl > 0 ? 'ui-gain' : (pnl < 0 ? 'ui-loss' : '');
+          const pnlPct = Math.abs(Number(l.realized_pnl_pct) || 0);
 
           return `
-            <div class="p-3 bg-slate-900/60 rounded-lg border border-slate-800 space-y-1.5">
-              <div class="flex items-center justify-between">
-                <div class="flex items-center gap-2">
-                  <span class="px-2 py-0.5 rounded text-[11px] font-bold border ${badgeCol}">
-                    <i class="fa-solid ${icon} mr-1"></i>${l.outcome} ${l.ticker}
-                  </span>
-                  <span class="font-semibold text-slate-200">${pnlSign}€${l.realized_pnl_eur.toFixed(2)} (${pnlSign}${l.realized_pnl_pct.toFixed(1)}%)</span>
+            <div class="ui-card ui-card-pad space-y-2.5">
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="flex items-center gap-2">
+                    <span class="text-base font-bold" style="color:var(--text)">${esc(l.ticker)}</span>
+                    <span class="ui-badge ${badgeCls}">${arrow} ${esc(l.outcome)}</span>
+                  </div>
+                  <div class="text-xs ui-faint ui-num mt-0.5">${esc(l.created_at)}</div>
                 </div>
-                <span class="text-[10px] text-slate-500 font-mono">${l.created_at}</span>
+                <div class="text-right shrink-0">
+                  <div class="ui-num font-semibold ${pnlCls}">${pnlSign}${esc(eur(Math.abs(pnl)))}</div>
+                  <div class="ui-num text-xs ${pnlCls}">${pnlSign}${esc(num(pnlPct, 1))}%</div>
+                </div>
               </div>
-              <div class="text-[11px] text-slate-300">
-                <span class="text-slate-400 font-medium">Diagnosis:</span> ${isLoss ? l.what_went_wrong : l.what_went_well}
-              </div>
-              <div class="text-[11px] text-purple-300 font-medium bg-purple-950/30 px-2 py-1 rounded border border-purple-900/40">
-                <i class="fa-solid fa-lightbulb mr-1 text-amber-400"></i><b>Lesson:</b> ${l.lesson}
+              <p class="text-[13px] ui-muted"><span class="ui-faint">Diagnosis:</span> ${esc(isLoss ? l.what_went_wrong : l.what_went_well)}</p>
+              <div class="ui-inset px-3 py-2 text-[13px]" style="color:var(--text)">
+                <span class="ui-label" style="color:var(--accent-strong)"><i class="fa-solid fa-lightbulb mr-1"></i>Lesson</span>
+                <p class="mt-1">${esc(l.lesson)}</p>
               </div>
             </div>
           `;
@@ -972,12 +2018,12 @@ async function loadLearningInsights() {
 }
 
 async function triggerLearningCalibration() {
-  showToast('⏳ Re-evaluating trade performance and calibrating risk parameters...');
+  showToast('Re-evaluating trade performance and calibrating risk parameters...');
   try {
     const res = await fetch('/api/learning/calibrate', { method: 'POST' });
     const data = await res.json();
     if (res.ok && data.success) {
-      showToast(`⚙️ Calibration complete! Win Rate: ${data.win_rate_pct}%`);
+      showToast(`Calibration complete. Win rate: ${data.win_rate_pct}%`);
       loadLearningInsights();
       loadSettings();
     } else {
@@ -993,8 +2039,13 @@ let currentMarketFilter = null;
 
 async function loadMarketReview(market = null) {
   if (market !== undefined && market !== null) {
-    currentMarketFilter = market;
+    currentMarketFilter = market || null;   // '' (the "Latest" pill) clears the filter
   }
+  document.querySelectorAll('[data-review-market]').forEach(b => {
+    const active = (b.dataset.reviewMarket || null) === (currentMarketFilter || null);
+    b.classList.toggle('is-active', active);
+    b.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
   try {
     const url = currentMarketFilter ? `/api/market-digest/latest?market=${encodeURIComponent(currentMarketFilter)}` : '/api/market-digest/latest';
     const res = await fetch(url);
@@ -1007,49 +2058,46 @@ async function loadMarketReview(market = null) {
     const textContainer = document.getElementById('reviewTextContainer');
 
     if (data.next_session && nextBadgeEl) {
-      nextBadgeEl.innerHTML = `<i class="fa-regular fa-clock mr-1"></i> Next: <b>${data.next_session.formatted}</b>`;
+      nextBadgeEl.innerHTML = `<i class="fa-regular fa-clock"></i> Next: <span class="ui-num text-white">${esc(data.next_session.formatted)}</span>`;
     }
 
     if (!data.found) {
       const marketLabel = currentMarketFilter ? `${currentMarketFilter} ` : '';
-      if (headlineEl) headlineEl.innerText = `No ${marketLabel}Market Reviews Recorded Today`;
-      if (contentEl) contentEl.innerHTML = `Click <b>"Run ${currentMarketFilter || 'US'} Review"</b> above to evaluate top momentum candidates and generate daily advice.`;
+      if (headlineEl) headlineEl.innerText = `No ${marketLabel}review yet today`;
+      if (contentEl) contentEl.innerHTML = `Tap <strong class="text-white">Run ${esc(currentMarketFilter || 'US')} review</strong> below to score today's candidates and generate advice.`;
       if (timestampEl) timestampEl.innerText = 'Pending';
       if (textContainer) textContainer.classList.add('hidden');
       return;
     }
 
-    if (timestampEl) timestampEl.innerText = `${data.market || ''} ${data.session || ''} • ${data.timestamp || 'Today'}`.trim();
+    if (timestampEl) timestampEl.innerText = `${data.market || ''} ${data.session || ''} · ${data.timestamp || 'Today'}`.trim();
     if (headlineEl) headlineEl.innerText = data.headline || 'Market Session Review';
 
     let picksHtml = '';
     if (data.top_picks && data.top_picks.length > 0) {
-      picksHtml = '<div class="mt-2 flex flex-wrap gap-2">' + data.top_picks.slice(0, 4).map(p => 
-        `<span class="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-[11px] font-mono font-semibold text-emerald-400">
-          ${p.ticker}: ${p.action} (${p.consensus_score}/100)
-        </span>`
+      picksHtml = '<div class="mt-3 flex flex-wrap gap-2">' + data.top_picks.slice(0, 4).map(p =>
+        `<span class="ui-chip"><span class="ui-num text-white font-semibold">${esc(p.ticker)}</span> ${esc(String(p.action || '').replace('_', ' '))} <span class="ui-num">${esc(p.consensus_score)}</span></span>`
       ).join('') + '</div>';
     }
 
     let holdingsHtml = '';
     const positions = (data.portfolio_state && data.portfolio_state.positions) || [];
     if (positions.length > 0) {
-      holdingsHtml = '<div class="mt-2.5 pt-2 border-t border-slate-800"><div class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5"><i class="fa-solid fa-briefcase text-emerald-400 mr-1"></i> Current Stock Holdings:</div><div class="flex flex-wrap gap-2">' +
+      holdingsHtml = '<div class="mt-3"><div class="ui-eyebrow mb-1.5">Holdings</div><div class="ui-inset px-3.5 py-2.5 space-y-1.5">' +
         positions.map(pos => {
-          const pnlSign = pos.unrealized_pnl_eur >= 0 ? '+' : '';
-          const pnlColor = pos.unrealized_pnl_eur >= 0 ? 'text-emerald-400' : 'text-rose-400';
-          return `<span class="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-700/80 text-[11px] font-mono">
-            <b class="text-white">${pos.ticker}</b> (${pos.shares} shs @ ${pos.entry_price_native} ${pos.currency}) ➔ <span class="${pnlColor} font-bold">${pnlSign}€${(pos.unrealized_pnl_eur || 0).toFixed(2)} (${pnlSign}${(pos.unrealized_pnl_pct || 0).toFixed(1)}%)</span>
-          </span>`;
+          const up = pos.unrealized_pnl_eur >= 0;
+          const sign = up ? '+' : '';
+          return `<div class="kv"><span><span class="ui-num text-white">${esc(pos.ticker)}</span> <span class="ui-num">${esc(pos.shares)} @ ${esc(pos.entry_price_native)} ${esc(pos.currency)}</span></span>
+            <span class="${up ? 'ui-gain' : 'ui-loss'}">${up ? '▲' : '▼'} ${sign}€${num(pos.unrealized_pnl_eur)} (${sign}${num(pos.unrealized_pnl_pct, 1)}%)</span></div>`;
         }).join('') + '</div></div>';
     }
 
     if (contentEl) {
-      contentEl.innerHTML = `<span>${data.content || ''}</span>${picksHtml}${holdingsHtml}`;
+      contentEl.innerHTML = `<span>${safeRichText(data.content || '')}</span>${picksHtml}${holdingsHtml}`;
     }
 
     if (textContainer && data.review_text) {
-      textContainer.innerHTML = data.review_text;
+      textContainer.innerHTML = safeRichText(data.review_text);
       textContainer.classList.remove('hidden');
     } else if (textContainer) {
       textContainer.classList.add('hidden');
@@ -1060,7 +2108,7 @@ async function loadMarketReview(market = null) {
 }
 
 async function triggerMarketReview(market) {
-  showToast(`⏳ Launching ${market} Opening Review in background...`);
+  showToast(`Starting the ${market} review in the background...`);
   try {
     // Record current latest digest id before running
     const prevRes = await fetch(`/api/market-digest/latest?market=${encodeURIComponent(market)}`);
@@ -1074,7 +2122,7 @@ async function triggerMarketReview(market) {
     });
     const data = await res.json();
     if (res.ok && data.success) {
-      showToast(`🚀 ${market} Review is analyzing candidates. Results will appear shortly...`);
+      showToast(`${market} review is analyzing candidates. Results will appear shortly.`);
       currentMarketFilter = market;
 
       // Poll every 5s for up to 90s for the review to appear or update
@@ -1086,7 +2134,7 @@ async function triggerMarketReview(market) {
           const checkData = await checkRes.json();
           if (checkData.found && checkData.id !== prevId) {
             clearInterval(poll);
-            showToast(`✅ ${market} Market Review generated successfully!`);
+            showToast(`${market} review is ready.`);
             loadMarketReview(market);
             loadWeeklyReviewComparison();
             loadRecommendations();
@@ -1117,6 +2165,7 @@ async function triggerMarketReview(market) {
 let weeklyReviewsCache = [];
 
 async function loadWeeklyReviewComparison() {
+  const STAT = 'ui-num text-[17px] font-semibold mt-1 truncate';
   try {
     const [compRes, weeklyRes] = await Promise.all([
       fetch('/api/reviews/compare'),
@@ -1124,7 +2173,8 @@ async function loadWeeklyReviewComparison() {
     ]);
 
     const comp = await compRes.json();
-    weeklyReviewsCache = await weeklyRes.json();
+    const weeklyData = await weeklyRes.json();
+    weeklyReviewsCache = Array.isArray(weeklyData) ? weeklyData : [];
 
     // Update Badges
     const winRateEl = document.getElementById('weeklyWinRate');
@@ -1141,30 +2191,30 @@ async function loadWeeklyReviewComparison() {
     if (archiveCountBadge) archiveCountBadge.innerText = (weeklyReviewsCache || []).length;
 
     if (!comp.has_history || !comp.tracked_picks || comp.tracked_picks.length === 0) {
-      if (winRateEl) { winRateEl.innerText = '--%'; winRateEl.className = 'text-lg font-bold text-slate-400 mt-0.5'; }
+      if (winRateEl) { winRateEl.innerText = '--%'; winRateEl.className = `${STAT} ui-faint`; }
       if (winCountsEl) winCountsEl.innerText = '0 picks evaluated';
-      if (deltaEl) deltaEl.innerText = '€0.00 (+0.0%)';
+      if (deltaEl) { deltaEl.innerText = '€0.00 (+0.0%)'; deltaEl.className = `${STAT} text-white`; }
       if (bestPickEl) bestPickEl.innerText = '--';
       if (picksContainer) {
-        picksContainer.innerHTML = `<div class="text-slate-500 italic p-3 bg-slate-900/40 rounded-lg border border-slate-800/80">
-          No historical picks recorded in past 7 days yet. Run an Opening Review to start tracking.
-        </div>`;
+        picksContainer.innerHTML = `<div class="p-3.5 adv-prose">No picks recorded in the past 7 days yet. Run a market review to start tracking.</div>`;
       }
+      renderWeeklyArchive();
       return;
     }
 
     if (winRateEl) {
       winRateEl.innerText = `${comp.win_rate_pct}%`;
-      winRateEl.className = comp.win_rate_pct >= 50 ? 'text-lg font-bold text-emerald-400 mt-0.5' : 'text-lg font-bold text-rose-400 mt-0.5';
+      winRateEl.className = `${STAT} ${comp.win_rate_pct >= 50 ? 'ui-gain' : 'ui-loss'}`;
     }
     if (winCountsEl) {
       winCountsEl.innerText = `${comp.positive_picks_count}/${comp.total_picks_tracked} picks in profit`;
     }
 
     if (deltaEl) {
-      const sign = comp.portfolio_delta_eur >= 0 ? '+' : '';
-      deltaEl.innerText = `${sign}€${comp.portfolio_delta_eur.toFixed(2)} (${sign}${comp.portfolio_delta_pct.toFixed(2)}%)`;
-      deltaEl.className = comp.portfolio_delta_eur >= 0 ? 'text-lg font-bold text-emerald-400 mt-0.5' : 'text-lg font-bold text-rose-400 mt-0.5';
+      const up = comp.portfolio_delta_eur >= 0;
+      const sign = up ? '+' : '';
+      deltaEl.innerText = `${up ? '▲' : '▼'} ${sign}€${num(comp.portfolio_delta_eur)} (${sign}${num(comp.portfolio_delta_pct)}%)`;
+      deltaEl.className = `${STAT} ${up ? 'ui-gain' : 'ui-loss'}`;
     }
     if (rangeEl && comp.portfolio_trajectory) {
       rangeEl.innerText = comp.portfolio_trajectory;
@@ -1173,8 +2223,9 @@ async function loadWeeklyReviewComparison() {
     if (bestPickEl && comp.best_performer) {
       const bp = comp.best_performer;
       const sign = bp.pnl_pct >= 0 ? '+' : '';
-      bestPickEl.innerText = `${bp.ticker} (${sign}${bp.pnl_pct}%)`;
-      if (bestPickDetailsEl) bestPickDetailsEl.innerText = `${bp.rec_session} | ${bp.status_badge}`;
+      bestPickEl.innerText = `${bp.ticker} ${sign}${bp.pnl_pct}%`;
+      bestPickEl.className = `${STAT} ${bp.pnl_pct >= 0 ? 'ui-gain' : 'ui-loss'}`;
+      if (bestPickDetailsEl) bestPickDetailsEl.innerText = `${bp.rec_session} · ${bp.status_badge}`;
     }
 
     // Render Tracked Picks
@@ -1182,38 +2233,30 @@ async function loadWeeklyReviewComparison() {
       picksContainer.innerHTML = comp.tracked_picks.map(p => {
         const isPos = p.pnl_pct >= 0;
         const sign = isPos ? '+' : '';
-        const pnlCol = isPos ? 'text-emerald-400' : 'text-rose-400';
-        
-        let badgeClass = 'bg-slate-700/50 text-slate-300 border-slate-600';
-        if (p.status_badge.includes('TARGET')) {
-          badgeClass = 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30';
-        } else if (p.status_badge.includes('STOP')) {
-          badgeClass = 'bg-rose-500/20 text-rose-300 border-rose-500/30';
-        } else if (isPos) {
-          badgeClass = 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20';
-        } else {
-          badgeClass = 'bg-rose-500/10 text-rose-400 border-rose-500/20';
-        }
+
+        const badgeText = String(p.status_badge || '');
+        let badgeClass = 'ui-badge';
+        if (badgeText.includes('TARGET')) badgeClass = 'ui-badge ui-badge-gain';
+        else if (badgeText.includes('STOP')) badgeClass = 'ui-badge ui-badge-loss';
 
         return `
-          <div class="p-3 bg-slate-900/60 rounded-lg border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-            <div>
-              <div class="flex items-center gap-2">
-                <span class="font-bold text-white text-sm">${p.ticker}</span>
-                <span class="text-xs text-slate-400">${p.name || ''}</span>
-                <span class="text-[10px] px-2 py-0.5 rounded border ${badgeClass} font-semibold">${p.status_badge}</span>
+          <div class="p-3.5 space-y-2">
+            <div class="flex items-start justify-between gap-3">
+              <div class="min-w-0">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="text-[15px] font-bold text-white">${esc(p.ticker)}</span>
+                  ${badgeText ? `<span class="${badgeClass}">${esc(badgeText)}</span>` : ''}
+                </div>
+                <div class="ui-faint text-[13px] truncate">${esc(p.name)}</div>
               </div>
-              <div class="text-xs text-slate-400 mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
-                <span>Advised In: <strong class="text-slate-200">${p.rec_session}</strong></span>
-                <span>Rec Price: <strong class="text-slate-300">${p.rec_price} ${p.currency}</strong></span>
-                <span>Live Price: <strong class="text-white">${p.current_price} ${p.currency}</strong></span>
-                ${p.target_price ? `<span>TP: <code class="text-emerald-400">${p.target_price}</code></span>` : ''}
-                ${p.stop_loss ? `<span>SL: <code class="text-rose-400">${p.stop_loss}</code></span>` : ''}
-              </div>
+              <div class="ui-num text-[15px] font-semibold shrink-0 ${isPos ? 'ui-gain' : 'ui-loss'}">${isPos ? '▲' : '▼'} ${sign}${esc(p.pnl_pct)}%</div>
             </div>
-            <div class="sm:text-right">
-              <div class="text-sm font-bold ${pnlCol}">${sign}${p.pnl_pct}%</div>
-              <div class="text-[10px] text-slate-500">Performance vs Rec</div>
+            <div class="space-y-1">
+              <div class="kv"><span>Advised</span><span>${esc(p.rec_session)}</span></div>
+              <div class="kv"><span>At advice</span><span>${advicePrice(p.rec_price, p.currency)}</span></div>
+              <div class="kv"><span>Now</span><span>${advicePrice(p.current_price, p.currency)}</span></div>
+              ${p.target_price ? `<div class="kv"><span>Target</span><span class="ui-gain">▲ ${esc(p.target_price)}</span></div>` : ''}
+              ${p.stop_loss ? `<div class="kv"><span>Stop loss</span><span class="ui-loss">▼ ${esc(p.stop_loss)}</span></div>` : ''}
             </div>
           </div>
         `;
@@ -1234,11 +2277,11 @@ function toggleWeeklyArchive() {
   const isHidden = container.classList.contains('hidden');
   if (isHidden) {
     container.classList.remove('hidden');
-    if (icon) icon.className = 'fa-solid fa-chevron-down text-[10px]';
+    if (icon) icon.className = 'fa-solid fa-chevron-down text-[12px]';
     renderWeeklyArchive();
   } else {
     container.classList.add('hidden');
-    if (icon) icon.className = 'fa-solid fa-chevron-right text-[10px]';
+    if (icon) icon.className = 'fa-solid fa-chevron-right text-[12px]';
   }
 }
 
@@ -1246,23 +2289,406 @@ function renderWeeklyArchive() {
   const container = document.getElementById('weeklyArchiveContainer');
   if (!container || !weeklyReviewsCache) return;
 
-  if (weeklyReviewsCache.length === 0) {
-    container.innerHTML = `<div class="text-slate-500 text-xs italic">No past reviews archived yet.</div>`;
+  if (!Array.isArray(weeklyReviewsCache) || weeklyReviewsCache.length === 0) {
+    container.innerHTML = `<div class="adv-prose ui-faint px-1">No past reviews archived yet.</div>`;
     return;
   }
 
   container.innerHTML = weeklyReviewsCache.map(r => {
-    const picks = (r.top_picks || []).map(p => p.ticker).join(', ') || 'None';
+    const picks = (r.top_picks || []).map(p => p.ticker).join(', ') || 'None'; // escaped below
     return `
-      <div class="p-3 bg-slate-900/80 rounded-lg border border-slate-800 text-xs space-y-1">
-        <div class="flex items-center justify-between">
-          <span class="font-bold text-slate-200">${r.market} ${r.session} — ${r.headline}</span>
-          <span class="text-[10px] font-mono text-slate-500">${r.timestamp}</span>
+      <div class="ui-inset p-3.5 space-y-1.5">
+        <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+          <span class="text-[14px] font-semibold text-white">${esc(r.market)} ${esc(r.session)} · ${esc(r.headline)}</span>
+          <span class="ui-num ui-faint text-[12px]">${esc(r.timestamp)}</span>
         </div>
-        <div class="text-slate-400">${r.content}</div>
-        <div class="text-[11px] text-slate-500">Picks: <strong class="text-slate-300">${picks}</strong></div>
+        <div class="adv-prose adv-clamp">${safeRichText(r.content)}</div>
+        <div class="ui-faint text-[13px]">Picks: <span class="ui-num text-white">${esc(picks)}</span></div>
       </div>
     `;
   }).join('');
 }
 
+// ==========================================
+// TENCENTDB AGENT MEMORY HUB CLIENT
+// ==========================================
+
+async function loadMemoryHub() {
+  await Promise.all([
+    loadColdStartRecap(),
+    loadMemoryAssets()
+  ]);
+}
+
+async function refreshMemoryHub() {
+  showToast('Refreshing memory...', 'info');
+  await loadMemoryHub();
+  showToast('Memory updated.', 'success');
+}
+
+async function loadColdStartRecap() {
+  const container = document.getElementById('memoryColdStartText');
+  if (!container) return;
+  try {
+    const res = await fetch('/v3/memory/cold-start');
+    const json = await res.json();
+    if (json.code === 0 && json.data) {
+      container.textContent = json.data.full_prompt_context || json.data.what_had_happened || 'No recent memory recorded.';
+    } else {
+      container.textContent = 'Failed to load cold start recap.';
+    }
+  } catch (err) {
+    container.textContent = `Error loading cold start memory: ${err.message}`;
+  }
+}
+
+async function loadMemoryAssets() {
+  try {
+    const res = await fetch('/v3/memory/assets');
+    const json = await res.json();
+    if (json.code === 0 && json.data) {
+      renderMemoryAssets(json.data);
+    }
+  } catch (err) {
+    console.error('Error fetching memory assets:', err);
+  }
+}
+
+function renderMemoryAssets(assets) {
+  const empty = (text) => `<div class="mem-empty">${esc(text)}</div>`;
+
+  // 1. L1 atoms (facts and constraints)
+  const atoms = (assets.chat_memory && assets.chat_memory.l1_atoms) || [];
+  const atomsBadge = document.getElementById('atomsCountBadge');
+  const atomsContainer = document.getElementById('atomsListContainer');
+  if (atomsBadge) atomsBadge.textContent = String(atoms.length);
+  if (atomsContainer) {
+    if (atoms.length === 0) {
+      atomsContainer.innerHTML = empty('No facts extracted yet.');
+    } else {
+      atomsContainer.innerHTML = atoms.map(a => `
+        <div class="mem-row">
+          <div class="flex items-start justify-between gap-3">
+            <span class="font-semibold text-[15px] min-w-0 break-words">${esc(a.subject)}</span>
+            <span class="ui-badge shrink-0">${esc((a.type || 'fact').toLowerCase())}</span>
+          </div>
+          <p class="text-sm ui-muted mt-1 leading-relaxed">${esc(a.content)}</p>
+          <p class="text-xs ui-faint ui-num mt-1.5">${esc(Math.round((a.confidence || 1) * 100))}% confidence</p>
+        </div>
+      `).join('');
+    }
+  }
+
+  // 2. Skills
+  const skills = assets.skills || [];
+  const skillsBadge = document.getElementById('skillsCountBadge');
+  const skillsContainer = document.getElementById('skillsListContainer');
+  if (skillsBadge) skillsBadge.textContent = String(skills.length);
+  if (skillsContainer) {
+    if (skills.length === 0) {
+      skillsContainer.innerHTML = empty('No skills registered.');
+    } else {
+      skillsContainer.innerHTML = skills.map(s => `
+        <div class="mem-row">
+          <div class="flex items-start justify-between gap-3">
+            <span class="font-semibold text-[15px] min-w-0 break-words">${esc(s.name)}</span>
+            <span class="ui-badge ui-badge-accent shrink-0">${esc(s.category || 'skill')}</span>
+          </div>
+          <p class="text-sm ui-muted mt-1 leading-relaxed">${esc(s.description)}</p>
+          ${(s.execution_steps || []).length ? `<p class="text-xs ui-faint mt-1.5 leading-relaxed">${esc((s.execution_steps || []).join(' → '))}</p>` : ''}
+        </div>
+      `).join('');
+    }
+  }
+
+  // 3. Wiki
+  const wiki = assets.llm_wiki || [];
+  const wikiBadge = document.getElementById('wikiCountBadge');
+  const wikiContainer = document.getElementById('wikiListContainer');
+  if (wikiBadge) wikiBadge.textContent = String(wiki.length);
+  if (wikiContainer) {
+    if (wiki.length === 0) {
+      wikiContainer.innerHTML = empty('No wiki pages registered.');
+    } else {
+      wikiContainer.innerHTML = wiki.map(w => `
+        <div class="mem-row">
+          <div class="flex items-start justify-between gap-3">
+            <span class="font-semibold text-[15px] min-w-0 break-words">${esc(w.title)}</span>
+            <span class="text-xs ui-faint ui-num shrink-0">${esc(w.page_id)}</span>
+          </div>
+          <p class="text-sm ui-muted mt-1 leading-relaxed line-clamp-2">${esc((w.content_md || '').split('\n').slice(2, 5).join(' '))}</p>
+          ${(w.tags || []).length ? `<p class="text-xs ui-faint mt-1.5">${(w.tags || []).map(t => `#${esc(t)}`).join(' ')}</p>` : ''}
+        </div>
+      `).join('');
+    }
+  }
+
+  // 4. L3 core profile & code graph
+  const l3 = (assets.chat_memory && assets.chat_memory.l3_core) || {};
+  const graph = assets.code_graph || [];
+  const graphBadge = document.getElementById('codegraphCountBadge');
+  if (graphBadge) graphBadge.textContent = graph.length ? String(graph.length) : '';
+  const coreContainer = document.getElementById('coreAndGraphContainer');
+  if (coreContainer) {
+    coreContainer.innerHTML = `
+      <div class="mem-row">
+        <div class="flex items-start justify-between gap-3">
+          <span class="font-semibold text-[15px] min-w-0 break-words">${esc(l3.persona_name || 'Committee persona')}</span>
+          <span class="ui-badge shrink-0">core</span>
+        </div>
+        ${l3.core_profile ? `<p class="text-sm mt-1 leading-relaxed">${esc(l3.core_profile)}</p>` : ''}
+        ${l3.cumulative_wisdom ? `<div class="ui-inset p-3 mt-2.5 text-sm ui-muted leading-relaxed whitespace-pre-wrap">${esc(l3.cumulative_wisdom)}</div>` : ''}
+      </div>
+      ${graph.length ? `<div class="mem-row" style="padding-bottom: 6px;"><span class="ui-eyebrow">Code graph</span></div>` : ''}
+      ${graph.map(g => `
+        <div class="mem-row" style="padding-top: 10px; padding-bottom: 10px;">
+          <div class="flex items-baseline justify-between gap-3">
+            <span class="ui-num text-sm font-semibold min-w-0 break-all">${esc(g.symbol_name)}</span>
+            <span class="text-xs ui-faint shrink-0">${esc(g.symbol_type)}</span>
+          </div>
+          <div class="text-xs ui-faint ui-num mt-0.5 break-all">${esc(g.file_path)}:${esc(g.line_start || 1)}</div>
+        </div>
+      `).join('')}
+    `;
+  }
+}
+
+async function openExtractModal() {
+  const sample = prompt("Text, trade rationale or conversation to extract memory from (leave blank to use recent activity):");
+  if (sample === null) return;
+  showToast("Extracting memory...", "info");
+  try {
+    const res = await fetch("/v3/memory/extract", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        raw_text: sample || "Investigated BESI.AS pullback entry at €175.88. Enforced Euronext minimum €100 order size to limit fee drag to 3.8%.",
+        sync_to_store: true
+      })
+    });
+    const json = await res.json();
+    if (json.code === 0) {
+      showToast(`Extraction done: ${json.data.extracted_atoms_count} facts added.`, "success");
+      await loadMemoryHub();
+    } else {
+      showToast(`Extraction failed: ${json.message}`, "error");
+    }
+  } catch (err) {
+    showToast(`Extraction error: ${err.message}`, "error");
+  }
+}
+
+
+
+
+// Shadow paper portfolios: simulated strategies next to the main portfolio
+const shadowCharts = {};
+
+function signedPct(value, digits = 2) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return '--';
+  const v = Number(value);
+  return `${v > 0 ? '+' : v < 0 ? '-' : ''}${num(Math.abs(v), digits)}%`;
+}
+function gainCls(value) {
+  const v = Number(value);
+  return v > 0 ? 'ui-gain' : (v < 0 ? 'ui-loss' : '');
+}
+
+function shadowParamChips(p) {
+  const chips = [];
+  chips.push(`Score &ge; ${esc(p.effective_trigger_min_score)}`);
+  if (p.entry_mode === 'market') chips.push('Buy at market');
+  else if (p.pullback_scale !== 1) chips.push(`${esc(num(p.pullback_scale * 100, 0))}% of pullback`);
+  if (p.stop_scale !== 1) chips.push(`Stop &times;${esc(num(p.stop_scale, 2))}`);
+  if (!p.use_take_profit) chips.push('No fixed target');
+  else if (p.reward_risk) chips.push(`Target ${esc(num(p.reward_risk, 1))}R`);
+  if (p.trailing_stop_pct) chips.push(`Trail ${esc(num(p.trailing_stop_pct * 100, 0))}%`);
+  chips.push(`Breakeven at +${esc(num(p.effective_breakeven_pct * 100, 1))}%`);
+  if (p.effective_trailing_atr_mult) chips.push(`Trail ${esc(num(p.effective_trailing_atr_mult, 1))}&times; ATR`);
+  if (p.effective_risk_per_trade_pct) chips.push(`Risk ${esc(num(p.effective_risk_per_trade_pct, 1))}% per trade`);
+  chips.push(p.effective_regime_filter ? 'Regime filter on' : 'No regime filter');
+  if (p.whole_shares) chips.push('Whole shares');
+  chips.push(`Max ${esc(p.effective_max_positions)} positions`);
+  if (p.max_hold_days) chips.push(`Exit after ${esc(p.max_hold_days)}d`);
+  if (p.accept_hold) chips.push('Also HOLD verdicts');
+  if (p.ignore_risk_veto) chips.push('Ignores risk veto');
+  return chips.map(c => `<span class="ui-badge">${c}</span>`).join('');
+}
+
+// The shadow keeps the main bot's values from its start; say so when the learner has moved them since
+function shadowFrozenNote(p) {
+  const f = p.frozen_main_params || {};
+  const c = p.current_main_params || {};
+  const LABELS = {
+    trigger_min_score: v => `score ${v}`,
+    breakeven_pct: v => `breakeven +${num((v || 0) * 100, 1)}%`,
+    max_positions: v => `max ${v} positions`,
+    risk_per_trade_pct: v => `risk ${num(v || 0, 1)}%`,
+    trailing_atr_mult: v => `trail ${num(v || 0, 1)}x ATR`,
+    regime_filter: v => (v ? 'regime filter on' : 'regime filter off'),
+  };
+  const diffs = Object.keys(LABELS).filter(k => f[k] !== undefined && c[k] !== undefined && f[k] !== c[k]);
+  if (!diffs.length) return '';
+  const then = diffs.map(k => LABELS[k](f[k])).join(', ');
+  const now = diffs.map(k => LABELS[k](c[k])).join(', ');
+  return `<p class="text-xs mt-1" style="color:var(--warn)"><i class="fa-solid fa-snowflake mr-1"></i>Uses the main bot's values from its start (${esc(then)}). Main now: ${esc(now)}. Reset to adopt them.</p>`;
+}
+
+function shadowCompareRow(label, mainHtml, shadowHtml) {
+  return `<div class="grid grid-cols-3 gap-2 py-2 text-[13px]">
+    <span class="ui-muted">${label}</span>
+    <span class="ui-num text-right">${mainHtml}</span>
+    <span class="ui-num text-right" style="color:var(--text)">${shadowHtml}</span>
+  </div>`;
+}
+
+function renderShadowStrategy(s, mainLabel) {
+  const m = s.main_same_period || {};
+  const winRate = v => (v === null || v === undefined) ? '--' : `${esc(num(v, 0))}%`;
+  const positions = (s.open_positions || []).map(p => `
+    <div class="flex items-center justify-between gap-3 py-2 text-[13px]">
+      <div class="min-w-0">
+        <span class="font-semibold" style="color:var(--text)">${esc(p.ticker)}</span>
+        ${p.followed_main ? '' : '<span class="ui-badge ui-badge-accent ml-1">Shadow only</span>'}
+        <div class="ui-faint ui-num text-xs">${esc(num(p.entry_price_native))} &rarr; ${esc(num(p.current_price_native))} ${esc(p.currency)} · stop ${p.stop_loss_native ? esc(num(p.stop_loss_native)) : '--'}</div>
+      </div>
+      <div class="text-right shrink-0 ui-num ${gainCls(p.unrealized_pnl_eur)}">${esc(signedEur(p.unrealized_pnl_eur))}<div class="text-xs">${esc(signedPct(p.unrealized_pnl_pct, 1))}</div></div>
+    </div>`).join('');
+  const pending = (s.pending_triggers || []).map(t => `
+    <div class="flex items-center justify-between gap-3 py-2 text-[13px]">
+      <div class="min-w-0">
+        <span class="font-semibold" style="color:var(--text)">${esc(t.ticker)}</span>
+        ${t.followed_main ? '' : '<span class="ui-badge ui-badge-accent ml-1">Shadow only</span>'}
+        <div class="ui-faint text-xs">${esc(t.trigger_type === 'MARKET' ? 'Buy at market (next open)' : triggerTypeLabel(t.trigger_type))} · score ${esc(t.consensus_score)}</div>
+      </div>
+      <span class="ui-num shrink-0">${esc(num(t.target_price))} ${esc(t.currency)}</span>
+    </div>`).join('');
+  const closed = (s.recent_closed || []).map(c => `
+    <div class="flex items-center justify-between gap-3 py-2 text-[13px]">
+      <div class="min-w-0">
+        <span class="font-semibold" style="color:var(--text)">${esc(c.ticker)}</span>
+        ${c.followed_main ? '' : '<span class="ui-badge ui-badge-accent ml-1">Shadow only</span>'}
+        <div class="ui-faint text-xs">${esc(c.closed_at)} · ${esc(c.exit_reason || '')}</div>
+      </div>
+      <div class="text-right shrink-0 ui-num ${gainCls(c.realized_pnl_eur)}">${esc(signedEur(c.realized_pnl_eur))}<div class="text-xs">${esc(signedPct(c.realized_pnl_pct, 1))}</div></div>
+    </div>`).join('');
+  const list = (title, html, empty) => `
+    <div class="space-y-1">
+      <p class="ui-eyebrow px-1">${title}</p>
+      <div class="ui-inset px-3 divide-y divide-borderCol">${html || `<p class="py-2 text-[13px] ui-faint">${empty}</p>`}</div>
+    </div>`;
+
+  return `
+    <div class="ui-card ui-card-pad space-y-4">
+      <div class="flex items-start justify-between gap-3">
+        <div class="min-w-0">
+          <h3 class="ui-section-title">${esc(s.label)}</h3>
+          <p class="text-[13px] ui-muted mt-1">${esc(s.description)}</p>
+          <p class="text-xs ui-faint mt-1 ui-num">Since ${esc(s.started_at || '--')} · start ${esc(eur(s.initial_capital_eur))}</p>
+          ${shadowFrozenNote(s.params || {})}
+        </div>
+        <button type="button" class="ui-btn ui-btn-sm shrink-0" style="min-height:44px" data-action="reset-shadow" data-key="${esc(s.key)}">
+          <i class="fa-solid fa-rotate-left"></i> Reset
+        </button>
+      </div>
+      <div class="flex flex-wrap gap-1.5">${shadowParamChips(s.params || {})}</div>
+
+      <div class="ui-inset px-3 divide-y divide-borderCol">
+        <div class="grid grid-cols-3 gap-2 py-2 ui-eyebrow">
+          <span>Same period</span><span class="text-right">${esc(mainLabel)}</span><span class="text-right">${esc(s.label)}</span>
+        </div>
+        ${shadowCompareRow('Return', `<span class="${gainCls(m.return_pct)}">${esc(signedPct(m.return_pct))}</span>`, `<span class="${gainCls(s.return_pct)}">${esc(signedPct(s.return_pct))}</span>`)}
+        ${shadowCompareRow('Realized P&amp;L', `<span class="${gainCls(m.realized_pnl_eur)}">${esc(signedEur(m.realized_pnl_eur || 0))}</span>`, `<span class="${gainCls(s.realized_pnl_eur)}">${esc(signedEur(s.realized_pnl_eur || 0))}</span>`)}
+        ${shadowCompareRow('Closed trades', esc(m.closed_trades ?? 0), esc(s.closed_trades ?? 0))}
+        ${shadowCompareRow('Win rate', winRate(m.win_rate_pct), winRate(s.win_rate_pct))}
+        ${shadowCompareRow('Avg. trade', m.avg_trade_eur == null ? '--' : esc(signedEur(m.avg_trade_eur)), s.avg_trade_eur == null ? '--' : esc(signedEur(s.avg_trade_eur)))}
+      </div>
+
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-2.5">
+        <div class="ui-card kpi"><span class="ui-label">Value</span><span class="kpi-value">${esc(eur(s.total_value_eur))}</span><span class="kpi-sub ui-num">Cash ${esc(eur(s.cash_eur))}</span></div>
+        <div class="ui-card kpi"><span class="ui-label">Open P&amp;L</span><span class="kpi-value ${gainCls(s.unrealized_pnl_eur)}">${esc(signedEur(s.unrealized_pnl_eur))}</span><span class="kpi-sub">${esc((s.open_positions || []).length)} positions</span></div>
+        <div class="ui-card kpi"><span class="ui-label">Fees</span><span class="kpi-value">${esc(eur(s.fees_eur))}</span><span class="kpi-sub">Simulated commissions</span></div>
+        <div class="ui-card kpi"><span class="ui-label">Shadow-only trades</span><span class="kpi-value">${esc(s.shadow_only_trades)}</span><span class="kpi-sub">The main bot skipped these</span></div>
+      </div>
+
+      <div class="relative h-44 ${(s.history && s.history.shadow && s.history.shadow.length > 1) ? '' : 'hidden'}"><canvas id="shadowChart-${esc(s.key)}"></canvas></div>
+
+      ${list('Open positions', positions, 'No open shadow positions.')}
+      ${list('Pending entries', pending, 'No pending shadow entries.')}
+      ${list('Recently closed', closed, 'No closed shadow trades yet.')}
+    </div>`;
+}
+
+function drawShadowChart(s, mainLabel) {
+  const canvas = document.getElementById(`shadowChart-${s.key}`);
+  if (!canvas || typeof Chart === 'undefined') return;
+  if (shadowCharts[s.key]) { shadowCharts[s.key].destroy(); delete shadowCharts[s.key]; }
+  const hist = s.history || {};
+  if (!hist.shadow || hist.shadow.length < 2) return;
+  const labels = hist.shadow.map(p => p[0].slice(5));  // 'MM-DD HH:MM'
+  const mainMap = new Map((hist.main || []).map(p => [p[0].slice(5), p[1]]));
+  shadowCharts[s.key] = new Chart(canvas.getContext('2d'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: s.label, data: hist.shadow.map(p => p[1]), borderColor: '#8EA2FF', backgroundColor: '#8EA2FF', borderWidth: 2, pointRadius: 0, tension: 0.2 },
+        { label: mainLabel, data: labels.map(l => mainMap.has(l) ? mainMap.get(l) : null), borderColor: '#A3ADBD', backgroundColor: '#A3ADBD', borderWidth: 2, borderDash: [4, 4], pointRadius: 0, tension: 0.2, spanGaps: true }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { position: 'bottom', labels: { color: '#A3ADBD', boxWidth: 12 } },
+        tooltip: { callbacks: { label: c => `${c.dataset.label}: ${signedPct(c.parsed.y)}` } }
+      },
+      scales: {
+        x: { ticks: { color: '#7D8799', maxTicksLimit: 4, maxRotation: 0, callback(v) { return String(this.getLabelForValue(v)).slice(0, 5); } }, grid: { display: false } },
+        y: { ticks: { color: '#7D8799', callback: v => `${v}%` }, grid: { color: '#1E2533' } }
+      }
+    }
+  });
+}
+
+async function loadShadow() {
+  const container = document.getElementById('shadowContainer');
+  if (!container) return;
+  try {
+    const res = await fetch('/api/shadow');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Request failed');
+    const mainLabel = (data.main && data.main.label) || 'Main';
+    if (!data.enabled || !(data.strategies || []).length) {
+      const presets = (data.presets || []).map(p => `<li><span class="ui-num" style="color:var(--text)">${esc(p.key)}</span>: ${esc(p.description)}</li>`).join('');
+      container.innerHTML = `<div class="ui-card ui-card-pad text-[13px] ui-muted space-y-2">
+        <p>No shadow strategy is enabled. Set <span class="ui-num">SHADOW_ENABLED=true</span> and <span class="ui-num">SHADOW_STRATEGIES</span> in .env, then restart.</p>
+        <ul class="list-disc pl-5 space-y-1">${presets}</ul>
+      </div>`;
+      return;
+    }
+    container.innerHTML = data.strategies.map(s => renderShadowStrategy(s, mainLabel)).join('');
+    data.strategies.forEach(s => drawShadowChart(s, mainLabel));
+  } catch (e) {
+    container.innerHTML = `<div class="ui-card ui-card-pad text-[13px] ui-muted">Could not load shadow portfolios.</div>`;
+    console.debug('Error loading shadow portfolios:', e);
+  }
+}
+
+async function resetShadow(key) {
+  if (!key) return;
+  if (!confirm(`Reset the "${key}" shadow portfolio? Its simulated positions and history are deleted and it restarts with fresh capital. The main portfolio is not touched.`)) return;
+  try {
+    const res = await fetch(`/api/shadow/${encodeURIComponent(key)}/reset`, { method: 'POST' });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      showToast(data.message);
+      loadShadow();
+    } else {
+      showToast(data.detail || data.message || 'Reset failed.', true);
+    }
+  } catch (e) {
+    showToast('Error resetting shadow portfolio.', true);
+  }
+}

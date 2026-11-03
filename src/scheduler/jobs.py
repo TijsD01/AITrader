@@ -11,19 +11,64 @@ from config.settings import settings
 from src.screener.scanner import market_scanner
 from src.data.market import market_data_provider
 from src.agents.committee import investment_committee
-from src.trading.broker import active_broker as paper_broker, get_active_broker, active_broker
-from src.trading.risk import calculate_position_allocation
+from src.trading.broker import active_broker as paper_broker, get_active_broker, active_broker, live_broker
+from src.trading.risk import derive_trigger_levels, entry_allocation_from_summary, plan_buy
+from src.trading.shadow import shadow_portfolios
 from src.telegram.bot import telegram_bot
 from sqlalchemy import select, desc
 from src.db.session import AsyncSessionLocal
 from src.db.models import AnalysisReport, MarketDigest, Position, OrderTrigger, SystemConfig
 from src.data.review_tracker import review_tracker
+from src.trading.risk import check_market_regime
+from src.trading.trigger_gate import evaluate_trigger_verdict
 
 logger = logging.getLogger(__name__)
+
+
+async def _tickers_in_use(db_session) -> tuple:
+    """Open-position and pending-trigger tickers of the active mode only, so stale paper rows never block live buys."""
+    live = get_active_broker() is live_broker
+    pos = await db_session.execute(select(Position.ticker).where(Position.status == "OPEN", Position.is_live == live))
+    trig = await db_session.execute(
+        select(OrderTrigger.ticker).where(OrderTrigger.status == "PENDING", OrderTrigger.is_live == live)
+    )
+    return {t.upper() for t in pos.scalars().all()}, {t.upper() for t in trig.scalars().all()}
 
 class TradingScheduler:
     def __init__(self):
         self.scheduler = AsyncIOScheduler(timezone=settings.TIMEZONE)
+        # Serializes trigger/stop checks so a manual refresh cannot overlap a scheduled run
+        self._monitor_lock = asyncio.Lock()
+
+    @staticmethod
+    def _should_arm_trigger(report: Dict[str, Any], trigger_min_score: int) -> bool:
+        """
+        Arms only a buy verdict that the Risk Officer approved and that scores at or above the threshold.
+        The verdict matters on its own: when the learner raises MIN_CONSENSUS_SCORE above TRIGGER_MIN_SCORE,
+        a score can clear the trigger threshold while the committee still says HOLD.
+        """
+        return evaluate_trigger_verdict(report, trigger_min_score).allowed
+
+    @staticmethod
+    def _fits_whole_share(
+        allocation_eur: float, price_native: float, currency: str,
+        stop_loss_native: Optional[float] = None, portfolio_value_eur: float = 0.0, max_eur: Optional[float] = None
+    ) -> bool:
+        """False when whole-share sizing is on and not even one share fits the allocation after the risk cap."""
+        if not settings.WHOLE_SHARES_ONLY:
+            return True
+        return plan_buy(allocation_eur, price_native, currency, stop_loss_native, portfolio_value_eur, max_eur=max_eur)["shares"] >= 1
+
+    @staticmethod
+    def _is_affordable(price_native: Optional[float], currency: str, summary: Dict[str, Any]) -> bool:
+        """True when one share fits both the free unreserved cash and the max position size (whole-share mode only)."""
+        if not settings.WHOLE_SHARES_ONLY or not price_native:
+            return True
+        from src.data.currency import currency_service
+        price_eur = currency_service.to_eur(price_native, currency or "EUR")
+        limit = min(summary.get("available_cash_eur", 0.0),
+                    summary.get("total_value_eur", 0.0) * settings.MAX_POSITION_PCT / 100.0)
+        return price_eur <= limit
 
     async def _scheduled_market_session(self, market: str, session: str):
         """Safeguard for scheduled cron jobs: only run on weekdays."""
@@ -52,19 +97,19 @@ class TradingScheduler:
             misfire_grace_time=3600
         )
 
-        # 3. US Market Open Job (15:30 CET, Mon-Fri)
+        # 3. US Market Open Job (09:30 New York time, Mon-Fri)
         self.scheduler.add_job(
             self._scheduled_market_session,
-            CronTrigger(day_of_week="mon-fri", hour=settings.US_OPEN_HOUR, minute=settings.US_OPEN_MINUTE, timezone=settings.TIMEZONE),
+            CronTrigger(day_of_week="mon-fri", hour=9, minute=30, timezone="America/New_York"),
             args=["US", "OPEN"],
             id="us_market_open",
             misfire_grace_time=3600
         )
 
-        # 4. US Market Close Job (22:00 CET, Mon-Fri)
+        # 4. US Market Close Job (16:00 New York time, Mon-Fri)
         self.scheduler.add_job(
             self._scheduled_market_session,
-            CronTrigger(day_of_week="mon-fri", hour=settings.US_CLOSE_HOUR, minute=settings.US_CLOSE_MINUTE, timezone=settings.TIMEZONE),
+            CronTrigger(day_of_week="mon-fri", hour=16, minute=0, timezone="America/New_York"),
             args=["US", "CLOSE"],
             id="us_market_close",
             misfire_grace_time=3600
@@ -91,6 +136,15 @@ class TradingScheduler:
             id="market_opportunity_scanner"
         )
 
+        # 8. Trading 212 resting-order sync (no-op unless T212_RESTING_ORDERS is on)
+        self.scheduler.add_job(
+            self.monitor_resting_orders,
+            IntervalTrigger(minutes=1),
+            id="t212_order_sync",
+            max_instances=1,
+            coalesce=True
+        )
+
         self.scheduler.start()
         logger.info("Background Trading Scheduler initiated successfully.")
 
@@ -106,6 +160,13 @@ class TradingScheduler:
         automatically triggers the opening market session!
         """
         try:
+            if get_active_broker() is not live_broker or not live_broker.resting_orders_on():
+                # Resting T212 entry orders left from an earlier run are no longer synced: cancel them
+                try:
+                    await live_broker.cancel_resting_entries("resting orders off or live disarmed at startup")
+                except Exception as e:
+                    logger.error(f"Startup cancel of resting T212 orders failed: {e}")
+            await self.monitor_resting_orders()
             now = datetime.datetime.now(ZoneInfo(settings.TIMEZONE))
             today_date = now.date()
 
@@ -140,8 +201,8 @@ class TradingScheduler:
                         await self.run_market_session(market="EU", session="OPEN")
 
                 # 2. US Market Check
-                us_open = now.replace(hour=settings.US_OPEN_HOUR, minute=settings.US_OPEN_MINUTE, second=0, microsecond=0)
-                us_close = now.replace(hour=settings.US_CLOSE_HOUR, minute=settings.US_CLOSE_MINUTE, second=0, microsecond=0)
+                from src.data.market_hours import us_session_local
+                us_open, us_close = us_session_local(now)
                 if us_open <= now <= us_close:
                     res = await session.execute(
                         select(MarketDigest).where(
@@ -177,7 +238,8 @@ class TradingScheduler:
             logger.info(f"Triggering scheduled session: {market} {session}")
             
             # 1. Scan market universe (expanded candidate pool)
-            candidates = await asyncio.to_thread(market_scanner.scan_universe, market=market, limit=12)
+            extra = await market_scanner.load_watchlist_tickers()
+            candidates = await asyncio.to_thread(market_scanner.scan_universe, market=market, limit=12, extra_tickers=extra)
             summary = await paper_broker.get_portfolio_summary()
             reports = []
             executed_trades = []
@@ -186,15 +248,7 @@ class TradingScheduler:
             # Fetch existing open positions and pending triggers to enforce anti-overlap
             trigger_min_score = settings.TRIGGER_MIN_SCORE
             async with AsyncSessionLocal() as db_session:
-                pos_check = await db_session.execute(
-                    select(Position.ticker).where(Position.status == "OPEN")
-                )
-                open_tickers = set(t.upper() for t in pos_check.scalars().all())
-
-                trig_check = await db_session.execute(
-                    select(OrderTrigger.ticker).where(OrderTrigger.status == "PENDING")
-                )
-                pending_tickers = set(t.upper() for t in trig_check.scalars().all())
+                open_tickers, pending_tickers = await _tickers_in_use(db_session)
 
                 cfg_trig = await db_session.execute(
                     select(SystemConfig).where(SystemConfig.key == "TRIGGER_MIN_SCORE")
@@ -227,7 +281,7 @@ class TradingScheduler:
                     summary = await paper_broker.get_portfolio_summary()
                     report = await asyncio.wait_for(
                         investment_committee.evaluate_ticker(data, summary["total_value_eur"]),
-                        timeout=45.0
+                        timeout=300.0  # 3 sequential agy LLM calls x 90s worst case
                     )
 
                     # Persist AnalysisReport
@@ -256,62 +310,62 @@ class TradingScheduler:
                     elif ticker in pending_tickers:
                         logger.info(f"Skipping trigger for {ticker}: pending trigger already active (anti-overlap).")
                         report["status_type"] = "TRIGGER_PENDING"
-                    elif report["consensus_score"] >= trigger_min_score:
-                        # Automatically arm trigger for setups scoring >= 80
+                    elif self._should_arm_trigger(report, trigger_min_score):
+                        # Automatically arm trigger for approved buy setups scoring >= 80
                         curr_summary = await paper_broker.get_portfolio_summary()
                         available_cash = curr_summary.get("available_cash_eur", 0.0)
+                        regime_ok, regime_msg = await asyncio.to_thread(check_market_regime, ticker, data.get("currency"))
 
-                        if available_cash < 20.0:
+                        if not regime_ok:
+                            logger.info(f"Skipping trigger for {ticker}: {regime_msg}")
+                            report["status_type"] = "REGIME_FILTER"
+                        elif not self._is_affordable(data.get("price"), data.get("currency"), curr_summary):
+                            logger.info(f"Skipping trigger for {ticker}: one share is above free cash or the max position size.")
+                            report["status_type"] = "SHARE_TOO_EXPENSIVE"
+                        elif available_cash < 20.0:
                             logger.info(f"Skipping trigger for {ticker}: insufficient available cash (€{available_cash:.2f}).")
                             report["status_type"] = "INSUFFICIENT_CASH"
                         else:
-                            alloc_eur = calculate_position_allocation(
-                                available_cash=available_cash,
-                                current_positions_count=len(open_tickers),
-                                recommended_size_pct=report["risk"].get("recommended_size_pct"),
-                                full_budget_utilization=settings.FULL_BUDGET_UTILIZATION
-                            )
+                            # Same slot the dashboard shows once the trigger is pending
+                            alloc_eur = entry_allocation_from_summary(curr_summary, ticker, data["currency"])
 
-                            trigger_price = report.get("entry_trigger_price", data["price"])
-                            trigger_type = report.get("trigger_type", "LIMIT_PULLBACK")
+                            trigger_type, trigger_price, sl, tp = derive_trigger_levels(report, data["price"])
 
-                            # Enforce direction for anti-overlap
-                            if trigger_type == "LIMIT_PULLBACK" and trigger_price >= data["price"]:
-                                trigger_price = round(data["price"] * 0.985, 2)
-                            elif trigger_type == "BREAKOUT_BUY" and trigger_price <= data["price"]:
-                                trigger_price = round(data["price"] * 1.01, 2)
-
-                            sl = report["risk"].get("stop_loss_price")
-                            tp = report["risk"].get("take_profit_price")
-                            if sl and sl >= trigger_price:
-                                sl = round(trigger_price * 0.96, 2)
-                            if tp and tp <= trigger_price:
-                                tp = round(trigger_price * 1.06, 2)
-
-                            trig_res = await paper_broker.create_price_trigger(
-                                ticker=ticker,
-                                name=data.get("name", ticker),
-                                currency=data["currency"],
-                                trigger_type=trigger_type,
-                                target_price=trigger_price,
-                                current_price_at_creation=data["price"],
-                                stop_loss=sl,
-                                take_profit=tp,
-                                allocation_eur=alloc_eur,
-                                consensus_score=report["consensus_score"],
-                                ai_rationale=report.get("trigger_rationale", report["summary"])
-                            )
-                            if trig_res.get("success"):
-                                pending_tickers.add(ticker)
-                                report["status_type"] = "TRIGGER_ARMED"
-                                armed_triggers.append(trig_res)
-                                await telegram_bot.notify_trigger_armed(trig_res)
+                            if alloc_eur < 20.0:
+                                logger.info(f"Skipping trigger for {ticker}: no free position slot or unreserved cash left.")
+                                report["status_type"] = "INSUFFICIENT_CASH"
+                            elif not self._fits_whole_share(alloc_eur, trigger_price, data["currency"], sl,
+                                                            curr_summary.get("total_value_eur", 0.0), available_cash):
+                                logger.info(f"Skipping trigger for {ticker}: one share costs more than the €{alloc_eur:.2f} allocation after the risk cap.")
+                                report["status_type"] = "SHARE_TOO_EXPENSIVE"
                             else:
-                                logger.warning(f"Could not auto-arm trigger for {ticker}: {trig_res.get('message')}")
-                                report["status_type"] = "ON_RADAR"
+                                trig_res = await paper_broker.create_price_trigger(
+                                    ticker=ticker,
+                                    name=data.get("name", ticker),
+                                    currency=data["currency"],
+                                    trigger_type=trigger_type,
+                                    target_price=trigger_price,
+                                    current_price_at_creation=data["price"],
+                                    stop_loss=sl,
+                                    take_profit=tp,
+                                    allocation_eur=alloc_eur,
+                                    consensus_score=report["consensus_score"],
+                                    ai_rationale=report.get("trigger_rationale", report["summary"])
+                                )
+                                if trig_res.get("success"):
+                                    pending_tickers.add(ticker)
+                                    report["status_type"] = "TRIGGER_ARMED"
+                                    armed_triggers.append(trig_res)
+                                    await telegram_bot.notify_trigger_armed(trig_res)
+                                else:
+                                    logger.warning(f"Could not auto-arm trigger for {ticker}: {trig_res.get('message')}")
+                                    report["status_type"] = "ON_RADAR"
                     else:
                         report["status_type"] = "ON_RADAR"
 
+                    await shadow_portfolios.follow_report(
+                        report, data, followed_main=report.get("status_type") == "TRIGGER_ARMED"
+                    )
                     reports.append(report)
                 except asyncio.TimeoutError:
                     logger.warning(f"Timeout evaluating candidate {ticker} in {market} session, skipping.")
@@ -363,23 +417,124 @@ class TradingScheduler:
         except Exception as session_err:
             logger.error(f"Error in run_market_session({market}, {session}): {session_err}", exc_info=True)
 
-    async def monitor_open_positions(self):
+    async def monitor_open_positions(self) -> List[Dict[str, Any]]:
         """Monitors open positions for stop-loss and take-profit triggers."""
+        async with self._monitor_lock:
+            if settings.TRADING_MODE == "LIVE":
+                try:
+                    # Adopts fills the bot never booked and books exits the broker already made (stop/target legs)
+                    await paper_broker.sync_account_state()
+                except Exception as e:
+                    logger.error(f"Periodic broker adoption failed: {e}")
+            closed = await self._check_stops_and_targets()
+            await shadow_portfolios.check_exits()
+            await shadow_portfolios.record_snapshots(main_summary_fn=get_active_broker().get_portfolio_summary)
+            return closed
+
+    async def monitor_resting_orders(self) -> List[Dict[str, Any]]:
+        """Books fills of resting Trading 212 entry orders and re-checks stops. Returns booked fills."""
+        broker = get_active_broker()
+        if not getattr(broker, "resting_orders_on", lambda: False)():
+            return []
+        async with self._monitor_lock:
+            try:
+                try:
+                    await broker.sync_cash_balance()
+                except Exception as e:
+                    logger.error(f"Cash balance sync failed before resting order sync: {e}")
+                fills = await broker.sync_resting_entries()
+                for t in fills:
+                    await telegram_bot.notify_trigger_executed(t)
+                await self._check_stops_and_targets()
+                return fills
+            except Exception as e:
+                logger.error(f"Resting order sync failed: {e}", exc_info=True)
+                return []
+
+    async def _check_stops_and_targets(self) -> List[Dict[str, Any]]:
         try:
             triggered_sells = await paper_broker.check_stops_and_targets()
             if triggered_sells:
                 logger.info(f"Position monitor processed {len(triggered_sells)} exits: {[s.get('ticker') for s in triggered_sells]}")
+            return triggered_sells
         except Exception as e:
             logger.error(f"Error checking stops and targets: {e}")
+            return []
 
-    async def monitor_price_triggers(self):
-        """Monitors pending order triggers and executes automatic buys when price levels are hit."""
+    async def monitor_price_triggers(self) -> List[Dict[str, Any]]:
+        """Syncs the account balance, then executes automatic buys for pending triggers whose price levels are hit."""
+        async with self._monitor_lock:
+            try:
+                # Cash only: the full sync reconciles positions and is reserved for manual refreshes
+                await paper_broker.sync_cash_balance()
+            except Exception as e:
+                logger.error(f"Cash balance sync failed, continuing with last known balance: {e}")
+            executed = await self._check_price_triggers()
+            await shadow_portfolios.check_triggers()
+            return executed
+
+    async def _sync_account_balance(self) -> Dict[str, Any]:
+        """Runs the full broker sync (cash and positions) for a manual refresh."""
+        try:
+            return await paper_broker.sync_account_state()
+        except Exception as e:
+            logger.error(f"Account balance sync failed, continuing with last known balance: {e}")
+            return {}
+
+    async def _check_price_triggers(self) -> List[Dict[str, Any]]:
         try:
             executed_triggers = await paper_broker.check_and_execute_triggers()
             for t in executed_triggers:
                 await telegram_bot.notify_trigger_executed(t)
+            return executed_triggers
         except Exception as e:
             logger.error(f"Error checking and executing price triggers: {e}")
+            return []
+
+    @staticmethod
+    async def _pending_trigger_allocations(db_session) -> Dict[int, tuple]:
+        """Returns {trigger_id: (ticker, allocation_eur)} for all pending triggers."""
+        res = await db_session.execute(
+            select(OrderTrigger.id, OrderTrigger.ticker, OrderTrigger.allocation_eur).where(OrderTrigger.status == "PENDING")
+        )
+        return {tid: (ticker, alloc) for tid, ticker, alloc in res.all()}
+
+    async def refresh_market_data_now(self) -> Dict[str, Any]:
+        """
+        Manual market data pull: drops cached quotes for held positions and pending triggers,
+        syncs the account balance, resizes triggers, then runs the trigger and stop/target checks.
+        """
+        async with self._monitor_lock:
+            async with AsyncSessionLocal() as db_session:
+                pos_res = await db_session.execute(select(Position.ticker).where(Position.status == "OPEN"))
+                allocs_before = await self._pending_trigger_allocations(db_session)
+                tickers = set(pos_res.scalars().all()) | {ticker for ticker, _ in allocs_before.values()}
+
+            market_data_provider.invalidate(tickers)
+            get_active_broker()._last_pnl_refresh = 0.0
+
+            # The balance sync resizes triggers as part of its portfolio summary
+            summary = await self._sync_account_balance()
+            async with AsyncSessionLocal() as db_session:
+                allocs_after = await self._pending_trigger_allocations(db_session)
+            resized = [tid for tid, alloc in allocs_after.items() if allocs_before.get(tid) != alloc]
+            executed = await self._check_price_triggers()
+            closed = await self._check_stops_and_targets()
+            await shadow_portfolios.check_triggers()
+            await shadow_portfolios.check_exits()
+
+            logger.info(
+                f"Manual market data refresh: {len(tickers)} tickers, {len(resized)} triggers resized, "
+                f"{len(executed)} triggers executed, {len(closed)} positions closed."
+            )
+            return {
+                "success": True,
+                "tickers_refreshed": len(tickers),
+                "triggers_resized": len(resized),
+                "triggers_executed": len(executed),
+                "positions_closed": len(closed),
+                "cash_eur": summary.get("cash_eur"),
+            }
 
     async def scan_market_opportunities(self):
         """
@@ -410,15 +565,13 @@ class TradingScheduler:
                     except ValueError:
                         pass
 
-                pos_check = await db_session.execute(select(Position.ticker).where(Position.status == "OPEN"))
-                open_tickers = set(t.upper() for t in pos_check.scalars().all())
+                open_tickers, pending_tickers = await _tickers_in_use(db_session)
 
-                trig_check = await db_session.execute(select(OrderTrigger.ticker).where(OrderTrigger.status == "PENDING"))
-                pending_tickers = set(t.upper() for t in trig_check.scalars().all())
-
+            extra = await market_scanner.load_watchlist_tickers()
             for mkt in active_markets:
-                candidates = await asyncio.to_thread(market_scanner.scan_universe, market=mkt, limit=10)
+                candidates = await asyncio.to_thread(market_scanner.scan_universe, market=mkt, limit=10, extra_tickers=extra)
                 actionable = [c for c in candidates if c["ticker"].upper() not in open_tickers and c["ticker"].upper() not in pending_tickers]
+                # No pre-committee affordability filter: _fits_whole_share checks it after the verdict, and the shadow still sees it.
                 for cand in actionable[:3]:
                     tk = cand["ticker"].upper()
                     data = await asyncio.to_thread(market_data_provider.get_stock_data, tk)
@@ -431,46 +584,40 @@ class TradingScheduler:
                         break
 
                     report = await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
-                    if report["consensus_score"] >= trigger_min_score:
-                        alloc = calculate_position_allocation(
-                            available_cash=avail,
-                            current_positions_count=len(open_tickers),
-                            recommended_size_pct=report["risk"].get("recommended_size_pct"),
-                            full_budget_utilization=settings.FULL_BUDGET_UTILIZATION
-                        )
+                    armed = False
+                    if self._should_arm_trigger(report, trigger_min_score):
+                        regime_ok, regime_msg = await asyncio.to_thread(check_market_regime, tk, data.get("currency"))
+                        alloc = entry_allocation_from_summary(summary, tk, data["currency"])
+                        t_type, t_price, sl, tp = derive_trigger_levels(report, data["price"])
 
-                        t_price = report.get("entry_trigger_price", data["price"])
-                        t_type = report.get("trigger_type", "LIMIT_PULLBACK")
-
-                        if t_type == "LIMIT_PULLBACK" and t_price >= data["price"]:
-                            t_price = round(data["price"] * 0.985, 2)
-                        elif t_type == "BREAKOUT_BUY" and t_price <= data["price"]:
-                            t_price = round(data["price"] * 1.01, 2)
-
-                        sl = report["risk"].get("stop_loss_price")
-                        tp = report["risk"].get("take_profit_price")
-                        if sl and sl >= t_price:
-                            sl = round(t_price * 0.96, 2)
-                        if tp and tp <= t_price:
-                            tp = round(t_price * 1.06, 2)
-
-                        trig_res = await paper_broker.create_price_trigger(
-                            ticker=tk,
-                            name=data.get("name", tk),
-                            currency=data["currency"],
-                            trigger_type=t_type,
-                            target_price=t_price,
-                            current_price_at_creation=data["price"],
-                            stop_loss=sl,
-                            take_profit=tp,
-                            allocation_eur=alloc,
-                            consensus_score=report["consensus_score"],
-                            ai_rationale=report.get("trigger_rationale", report["summary"])
-                        )
-                        if trig_res.get("success"):
-                            pending_tickers.add(tk)
-                            logger.info(f"Opportunity Scanner auto-armed trigger #{trig_res['trigger_id']} for {tk} (Score {report['consensus_score']}/100 >= {trigger_min_score})")
-                            await telegram_bot.notify_trigger_armed(trig_res)
+                        # Skip arming, but still let the shadow portfolios see the verdict below
+                        if not regime_ok:
+                            logger.info(f"Opportunity Scanner skipped {tk}: {regime_msg}")
+                        elif alloc < 20.0:
+                            logger.info(f"Opportunity Scanner skipped {tk}: no free position slot or unreserved cash left.")
+                        elif not self._fits_whole_share(alloc, t_price, data["currency"], sl,
+                                                        summary.get("total_value_eur", 0.0), avail):
+                            logger.info(f"Opportunity Scanner skipped {tk}: one share costs more than the €{alloc:.2f} allocation after the risk cap.")
+                        else:
+                            trig_res = await paper_broker.create_price_trigger(
+                                ticker=tk,
+                                name=data.get("name", tk),
+                                currency=data["currency"],
+                                trigger_type=t_type,
+                                target_price=t_price,
+                                current_price_at_creation=data["price"],
+                                stop_loss=sl,
+                                take_profit=tp,
+                                allocation_eur=alloc,
+                                consensus_score=report["consensus_score"],
+                                ai_rationale=report.get("trigger_rationale", report["summary"])
+                            )
+                            if trig_res.get("success"):
+                                pending_tickers.add(tk)
+                                logger.info(f"Opportunity Scanner auto-armed trigger #{trig_res['trigger_id']} for {tk} (Score {report['consensus_score']}/100 >= {trigger_min_score})")
+                                await telegram_bot.notify_trigger_armed(trig_res)
+                                armed = True
+                    await shadow_portfolios.follow_report(report, data, followed_main=armed)
         except Exception as e:
             logger.error(f"Error in scan_market_opportunities: {e}")
 

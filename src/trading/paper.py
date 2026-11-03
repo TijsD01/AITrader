@@ -3,14 +3,14 @@ import datetime
 import asyncio
 import time
 from typing import Dict, Any, List, Optional
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, func
 
 from config.settings import settings
 from src.db.models import Position, Trade, PortfolioSnapshot, SystemConfig, OrderTrigger
 from src.db.session import AsyncSessionLocal
 from src.data.currency import currency_service
 from src.data.market import market_data_provider
-from src.trading.risk import risk_guardrail
+from src.trading.risk import risk_guardrail, get_effective_deployable_cash, allocate_pending_triggers, evaluate_trigger_condition, is_trigger_expired, validate_trigger_levels, compute_trailing_stop, check_market_regime, affordable_share_count, fit_allocation_to_share, new_entry_allocation, risk_capped_allocation, plan_pending_triggers
 from src.data.market_hours import check_market_hours
 from src.trading.base import BaseBroker
 
@@ -27,8 +27,26 @@ class PaperBroker(BaseBroker):
         await self.refresh_positions_pnl()
         return await self.get_portfolio_summary()
 
+    async def sync_cash_balance(self) -> None:
+        """Paper cash is tracked locally, so there is no broker balance to pull."""
+        return None
+
+    async def check_connection(self, force: bool = False) -> Dict[str, Any]:
+        """Returns simulated paper broker connection status."""
+        return {
+            "connected": True,
+            "broker": "PAPER",
+            "trading_mode": "PAPER",
+            "status": "ONLINE",
+            "message": "Paper Trading Simulation is active and ready.",
+            "latency_ms": 0.1,
+            "kill_switch_active": settings.KILL_SWITCH_ACTIVE,
+            "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
+        }
+
     async def get_portfolio_summary(self) -> Dict[str, Any]:
         await self.refresh_positions_pnl()
+        await self.adjust_triggers_dynamically()
         async with AsyncSessionLocal() as session:
             # Latest snapshot
             res = await session.execute(
@@ -46,17 +64,24 @@ class PaperBroker(BaseBroker):
             pending_alloc = sum(t.allocation_eur for t in pending_triggers)
 
             cash = snapshot.cash_eur if snapshot else settings.INITIAL_PAPER_CAPITAL
-            available_cash = max(0.0, cash - pending_alloc)
+            usable_cash, protected_reserve = get_effective_deployable_cash(cash, invested_eur=sum(p.cost_basis_eur or 0.0 for p in positions))
+            available_cash = max(0.0, usable_cash - pending_alloc)
             equity = sum(round(p.current_price_eur * p.shares, 2) for p in positions)
             total_val = round(cash + equity, 2)
             unrealized_pnl = sum(round(p.unrealized_pnl_eur, 2) for p in positions)
             initial_cap = settings.INITIAL_PAPER_CAPITAL
             total_return_pct = round(((total_val / initial_cap) - 1.0) * 100, 2)
+            total_gain = round(total_val - initial_cap, 2)
 
             return {
                 "trading_mode": "PAPER",
                 "base_currency": settings.BASE_CURRENCY,
                 "cash_eur": round(cash, 2),
+                "total_account_cash_eur": round(cash, 2),
+                "max_capital_usage_pct": round(settings.MAX_CAPITAL_USAGE_PCT, 1),
+                "max_deployable_capital_eur": settings.MAX_DEPLOYABLE_CAPITAL_EUR,
+                "usable_capital_eur": usable_cash,
+                "protected_reserve_eur": protected_reserve,
                 "available_cash_eur": round(available_cash, 2),
                 "reserved_triggers_eur": round(pending_alloc, 2),
                 "equity_eur": round(equity, 2),
@@ -66,6 +91,9 @@ class PaperBroker(BaseBroker):
                 "open_positions_count": len(positions),
                 "pending_triggers_count": len(pending_triggers),
                 "initial_capital_eur": initial_cap,
+                "net_deposits_eur": 0.0,
+                "invested_capital_eur": initial_cap,
+                "total_gain_eur": total_gain,
             }
 
     async def get_positions(self) -> List[Dict[str, Any]]:
@@ -87,6 +115,7 @@ class PaperBroker(BaseBroker):
                     "current_price_eur": round(p.current_price_eur, 2),
                     "cost_basis_eur": round(p.cost_basis_eur, 2),
                     "current_value_eur": round(p.current_price_eur * p.shares, 2),
+                    "fees_eur": round(p.fees_eur or 0.0, 2),
                     "unrealized_pnl_eur": round(p.unrealized_pnl_eur, 2),
                     "unrealized_pnl_pct": round(p.unrealized_pnl_pct, 2),
                     "opened_at": p.opened_at.strftime("%Y-%m-%d %H:%M") if p.opened_at else "",
@@ -132,6 +161,7 @@ class PaperBroker(BaseBroker):
             )
             snapshot = snap_res.scalars().first()
             cash_eur = snapshot.cash_eur if snapshot else settings.INITIAL_PAPER_CAPITAL
+            usable_cash, _ = get_effective_deployable_cash(cash_eur, invested_eur=sum(p.cost_basis_eur or 0.0 for p in open_positions))
             equity_eur = sum(p.current_price_eur * p.shares for p in open_positions)
             total_eur = cash_eur + equity_eur
 
@@ -142,7 +172,17 @@ class PaperBroker(BaseBroker):
             trig_res = await session.execute(trig_query)
             pending_triggers = trig_res.scalars().all()
             other_committed = sum(t.allocation_eur for t in pending_triggers)
-            available_cash = max(0.0, cash_eur - other_committed)
+            available_cash = max(0.0, usable_cash - other_committed)
+
+            # Automated buys risk the same share of their slot (or portfolio, per RISK_BUDGET_BASE) at their stop
+            if not is_manual:
+                allocation_eur = risk_capped_allocation(allocation_eur, price_native, stop_loss_native, total_eur, available_cash)
+
+            # A share that costs more than the (capped) budget still gets bought when it fits the free cash (same rule as plan_buy)
+            if settings.WHOLE_SHARES_ONLY:
+                allocation_eur, _ = fit_allocation_to_share(
+                    allocation_eur, price_native, currency, stop_loss_native, available_cash, total_eur, automated=False
+                )
 
             # Validate risk guardrails
             valid, msg = risk_guardrail.validate_buy_order(
@@ -153,7 +193,11 @@ class PaperBroker(BaseBroker):
                 allocation_eur=allocation_eur,
                 consensus_score=consensus_score,
                 auto_buy_enabled=auto_buy_enabled,
-                available_cash_eur=cash_eur if trigger_id else available_cash
+                available_cash_eur=cash_eur if trigger_id else available_cash,
+                price_native=price_native,
+                currency=currency,
+                stop_loss_native=stop_loss_native,
+                take_profit_native=take_profit_native
             )
             if not valid:
                 logger.info(f"Buy order blocked for {ticker}: {msg}")
@@ -168,20 +212,42 @@ class PaperBroker(BaseBroker):
             if price_eur <= 0:
                 return {"success": False, "message": f"Invalid price EUR for {ticker}."}
 
-            shares = round(allocation_eur / price_eur, 4)
+            if settings.WHOLE_SHARES_ONLY:
+                # The broker only fills whole shares: take the count closest to the allocation
+                shares = float(affordable_share_count(allocation_eur, price_eur, available_cash, total_eur))
+                if shares < 1:
+                    msg = f"One share of {ticker} costs €{price_eur:.2f}, more than the €{allocation_eur:.2f} allocation."
+                    logger.info(f"Buy order blocked: {msg}")
+                    return {"success": False, "unaffordable": True, "message": msg}
+            else:
+                shares = round(allocation_eur / price_eur, 4)
             actual_cost_eur = round(shares * price_eur, 2)
 
-            # Guard against rounding pushing cost above cash
-            if actual_cost_eur > cash_eur:
+            # Calculate estimated broker fee
+            from src.trading.fees import calculate_broker_fee
+            fee_info = calculate_broker_fee(
+                ticker=ticker,
+                shares=shares,
+                price_native=price_native,
+                currency=currency,
+                broker=settings.LIVE_BROKER,
+                order_action="BUY"
+            )
+            fee_eur = fee_info["fee_eur"]
+
+            # Guard against rounding pushing cost + fee above cash
+            if actual_cost_eur + fee_eur > cash_eur and cash_eur > fee_eur:
                 import math
-                shares = math.floor((cash_eur / price_eur) * 10000.0) / 10000.0
+                net_spend = cash_eur - fee_eur
+                step = 1.0 if settings.WHOLE_SHARES_ONLY else 10000.0
+                shares = math.floor((net_spend / price_eur) * step) / step
                 actual_cost_eur = round(shares * price_eur, 2)
 
             if shares <= 0 or actual_cost_eur <= 0:
                 return {"success": False, "message": f"Insufficient cash (€{cash_eur:.2f}) to purchase {ticker}."}
 
-            # Deduct cash strictly without negative balance
-            new_cash_eur = round(cash_eur - actual_cost_eur, 2)
+            # Deduct cash strictly without negative balance (cost + fee)
+            new_cash_eur = round(cash_eur - actual_cost_eur - fee_eur, 2)
             if new_cash_eur < 0.0:
                 return {"success": False, "message": f"Execution halted: cash balance cannot be negative (€{new_cash_eur:.2f})."}
 
@@ -199,6 +265,7 @@ class PaperBroker(BaseBroker):
                 entry_price_eur=price_eur,
                 current_price_eur=price_eur,
                 cost_basis_eur=actual_cost_eur,
+                fees_eur=fee_eur,
                 unrealized_pnl_eur=0.0,
                 unrealized_pnl_pct=0.0,
                 status="OPEN",
@@ -216,7 +283,8 @@ class PaperBroker(BaseBroker):
                 price_native=price_native,
                 price_eur=price_eur,
                 total_eur=actual_cost_eur,
-                rationale=rationale,
+                fee_eur=fee_eur,
+                rationale=f"{rationale} (Fee: €{fee_eur:.2f})",
                 consensus_score=consensus_score,
                 executed_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
             )
@@ -227,7 +295,7 @@ class PaperBroker(BaseBroker):
             new_snapshot = PortfolioSnapshot(
                 cash_eur=new_cash_eur,
                 equity_eur=new_equity_eur,
-                total_value_eur=new_cash_eur + new_equity_eur,
+                total_value_eur=round(new_cash_eur + new_equity_eur, 2),
                 open_positions_count=len(open_positions) + 1,
                 is_live=False,
                 timestamp=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
@@ -237,6 +305,23 @@ class PaperBroker(BaseBroker):
             await session.commit()
             self._last_pnl_refresh = 0.0
             logger.info(f"Executed BUY {shares} {ticker} @ {price_native} {currency} (Cost: €{actual_cost_eur})")
+            await self.adjust_triggers_dynamically()
+
+            # Record into TencentDB Agent Memory
+            try:
+                import asyncio
+                from src.memory.client import agent_memory_client
+                asyncio.create_task(agent_memory_client.record_trade_event(
+                    ticker=ticker,
+                    order_type="BUY",
+                    shares=shares,
+                    price=price_native,
+                    currency=currency,
+                    fee_eur=fee_eur,
+                    rationale=rationale
+                ))
+            except Exception:
+                pass
 
             return {
                 "success": True,
@@ -269,13 +354,29 @@ class PaperBroker(BaseBroker):
             exit_price_native = quote["price"] if quote else pos.current_price_native
             exit_price_eur = currency_service.to_eur(exit_price_native, pos.currency)
             proceeds_eur = round(pos.shares * exit_price_eur, 2)
-            realized_pnl_eur = round(proceeds_eur - pos.cost_basis_eur, 2)
-            realized_pnl_pct = round(((exit_price_eur / pos.entry_price_eur) - 1.0) * 100, 2)
+
+            # Calculate exit broker fee
+            from src.trading.fees import calculate_broker_fee
+            exit_fee_info = calculate_broker_fee(
+                ticker=ticker,
+                shares=pos.shares,
+                price_native=exit_price_native,
+                currency=pos.currency,
+                broker=settings.LIVE_BROKER,
+                order_action="SELL"
+            )
+            exit_fee_eur = exit_fee_info["fee_eur"]
+            total_fees_eur = round((pos.fees_eur or 0.0) + exit_fee_eur, 2)
+
+            # Net realized PnL deducting both buy and sell commissions
+            realized_pnl_eur = round(proceeds_eur - pos.cost_basis_eur - total_fees_eur, 2)
+            realized_pnl_pct = round(((realized_pnl_eur / pos.cost_basis_eur)) * 100, 2) if pos.cost_basis_eur > 0 else 0.0
 
             # Mark position closed
             pos.status = "CLOSED"
             pos.current_price_native = exit_price_native
             pos.current_price_eur = exit_price_eur
+            pos.fees_eur = total_fees_eur
 
             # Record Trade
             trade = Trade(
@@ -287,20 +388,22 @@ class PaperBroker(BaseBroker):
                 price_native=exit_price_native,
                 price_eur=exit_price_eur,
                 total_eur=proceeds_eur,
+                fee_eur=exit_fee_eur,
                 realized_pnl_eur=realized_pnl_eur,
                 realized_pnl_pct=realized_pnl_pct,
-                rationale=reason,
+                rationale=f"{reason} (Total Fees: €{total_fees_eur:.2f})",
                 is_live=False,
                 executed_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
             )
             session.add(trade)
 
-            # Update cash and snapshot
+            # Update cash and snapshot (proceeds minus exit fee)
             snap_res = await session.execute(
                 select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == False).order_by(desc(PortfolioSnapshot.timestamp))
             )
             snapshot = snap_res.scalars().first()
-            cash_eur = (snapshot.cash_eur if snapshot else settings.INITIAL_PAPER_CAPITAL) + proceeds_eur
+            net_proceeds_eur = round(proceeds_eur - exit_fee_eur, 2)
+            cash_eur = (snapshot.cash_eur if snapshot else settings.INITIAL_PAPER_CAPITAL) + net_proceeds_eur
 
             # Remaining active positions
             remaining_res = await session.execute(
@@ -312,7 +415,7 @@ class PaperBroker(BaseBroker):
             new_snapshot = PortfolioSnapshot(
                 cash_eur=cash_eur,
                 equity_eur=new_equity_eur,
-                total_value_eur=cash_eur + new_equity_eur,
+                total_value_eur=round(cash_eur + new_equity_eur, 2),
                 open_positions_count=len(remaining),
                 is_live=False,
                 timestamp=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
@@ -322,6 +425,24 @@ class PaperBroker(BaseBroker):
             await session.commit()
             self._last_pnl_refresh = 0.0
             logger.info(f"Executed SELL {pos.shares} {ticker} @ {exit_price_native} {pos.currency} | PnL: €{realized_pnl_eur} ({realized_pnl_pct}%)")
+            await self.adjust_triggers_dynamically()
+
+            # Record into TencentDB Agent Memory
+            try:
+                import asyncio
+                from src.memory.client import agent_memory_client
+                asyncio.create_task(agent_memory_client.record_trade_event(
+                    ticker=ticker,
+                    order_type="SELL",
+                    shares=pos.shares,
+                    price=exit_price_native,
+                    currency=pos.currency,
+                    pnl_eur=realized_pnl_eur,
+                    fee_eur=exit_fee_eur,
+                    rationale=reason
+                ))
+            except Exception:
+                pass
 
             # Autonomous Post-Mortem & Parameter Calibration
             lesson_text = None
@@ -330,7 +451,7 @@ class PaperBroker(BaseBroker):
                 from src.trading.learner import trade_learner
                 post_mortem = await trade_learner.conduct_trade_post_mortem(trade.id)
                 lesson_text = post_mortem.get("lesson") if post_mortem else None
-                calib = await trade_learner.calibrate_internal_parameters(trade.id)
+                calib = await trade_learner.calibrate_internal_parameters(trade.id, automatic=True)
                 adjustments = calib.get("adjustments", []) if calib else []
             except Exception as learn_err:
                 logger.error(f"Error in trade learning post-mortem/calibration for trade #{trade.id}: {learn_err}")
@@ -395,11 +516,14 @@ class PaperBroker(BaseBroker):
                         p.current_price_eur = currency_service.to_eur(curr_price, p.currency)
                         if curr_price > p.highest_price_native:
                             p.highest_price_native = curr_price
-                            # Dynamic Trailing Stop: If price moves up past breakeven_trigger_pct, ratchet up stop loss to breakeven or higher
-                            gain_pct = (curr_price / p.entry_price_native) - 1.0
-                            if gain_pct >= breakeven_trigger_pct and p.stop_loss_native < p.entry_price_native:
-                                p.stop_loss_native = round(p.entry_price_native * 1.01, 2)  # Secure breakeven + 1%
-                                logger.info(f"Trailing Stop ratcheted to breakeven for {p.ticker} at {p.stop_loss_native} (+{gain_pct*100:.1f}%)")
+                            # Trailing stop: past breakeven_trigger_pct the stop moves to breakeven + 1%, then trails by N x ATR
+                            new_stop = compute_trailing_stop(
+                                p.entry_price_native, p.stop_loss_native, p.highest_price_native,
+                                data.get("technicals", {}).get("atr14"), breakeven_trigger_pct
+                            )
+                            if new_stop is not None and new_stop != p.stop_loss_native:
+                                p.stop_loss_native = new_stop
+                                logger.info(f"Trailing stop raised for {p.ticker} to {new_stop} (high {p.highest_price_native})")
                         
                         # Calculate unrealized PnL
                         curr_val_eur = p.current_price_eur * p.shares
@@ -479,32 +603,9 @@ class PaperBroker(BaseBroker):
             sl = round(stop_loss, 2) if stop_loss else None
             tp = round(take_profit, 2) if take_profit else None
 
-            if trigger_type == "LIMIT_PULLBACK" and target_price >= current_price_at_creation:
-                return {
-                    "success": False,
-                    "message": f"Trigger overlap error: LIMIT_PULLBACK target price ({target_price}) must be below current price ({current_price_at_creation})."
-                }
-            elif trigger_type == "BREAKOUT_BUY" and target_price <= current_price_at_creation:
-                return {
-                    "success": False,
-                    "message": f"Trigger overlap error: BREAKOUT_BUY target price ({target_price}) must be above current price ({current_price_at_creation})."
-                }
-
-            if sl is not None and sl >= target_price:
-                return {
-                    "success": False,
-                    "message": f"Trigger overlap error: Stop Loss ({sl}) must be below target price ({target_price})."
-                }
-            if tp is not None and tp <= target_price:
-                return {
-                    "success": False,
-                    "message": f"Trigger overlap error: Take Profit ({tp}) must be above target price ({target_price})."
-                }
-            if sl is not None and tp is not None and sl >= tp:
-                return {
-                    "success": False,
-                    "message": f"Trigger overlap error: Stop Loss ({sl}) must be below Take Profit ({tp})."
-                }
+            level_error = validate_trigger_levels(trigger_type, target_price, current_price_at_creation, sl, tp)
+            if level_error:
+                return {"success": False, "message": level_error}
 
             # 4. Anti-Overlap Check: Capital overlap (Cannot commit more cash than you have, no budget)
             snap_res = await session.execute(
@@ -512,11 +613,60 @@ class PaperBroker(BaseBroker):
             )
             snapshot = snap_res.scalars().first()
             cash_eur = snapshot.cash_eur if snapshot else settings.INITIAL_PAPER_CAPITAL
+            invested = (await session.execute(
+                select(func.coalesce(func.sum(Position.cost_basis_eur), 0.0)).where(Position.status == "OPEN", Position.is_live == False)
+            )).scalar()
+            usable_cash, _ = get_effective_deployable_cash(cash_eur, invested_eur=invested)
 
             pending_res = await session.execute(select(OrderTrigger).where(OrderTrigger.status == "PENDING", OrderTrigger.is_live == False))
             pending_triggers = pending_res.scalars().all()
             pending_alloc = sum(t.allocation_eur for t in pending_triggers)
-            available_cash = round(max(0.0, cash_eur - pending_alloc), 2)
+            available_cash = round(max(0.0, usable_cash - pending_alloc), 2)
+
+            if allocation_eur is not None and allocation_eur > available_cash:
+                return {
+                    "success": False,
+                    "message": f"Cannot arm trigger: insufficient available cash (€{available_cash:.2f} available after €{pending_alloc:.2f} reserved for other triggers, required €{allocation_eur:.2f})."
+                }
+
+            open_res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == False))
+            open_now = open_res.scalars().all()
+
+            # Without an explicit allocation, take the slot the dynamic re-allocation would give it
+            if allocation_eur is None or allocation_eur <= 0:
+                calc_alloc = new_entry_allocation(usable_cash, pending_alloc, len(open_now), ticker=ticker, currency=currency)
+                if calc_alloc > 0:
+                    allocation_eur = calc_alloc
+
+            # Factor in broker fees & economic viability
+            from src.trading.fees import evaluate_trade_economic_viability
+            viability = evaluate_trade_economic_viability(
+                ticker=ticker,
+                allocation_eur=allocation_eur,
+                price_native=target_price,
+                currency=currency,
+                stop_loss_native=sl,
+                take_profit_native=tp,
+                broker="paper",
+                max_fee_drag_pct=getattr(settings, "MAX_FEE_DRAG_PCT", 3.8),
+                max_profit_erosion_pct=getattr(settings, "MAX_PROFIT_EROSION_PCT", 48.0)
+            )
+            if not viability["viable"]:
+                min_v = viability.get("min_viable_allocation_eur", 50.0)
+                if allocation_eur < min_v <= available_cash:
+                    allocation_eur = min_v
+                else:
+                    return {
+                        "success": False,
+                        "message": f"Cannot arm trigger: {viability['reason']}"
+                    }
+
+            # A share that costs more than the slot is reserved at its cost, so pending triggers never over-commit cash
+            if settings.WHOLE_SHARES_ONLY:
+                portfolio_eur = cash_eur + sum(p.current_price_eur * p.shares for p in open_now)
+                allocation_eur, _ = fit_allocation_to_share(
+                    allocation_eur, target_price, currency, sl, available_cash, portfolio_eur
+                )
 
             if allocation_eur > available_cash:
                 return {
@@ -549,8 +699,23 @@ class PaperBroker(BaseBroker):
             await session.commit()
             await session.refresh(trigger)
 
+            # Record into TencentDB Agent Memory
+            try:
+                import asyncio
+                from src.memory.client import agent_memory_client
+                asyncio.create_task(agent_memory_client.record_trigger_event(
+                    trigger_id=trigger.id,
+                    ticker=trigger.ticker,
+                    trigger_type=trigger.trigger_type,
+                    target_price=trigger.target_price,
+                    allocation_eur=trigger.allocation_eur,
+                    rationale=ai_rationale or ""
+                ))
+            except Exception:
+                pass
+
             logger.info(f"Created {trigger_type} trigger for {ticker} at {target_price} {currency} (ID: {trigger.id})")
-            return {
+            result = {
                 "success": True,
                 "trigger_id": trigger.id,
                 "ticker": trigger.ticker,
@@ -558,9 +723,48 @@ class PaperBroker(BaseBroker):
                 "trigger_type": trigger.trigger_type,
                 "target_price": trigger.target_price,
                 "current_price": trigger.current_price_at_creation,
+                "stop_loss": trigger.stop_loss,
+                "take_profit": trigger.take_profit,
                 "allocation_eur": trigger.allocation_eur,
                 "message": f"AI Trigger armed for {trigger.ticker}: {trigger.trigger_type} @ {trigger.target_price} {trigger.currency}."
             }
+
+        # Report the allocation the dashboard and the buy will use (after the dynamic re-allocation), not the amount asked for
+        result.update(await self.get_trigger_plan(result["trigger_id"]))
+        return result
+
+    async def _pending_trigger_plans(self, session) -> Dict[int, Dict[str, Any]]:
+        """Planned budget and share count per pending paper trigger, sized like execute_buy at the limit price."""
+        trig_res = await session.execute(select(OrderTrigger).where(OrderTrigger.status == "PENDING", OrderTrigger.is_live == False))
+        pending = trig_res.scalars().all()
+        if not pending:
+            return {}
+        pos_res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == False))
+        positions = pos_res.scalars().all()
+        snap_res = await session.execute(
+            select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == False).order_by(desc(PortfolioSnapshot.timestamp))
+        )
+        snapshot = snap_res.scalars().first()
+        cash_eur = snapshot.cash_eur if snapshot else settings.INITIAL_PAPER_CAPITAL
+        usable_cash, _ = get_effective_deployable_cash(cash_eur, invested_eur=sum(p.cost_basis_eur or 0.0 for p in positions))
+        portfolio_value = cash_eur + sum(p.current_price_eur * p.shares for p in positions)
+        # Same ranking adjust_triggers_dynamically applies before the dashboard shows or a trigger fires
+        allocations = allocate_pending_triggers(usable_cash, len(positions), pending, portfolio_value_eur=portfolio_value)
+        return plan_pending_triggers(pending, usable_cash, portfolio_value, allocations)
+
+    async def get_trigger_plan(self, trigger_id: int) -> Dict[str, Any]:
+        """Allocation and planned buy of one pending trigger, as the dashboard shows it."""
+        async with AsyncSessionLocal() as session:
+            plan = (await self._pending_trigger_plans(session)).get(trigger_id)
+        if not plan:
+            return {}
+        return {
+            "allocation_eur": plan["allocation_eur"],
+            "planned_shares": plan["shares"],
+            "planned_cost_eur": plan["cost_eur"],
+            "planned_budget_eur": plan["budget_eur"],
+            "risk_capped": plan["risk_capped"],
+        }
 
     async def cancel_price_trigger(self, trigger_id: int) -> Dict[str, Any]:
         """Cancels a pending order trigger."""
@@ -577,27 +781,74 @@ class PaperBroker(BaseBroker):
             logger.info(f"Cancelled trigger #{trigger_id} for {trigger.ticker}")
             return {"success": True, "message": f"Trigger #{trigger_id} for {trigger.ticker} cancelled."}
 
+    async def adjust_triggers_dynamically(self) -> List[Dict[str, Any]]:
+        """
+        Dynamically adjusts allocation_eur on all pending paper triggers based on
+        current cash balance, open positions, and MAX_POSITIONS settings.
+        Highest consensus scores are funded first; triggers left without cash or a
+        free position slot are set to €0 and stay armed until funding frees up.
+        """
+        async with AsyncSessionLocal() as session:
+            trig_res = await session.execute(
+                select(OrderTrigger).where(OrderTrigger.status == "PENDING", OrderTrigger.is_live == False)
+            )
+            pending = trig_res.scalars().all()
+            if not pending:
+                return []
+
+            pos_res = await session.execute(
+                select(Position).where(Position.status == "OPEN", Position.is_live == False)
+            )
+            open_positions = pos_res.scalars().all()
+            current_open = len(open_positions)
+
+            snap_res = await session.execute(
+                select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == False).order_by(desc(PortfolioSnapshot.timestamp))
+            )
+            snapshot = snap_res.scalars().first()
+            cash_eur = snapshot.cash_eur if snapshot else settings.INITIAL_PAPER_CAPITAL
+            usable_cash, _ = get_effective_deployable_cash(cash_eur, invested_eur=sum(p.cost_basis_eur or 0.0 for p in open_positions))
+
+            allocations = allocate_pending_triggers(
+                usable_cash, current_open, pending,
+                portfolio_value_eur=cash_eur + sum(p.current_price_eur * p.shares for p in open_positions)
+            )
+
+            adjusted = []
+            for t in pending:
+                target_alloc = allocations[t.id]
+                if round(t.allocation_eur, 2) != target_alloc:
+                    t.allocation_eur = target_alloc
+                    adjusted.append({"id": t.id, "ticker": t.ticker, "allocation_eur": target_alloc})
+
+            if adjusted:
+                await session.commit()
+                logger.info(f"Dynamically adjusted {len(adjusted)} paper triggers (cash €{usable_cash:.2f}, {current_open}/{settings.MAX_POSITIONS} slots)")
+
+            return adjusted
+
     async def get_triggers(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
         """Retrieves order triggers with live distance % calculations."""
+        await self.adjust_triggers_dynamically()
         async with AsyncSessionLocal() as session:
             query = select(OrderTrigger).where(OrderTrigger.is_live == False).order_by(desc(OrderTrigger.created_at))
             if status:
                 query = query.where(OrderTrigger.status == status.upper())
             res = await session.execute(query)
             triggers = res.scalars().all()
+            plans = await self._pending_trigger_plans(session)
 
             results = []
             quote_cache = {}
             for t in triggers:
-                is_open, _ = check_market_hours(t.ticker)
-                if not is_open:
-                    curr_price = t.current_price_at_creation
-                else:
+                curr_price = None
+                if t.status == "PENDING":
+                    # Last known quote, also while the market is closed: the price at creation is stale
                     if t.ticker not in quote_cache:
                         quote_cache[t.ticker] = await asyncio.to_thread(market_data_provider.get_stock_data, t.ticker)
                     latest_data = quote_cache[t.ticker]
-                    curr_price = (latest_data["price"] if latest_data else t.current_price_at_creation) or t.target_price
-                
+                    curr_price = latest_data["price"] if latest_data else None
+
                 curr_price = curr_price or t.current_price_at_creation or t.target_price
                 # Distance % to trigger: ((target_price / curr_price) - 1) * 100
                 dist_pct = round(((t.target_price / curr_price) - 1.0) * 100, 2) if (curr_price and curr_price > 0) else 0.0
@@ -615,6 +866,9 @@ class PaperBroker(BaseBroker):
                     "stop_loss": round(t.stop_loss, 2) if t.stop_loss else None,
                     "take_profit": round(t.take_profit, 2) if t.take_profit else None,
                     "allocation_eur": round(t.allocation_eur, 2),
+                    "planned_shares": plans[t.id]["shares"] if t.id in plans else None,
+                    "planned_cost_eur": plans[t.id]["cost_eur"] if t.id in plans else None,
+                    "risk_capped": plans[t.id]["risk_capped"] if t.id in plans else False,
                     "consensus_score": t.consensus_score,
                     "ai_rationale": t.ai_rationale,
                     "status": t.status,
@@ -628,6 +882,7 @@ class PaperBroker(BaseBroker):
         Scans all pending triggers, verifies market hours,
         evaluates price condition, and executes automated buys.
         """
+        await self.adjust_triggers_dynamically()
         async with AsyncSessionLocal() as session:
             res = await session.execute(select(OrderTrigger).where(OrderTrigger.status == "PENDING", OrderTrigger.is_live == False))
             pending = res.scalars().all()
@@ -636,6 +891,16 @@ class PaperBroker(BaseBroker):
 
             executed = []
             for t in pending:
+                if is_trigger_expired(t.created_at):
+                    logger.info(f"Trigger #{t.id} for {t.ticker} expired (older than {settings.TRIGGER_EXPIRY_DAYS} days).")
+                    t.status = "EXPIRED"
+                    await session.commit()
+                    continue
+
+                # 0. Unfunded triggers (outranked for cash or slots) wait until funding frees up
+                if t.allocation_eur <= 0:
+                    continue
+
                 # 1. Market hours check (STRICT: no trades when market is closed)
                 is_open, open_msg = check_market_hours(t.ticker)
                 if not is_open:
@@ -648,14 +913,22 @@ class PaperBroker(BaseBroker):
                     continue
                 curr_price = data["price"]
 
-                # 3. Check trigger condition
-                condition_met = False
-                if t.trigger_type == "LIMIT_PULLBACK" and curr_price <= t.target_price:
-                    condition_met = True
-                elif t.trigger_type == "BREAKOUT_BUY" and curr_price >= t.target_price:
-                    condition_met = True
+                # Check trigger condition; cancel setups the price has already run through
+                condition_met, invalid_reason = evaluate_trigger_condition(
+                    t.trigger_type, t.target_price, curr_price, t.stop_loss, t.take_profit
+                )
+                if invalid_reason:
+                    logger.info(f"Cancelling trigger #{t.id} for {t.ticker}: {invalid_reason}")
+                    t.status = "CANCELLED"
+                    await session.commit()
+                    continue
 
                 if condition_met:
+                    # Market regime filter: the trigger stays armed (and expires as usual) while the index is in a downtrend
+                    regime_ok, regime_msg = await asyncio.to_thread(check_market_regime, t.ticker, t.currency)
+                    if not regime_ok:
+                        logger.info(f"Trigger #{t.id} for {t.ticker} held back: {regime_msg}")
+                        continue
                     logger.info(f"🎯 AI Trigger hit for {t.ticker}: {t.trigger_type} at {curr_price} (Target: {t.target_price})")
                     trade_res = await self.execute_buy(
                         ticker=t.ticker,
@@ -667,7 +940,7 @@ class PaperBroker(BaseBroker):
                         allocation_eur=t.allocation_eur,
                         consensus_score=t.consensus_score or 75,
                         rationale=f"AI Trigger #{t.id} Hit ({t.trigger_type} @ {t.target_price}): {t.ai_rationale}",
-                        is_manual=True,
+                        is_manual=False,
                         trigger_id=t.id
                     )
                     if trade_res.get("success"):
@@ -682,6 +955,11 @@ class PaperBroker(BaseBroker):
                         trade_res["currency"] = t.currency
                         trade_res["ai_rationale"] = t.ai_rationale
                         executed.append(trade_res)
+                    elif trade_res.get("unaffordable"):
+                        # Not even one whole share fits: release the reserved cash for other triggers
+                        logger.info(f"Cancelling trigger #{t.id} for {t.ticker}: {trade_res.get('message')}")
+                        t.status = "CANCELLED"
+                        await session.commit()
                     else:
                         logger.warning(f"Trigger #{t.id} buy order blocked for {t.ticker}: {trade_res.get('message')}")
 

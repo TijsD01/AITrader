@@ -1,15 +1,22 @@
 import asyncio
 import logging
-from typing import Dict, Any, List, Optional
+import time
+import uuid
+from typing import Dict, Any, List, Optional, Tuple
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, func
 
-from config.settings import settings
-from src.db.session import AsyncSessionLocal
+from config.settings import settings, update_env_file
+from src.db.session import AsyncSessionLocal, set_kill_switch
 from src.db.models import Position, Trade, PortfolioSnapshot, AnalysisReport, WatchlistItem, SystemConfig, MarketDigest, TradeLesson
-from src.trading.broker import active_broker as paper_broker, get_active_broker, active_broker, live_broker
-from src.trading.risk import calculate_position_allocation
+from src.trading.broker import active_broker as paper_broker, get_active_broker, active_broker, live_broker, check_broker_status
+from src.trading.risk import derive_trigger_levels, entry_allocation_from_summary
+from src.trading.trigger_gate import (
+    TriggerGateResult, normalize_ticker, invalid_ticker_result, precheck_manual_trigger,
+    get_trigger_min_score, evaluate_manual_trigger
+)
 from src.data.market import market_data_provider
 from src.screener.scanner import market_scanner
 from src.agents.committee import investment_committee
@@ -38,32 +45,56 @@ class WatchlistRequest(BaseModel):
 
 class CreateTriggerRequest(BaseModel):
     ticker: str
-    trigger_type: Optional[str] = "LIMIT_PULLBACK"
+    trigger_type: Optional[str] = None  # None = use the committee's trigger type
     target_price: Optional[float] = None
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
     allocation_eur: Optional[float] = None
     ai_rationale: Optional[str] = None
+    force: bool = False  # arm despite a soft block (HOLD verdict, low score); hard blocks stay blocked
 
 class CreateTriggerFromAIRequest(BaseModel):
     ticker: str
     allocation_eur: Optional[float] = None
+    force: bool = False  # arm despite a soft block (HOLD verdict, low score); hard blocks stay blocked
+    report_job_id: Optional[str] = None  # reuse the committee report of this recent arm or analyze job instead of re-running it
 
 class SettingsUpdateRequest(BaseModel):
     auto_buy_enabled: Optional[bool] = None
     min_consensus_score: Optional[int] = None
     trigger_min_score: Optional[int] = None
     position_size_pct: Optional[float] = None
+    max_positions: Optional[int] = None
     enforce_market_hours: Optional[bool] = None
     gemini_api_key: Optional[str] = None
     telegram_bot_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
     trading_mode: Optional[str] = None
     live_trading_enabled: Optional[bool] = None
+    max_capital_usage_pct: Optional[float] = None
+    max_deployable_capital_eur: Optional[float] = None
+    clear_max_deployable_capital: Optional[bool] = None
+    max_fee_drag_pct: Optional[float] = None
 
 @router.get("/api/market-status")
 async def get_market_status():
     return get_market_statuses()
+
+@router.get("/api/broker/status")
+async def get_broker_status(probe_live: bool = False, force: bool = False):
+    """Returns active broker connection status, latency, and diagnostics."""
+    return await check_broker_status(force=force, probe_live=probe_live)
+
+@router.post("/api/broker/ping")
+async def ping_broker(probe_live: bool = False):
+    """Forces an immediate connectivity ping to the broker."""
+    return await check_broker_status(force=True, probe_live=probe_live)
+
+@router.post("/api/broker/reconnect")
+async def reconnect_broker():
+    """Forces an immediate disconnection and fresh reconnect to the live broker."""
+    return await live_broker.reconnect()
+
 
 # 1. Portfolio & Metrics
 @router.get("/api/portfolio")
@@ -81,7 +112,7 @@ async def get_positions():
 @router.get("/api/trades")
 async def get_trades(limit: int = 30):
     async with AsyncSessionLocal() as session:
-        is_live = settings.TRADING_MODE.upper() == "LIVE" and settings.LIVE_TRADING_ENABLED and not settings.KILL_SWITCH_ACTIVE
+        is_live = settings.TRADING_MODE.upper() == "LIVE" and settings.LIVE_TRADING_ENABLED
         res = await session.execute(
             select(Trade).where(Trade.is_live == is_live).order_by(desc(Trade.executed_at)).limit(limit)
         )
@@ -97,6 +128,7 @@ async def get_trades(limit: int = 30):
                 "price_eur": round(t.price_eur, 2),
                 "currency": t.currency,
                 "total_eur": round(t.total_eur, 2),
+                "fee_eur": round(t.fee_eur, 2) if hasattr(t, "fee_eur") and t.fee_eur is not None else 0.0,
                 "realized_pnl_eur": round(t.realized_pnl_eur, 2) if t.realized_pnl_eur is not None else None,
                 "realized_pnl_pct": round(t.realized_pnl_pct, 2) if t.realized_pnl_pct is not None else None,
                 "consensus_score": t.consensus_score,
@@ -110,7 +142,14 @@ async def get_trades(limit: int = 30):
 @router.get("/api/recommendations")
 async def get_recommendations(limit: int = 15):
     async with AsyncSessionLocal() as session:
-        res = await session.execute(select(AnalysisReport).order_by(desc(AnalysisReport.created_at)).limit(limit))
+        # One card per ticker: only the newest report for each stock
+        latest_ids = select(func.max(AnalysisReport.id)).group_by(AnalysisReport.ticker)
+        res = await session.execute(
+            select(AnalysisReport)
+            .where(AnalysisReport.id.in_(latest_ids))
+            .order_by(desc(AnalysisReport.created_at), desc(AnalysisReport.id))
+            .limit(limit)
+        )
         reports = res.scalars().all()
         return [
             {
@@ -131,9 +170,45 @@ async def get_recommendations(limit: int = 15):
             for r in reports
         ]
 
+# Committee runs take minutes, so they run as background jobs that survive the client disconnecting.
+# shortcut: in-memory only, a server restart loses jobs (the client gets a 404), upgrade to a DB table if that bites.
+_jobs: Dict[str, Dict[str, Any]] = {}
+_JOB_TTL_SECONDS = 3600
+_REPORT_REUSE_SECONDS = 900  # older verdicts are re-run before arming
+
+async def _run_job(job: Dict[str, Any], coro) -> None:
+    try:
+        job["body"], job["status_code"] = await coro, 200
+    except HTTPException as e:
+        job["status_code"], job["body"] = e.status_code, {"detail": e.detail}
+    except Exception:
+        logging.getLogger(__name__).exception("Background job %s (%s) failed", job["id"], job["kind"])
+        job["status_code"], job["body"] = 500, {"detail": "Internal error while running the committee."}
+    job["status"], job["finished_at"] = "done", time.time()
+
+def _start_job(kind: str, ticker: str, make_coro) -> JSONResponse:
+    now = time.time()
+    for jid in [j for j, v in _jobs.items() if v["finished_at"] and now - v["finished_at"] > _JOB_TTL_SECONDS]:
+        del _jobs[jid]
+    job = {"id": uuid.uuid4().hex, "kind": kind, "ticker": ticker, "status": "running", "status_code": None,
+           "body": None, "report": None, "finished_at": None}
+    _jobs[job["id"]] = job
+    job["task"] = asyncio.create_task(_run_job(job, make_coro(job)))
+    return JSONResponse({"job_id": job["id"]}, status_code=202)
+
+@router.get("/api/jobs/{job_id}")
+async def get_job(job_id: str):
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found (the server may have restarted).")
+    return {k: job[k] for k in ("status", "kind", "ticker", "status_code", "body")}
+
 # 3. On-Demand Analysis
 @router.post("/api/analyze")
 async def analyze_ticker(req: AnalyzeRequest):
+    return _start_job("analyze", req.ticker.strip().upper(), lambda job: _analyze(req, job))
+
+async def _analyze(req: AnalyzeRequest, job: Dict[str, Any]):
     ticker = req.ticker.strip().upper()
     data = await asyncio.to_thread(market_data_provider.get_stock_data, ticker)
     if not data:
@@ -141,6 +216,7 @@ async def analyze_ticker(req: AnalyzeRequest):
 
     summary = await paper_broker.get_portfolio_summary()
     report = await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
+    job["report"] = report  # lets "Arm trigger" on the debate card skip a second committee run
 
     # Persist report
     async with AsyncSessionLocal() as session:
@@ -161,22 +237,24 @@ async def analyze_ticker(req: AnalyzeRequest):
         session.add(entry)
         await session.commit()
 
+    from src.trading.shadow import shadow_portfolios
+    await shadow_portfolios.follow_report(report, data, followed_main=False)
     return report
 
 # 4. Market Screener
 @router.get("/api/screener")
 async def get_screener_candidates(market: str = "ALL"):
-    return await asyncio.to_thread(market_scanner.scan_universe, market=market, limit=12)
+    return await asyncio.to_thread(market_scanner.scan_universe, market=market, limit=12, extra_tickers=await market_scanner.load_watchlist_tickers())
 
 # 5. Trading Actions
-def _calculate_safe_allocation(available_cash: float, requested_alloc: Optional[float], risk_rep: Dict[str, Any], current_positions_count: int = 0) -> float:
-    return calculate_position_allocation(
-        available_cash=available_cash,
-        current_positions_count=current_positions_count,
-        requested_alloc=requested_alloc,
-        recommended_size_pct=risk_rep.get("recommended_size_pct"),
-        full_budget_utilization=settings.FULL_BUDGET_UTILIZATION
-    )
+def _calculate_safe_allocation(
+    summary: Dict[str, Any],
+    requested_alloc: Optional[float],
+    ticker: Optional[str] = None,
+    currency: Optional[str] = None
+) -> float:
+    # The slot every pending trigger gets, so this matches the dashboard and the order
+    return entry_allocation_from_summary(summary, ticker, currency, requested_alloc=requested_alloc)
 
 @router.post("/api/trade/buy")
 async def manual_buy(req: BuyRequest):
@@ -197,7 +275,12 @@ async def manual_buy(req: BuyRequest):
         raise HTTPException(status_code=400, detail=f"Insufficient available cash (€{available_cash:.2f}) to execute buy order.")
 
     report = await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
-    alloc_eur = _calculate_safe_allocation(available_cash, req.allocation_eur, report["risk"], summary.get("open_positions_count", 0))
+    alloc_eur = _calculate_safe_allocation(
+        summary,
+        req.allocation_eur,
+        ticker=ticker,
+        currency=data.get("currency")
+    )
 
     res = await active_broker.execute_buy(
         ticker=ticker,
@@ -232,30 +315,60 @@ async def manual_sell(req: SellRequest):
 # 5b. AI Order Triggers (Limit Pullback & Breakout Buy Orders)
 @router.get("/api/triggers")
 async def get_triggers(status: Optional[str] = None):
-    return await paper_broker.get_triggers(status=status)
+    return await active_broker.get_triggers(status=status)
+
+def _trigger_precheck_error(result: TriggerGateResult) -> HTTPException:
+    """A check that failed before the committee ran: 404 for missing market data, else 400."""
+    return HTTPException(status_code=404 if result.code == "NO_MARKET_DATA" else 400, detail=result.to_detail())
+
+def _trigger_blocked_error(result: TriggerGateResult, report: Dict[str, Any]) -> HTTPException:
+    """The committee's verdict does not allow this trigger: 422, with its summary so the UI can show why."""
+    detail = {**result.to_detail(), "summary": str(report.get("summary") or "")[:400]}
+    return HTTPException(status_code=422, detail=detail)
+
+async def _precheck_trigger(raw_ticker: str) -> Tuple[str, Dict[str, Any], Dict[str, Any], float]:
+    """
+    Cheap checks that run before the expensive committee: ticker format, market data, instrument type,
+    no open position or pending trigger, enough cash. Returns (ticker, data, portfolio summary, available cash).
+    """
+    ticker = normalize_ticker(raw_ticker)
+    if not ticker:
+        raise _trigger_precheck_error(invalid_ticker_result(raw_ticker))
+    data = await asyncio.to_thread(market_data_provider.get_stock_data, ticker)
+    summary = await active_broker.get_portfolio_summary() if data else {}
+    available_cash = summary.get("available_cash_eur", 0.0)
+    blocked = await precheck_manual_trigger(ticker, data, available_cash)
+    if blocked:
+        raise _trigger_precheck_error(blocked)
+    return ticker, data, summary, available_cash
 
 @router.post("/api/triggers")
 async def create_trigger(req: CreateTriggerRequest):
-    ticker = req.ticker.strip().upper()
-    data = await asyncio.to_thread(market_data_provider.get_stock_data, ticker)
-    if not data:
-        raise HTTPException(status_code=404, detail=f"Market data not found for '{ticker}'.")
-
-    summary = await paper_broker.get_portfolio_summary()
-    available_cash = summary.get("available_cash_eur", 0.0)
-    if available_cash < 20.0:
-        raise HTTPException(status_code=400, detail=f"Insufficient available cash (€{available_cash:.2f}) to arm trigger.")
+    ticker, data, summary, available_cash = await _precheck_trigger(req.ticker)
 
     report = await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
 
     target_price = req.target_price or report.get("entry_trigger_price", data["price"])
     trigger_type = req.trigger_type or report.get("trigger_type", "LIMIT_PULLBACK")
-    alloc_eur = _calculate_safe_allocation(available_cash, req.allocation_eur, report["risk"], summary.get("open_positions_count", 0))
+    alloc_eur = _calculate_safe_allocation(
+        summary,
+        req.allocation_eur,
+        ticker=ticker,
+        currency=data.get("currency")
+    )
     sl = req.stop_loss or report["risk"]["stop_loss_price"]
     tp = req.take_profit or report["risk"]["take_profit_price"]
     rationale = req.ai_rationale or report.get("trigger_rationale", report["summary"])
 
-    res = await paper_broker.create_price_trigger(
+    gate = await evaluate_manual_trigger(
+        ticker, data, report, target_price, alloc_eur, await get_trigger_min_score(), force=req.force,
+        stop_loss=sl, portfolio_value_eur=summary.get("total_value_eur", 0.0),
+        free_cash_eur=summary.get("available_cash_eur", 0.0)
+    )
+    if not gate.allowed:
+        raise _trigger_blocked_error(gate, report)
+
+    res = await active_broker.create_price_trigger(
         ticker=ticker,
         name=data.get("name", ticker),
         currency=data["currency"],
@@ -270,37 +383,50 @@ async def create_trigger(req: CreateTriggerRequest):
     )
     if not res.get("success"):
         raise HTTPException(status_code=400, detail=res.get("message"))
-    return res
+    return {**res, "gate": gate.to_detail()}
 
 @router.post("/api/triggers/from-ai")
 async def create_trigger_from_ai(req: CreateTriggerFromAIRequest):
-    """Convenience endpoint: Runs AI committee and arms optimal limit trigger directly."""
-    ticker = req.ticker.strip().upper()
-    data = await asyncio.to_thread(market_data_provider.get_stock_data, ticker)
-    if not data:
-        raise HTTPException(status_code=404, detail=f"Market data not found for '{ticker}'.")
+    """Convenience endpoint: Runs AI committee and arms optimal limit trigger directly (as a background job)."""
+    return _start_job("arm", req.ticker.strip().upper(), lambda job: _arm_from_ai(req, job))
 
-    summary = await paper_broker.get_portfolio_summary()
-    available_cash = summary.get("available_cash_eur", 0.0)
-    if available_cash < 20.0:
-        raise HTTPException(status_code=400, detail=f"Insufficient available cash (€{available_cash:.2f}) to arm trigger.")
+async def _arm_from_ai(req: CreateTriggerFromAIRequest, job: Dict[str, Any]):
+    ticker, data, summary, available_cash = await _precheck_trigger(req.ticker)
 
-    report = await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
+    prev = _jobs.get(req.report_job_id or "")
+    if (prev and prev["kind"] in ("arm", "analyze") and prev["ticker"] == job["ticker"] and prev["report"]
+            and prev["finished_at"] and time.time() - prev["finished_at"] < _REPORT_REUSE_SECONDS):
+        report = prev["report"]
+    else:
+        report = await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
+    job["report"] = report
 
-    trigger_price = report.get("entry_trigger_price", data["price"])
-    trigger_type = report.get("trigger_type", "LIMIT_PULLBACK")
-    alloc_eur = _calculate_safe_allocation(available_cash, req.allocation_eur, report["risk"], summary.get("open_positions_count", 0))
+    trigger_type, trigger_price, sl, tp = derive_trigger_levels(report, data["price"])
+    alloc_eur = _calculate_safe_allocation(
+        summary,
+        req.allocation_eur,
+        ticker=ticker,
+        currency=data.get("currency")
+    )
     rationale = report.get("trigger_rationale", report["summary"])
 
-    res = await paper_broker.create_price_trigger(
+    gate = await evaluate_manual_trigger(
+        ticker, data, report, trigger_price, alloc_eur, await get_trigger_min_score(), force=req.force,
+        stop_loss=sl, portfolio_value_eur=summary.get("total_value_eur", 0.0),
+        free_cash_eur=summary.get("available_cash_eur", 0.0)
+    )
+    if not gate.allowed:
+        raise _trigger_blocked_error(gate, report)
+
+    res = await active_broker.create_price_trigger(
         ticker=ticker,
         name=data.get("name", ticker),
         currency=data["currency"],
         trigger_type=trigger_type,
         target_price=trigger_price,
         current_price_at_creation=data["price"],
-        stop_loss=report["risk"]["stop_loss_price"],
-        take_profit=report["risk"]["take_profit_price"],
+        stop_loss=sl,
+        take_profit=tp,
         allocation_eur=alloc_eur,
         consensus_score=report["consensus_score"],
         ai_rationale=rationale
@@ -312,11 +438,11 @@ async def create_trigger_from_ai(req: CreateTriggerFromAIRequest):
     from src.telegram.bot import telegram_bot
     await telegram_bot.notify_trigger_armed(res)
 
-    return res
+    return {**res, "gate": gate.to_detail()}
 
 @router.delete("/api/triggers/{trigger_id}")
 async def cancel_trigger(trigger_id: int):
-    res = await paper_broker.cancel_price_trigger(trigger_id)
+    res = await active_broker.cancel_price_trigger(trigger_id)
     if not res.get("success"):
         raise HTTPException(status_code=400, detail=res.get("message"))
     return res
@@ -368,20 +494,26 @@ async def get_settings():
     async with AsyncSessionLocal() as session:
         cfg_res = await session.execute(select(SystemConfig))
         configs = {c.key: c.value for c in cfg_res.scalars().all()}
+        raw_cap = configs.get("MAX_DEPLOYABLE_CAPITAL_EUR")
+        cap_val = float(raw_cap) if raw_cap not in (None, "", "null", "None") else settings.MAX_DEPLOYABLE_CAPITAL_EUR
+
         return {
-            "auto_buy_enabled": configs.get("AUTO_BUY_ENABLED", "true") == "true",
+            "auto_buy_enabled": configs.get("AUTO_BUY_ENABLED", str(settings.AUTO_BUY_ENABLED)).lower() == "true",
             "min_consensus_score": int(configs.get("MIN_CONSENSUS_SCORE", settings.MIN_CONSENSUS_SCORE)),
             "trigger_min_score": int(configs.get("TRIGGER_MIN_SCORE", settings.TRIGGER_MIN_SCORE)),
             "position_size_pct": float(configs.get("POSITION_SIZE_PCT", settings.POSITION_SIZE_PCT)),
+            "max_capital_usage_pct": float(configs.get("MAX_CAPITAL_USAGE_PCT", settings.MAX_CAPITAL_USAGE_PCT)),
+            "max_deployable_capital_eur": cap_val,
             "atr_stop_multiplier": float(configs.get("ATR_STOP_MULTIPLIER", 1.75)),
             "take_profit_rr": float(configs.get("TAKE_PROFIT_RR", 2.1)),
             "breakeven_trigger_pct": float(configs.get("BREAKEVEN_TRIGGER_PCT", 0.025)),
-            "enforce_market_hours": configs.get("ENFORCE_MARKET_HOURS", "true") == "true",
+            "enforce_market_hours": configs.get("ENFORCE_MARKET_HOURS", str(settings.ENFORCE_MARKET_HOURS)).lower() == "true",
             "base_currency": settings.BASE_CURRENCY,
-            "max_positions": settings.MAX_POSITIONS,
+            "max_positions": int(configs.get("MAX_POSITIONS", settings.MAX_POSITIONS)),
             "llm_provider": settings.LLM_PROVIDER,
-            "trading_mode": settings.TRADING_MODE,
-            "live_trading_enabled": settings.LIVE_TRADING_ENABLED,
+            "trading_mode": configs.get("TRADING_MODE", settings.TRADING_MODE),
+            "live_trading_enabled": configs.get("LIVE_TRADING_ENABLED", str(settings.LIVE_TRADING_ENABLED)).lower() == "true",
+            "max_fee_drag_pct": float(configs.get("MAX_FEE_DRAG_PCT", getattr(settings, "MAX_FEE_DRAG_PCT", 3.5))),
             "has_antigravity": bool(settings.LLM_PROVIDER == "antigravity" and llm_client.has_active_key()),
             "has_gemini_key": bool(settings.GEMINI_API_KEY and not settings.GEMINI_API_KEY.startswith("your_")),
             "has_telegram": bool(settings.TELEGRAM_BOT_TOKEN and not settings.TELEGRAM_BOT_TOKEN.startswith("your_"))
@@ -389,6 +521,8 @@ async def get_settings():
 
 @router.post("/api/settings")
 async def update_settings(req: SettingsUpdateRequest):
+    env_updates: Dict[str, Any] = {}
+    was_live = get_active_broker() is live_broker
     async with AsyncSessionLocal() as session:
         if req.auto_buy_enabled is not None:
             res = await session.execute(select(SystemConfig).where(SystemConfig.key == "AUTO_BUY_ENABLED"))
@@ -398,6 +532,8 @@ async def update_settings(req: SettingsUpdateRequest):
                 cfg.value = val
             else:
                 session.add(SystemConfig(key="AUTO_BUY_ENABLED", value=val))
+            settings.AUTO_BUY_ENABLED = bool(req.auto_buy_enabled)
+            env_updates["AUTO_BUY_ENABLED"] = bool(req.auto_buy_enabled)
 
         if req.min_consensus_score is not None:
             res = await session.execute(select(SystemConfig).where(SystemConfig.key == "MIN_CONSENSUS_SCORE"))
@@ -407,6 +543,8 @@ async def update_settings(req: SettingsUpdateRequest):
                 cfg.value = val
             else:
                 session.add(SystemConfig(key="MIN_CONSENSUS_SCORE", value=val))
+            settings.MIN_CONSENSUS_SCORE = int(req.min_consensus_score)
+            env_updates["MIN_CONSENSUS_SCORE"] = int(req.min_consensus_score)
 
         if req.trigger_min_score is not None:
             res = await session.execute(select(SystemConfig).where(SystemConfig.key == "TRIGGER_MIN_SCORE"))
@@ -416,7 +554,66 @@ async def update_settings(req: SettingsUpdateRequest):
                 cfg.value = val
             else:
                 session.add(SystemConfig(key="TRIGGER_MIN_SCORE", value=val))
-            settings.TRIGGER_MIN_SCORE = req.trigger_min_score
+            settings.TRIGGER_MIN_SCORE = int(req.trigger_min_score)
+            env_updates["TRIGGER_MIN_SCORE"] = int(req.trigger_min_score)
+
+        if req.position_size_pct is not None:
+            pos_val = max(0.01, min(0.15, float(req.position_size_pct)))
+            res = await session.execute(select(SystemConfig).where(SystemConfig.key == "POSITION_SIZE_PCT"))
+            cfg = res.scalars().first()
+            val = str(pos_val)
+            if cfg:
+                cfg.value = val
+            else:
+                session.add(SystemConfig(key="POSITION_SIZE_PCT", value=val))
+            settings.POSITION_SIZE_PCT = pos_val
+            env_updates["POSITION_SIZE_PCT"] = pos_val
+
+        if req.max_positions is not None:
+            pos_count = max(1, min(50, int(req.max_positions)))
+            res = await session.execute(select(SystemConfig).where(SystemConfig.key == "MAX_POSITIONS"))
+            cfg = res.scalars().first()
+            val = str(pos_count)
+            if cfg:
+                cfg.value = val
+            else:
+                session.add(SystemConfig(key="MAX_POSITIONS", value=val))
+            settings.MAX_POSITIONS = pos_count
+            env_updates["MAX_POSITIONS"] = pos_count
+
+        if req.max_capital_usage_pct is not None:
+            pct_val = max(10.0, min(100.0, float(req.max_capital_usage_pct)))
+            res = await session.execute(select(SystemConfig).where(SystemConfig.key == "MAX_CAPITAL_USAGE_PCT"))
+            cfg = res.scalars().first()
+            val = str(pct_val)
+            if cfg:
+                cfg.value = val
+            else:
+                session.add(SystemConfig(key="MAX_CAPITAL_USAGE_PCT", value=val))
+            settings.MAX_CAPITAL_USAGE_PCT = pct_val
+            env_updates["MAX_CAPITAL_USAGE_PCT"] = pct_val
+
+        if req.clear_max_deployable_capital:
+            settings.MAX_DEPLOYABLE_CAPITAL_EUR = None
+            res = await session.execute(select(SystemConfig).where(SystemConfig.key == "MAX_DEPLOYABLE_CAPITAL_EUR"))
+            cfg = res.scalars().first()
+            if cfg:
+                cfg.value = ""
+            env_updates["MAX_DEPLOYABLE_CAPITAL_EUR"] = ""
+        elif req.max_deployable_capital_eur is not None:
+            if req.max_deployable_capital_eur <= 0:
+                settings.MAX_DEPLOYABLE_CAPITAL_EUR = None
+                val = ""
+            else:
+                settings.MAX_DEPLOYABLE_CAPITAL_EUR = float(req.max_deployable_capital_eur)
+                val = str(settings.MAX_DEPLOYABLE_CAPITAL_EUR)
+            res = await session.execute(select(SystemConfig).where(SystemConfig.key == "MAX_DEPLOYABLE_CAPITAL_EUR"))
+            cfg = res.scalars().first()
+            if cfg:
+                cfg.value = val
+            else:
+                session.add(SystemConfig(key="MAX_DEPLOYABLE_CAPITAL_EUR", value=val))
+            env_updates["MAX_DEPLOYABLE_CAPITAL_EUR"] = val
 
         if req.enforce_market_hours is not None:
             res = await session.execute(select(SystemConfig).where(SystemConfig.key == "ENFORCE_MARKET_HOURS"))
@@ -426,14 +623,17 @@ async def update_settings(req: SettingsUpdateRequest):
                 cfg.value = val
             else:
                 session.add(SystemConfig(key="ENFORCE_MARKET_HOURS", value=val))
-            settings.ENFORCE_MARKET_HOURS = req.enforce_market_hours
+            settings.ENFORCE_MARKET_HOURS = bool(req.enforce_market_hours)
+            env_updates["ENFORCE_MARKET_HOURS"] = bool(req.enforce_market_hours)
 
         if req.trading_mode is not None:
             mode_val = req.trading_mode.strip().upper()
             if mode_val in ("PAPER", "LIVE"):
                 settings.TRADING_MODE = mode_val
+                env_updates["TRADING_MODE"] = mode_val
                 if mode_val == "LIVE" and req.live_trading_enabled is None:
                     settings.LIVE_TRADING_ENABLED = True
+                    env_updates["LIVE_TRADING_ENABLED"] = True
                 res = await session.execute(select(SystemConfig).where(SystemConfig.key == "TRADING_MODE"))
                 cfg = res.scalars().first()
                 if cfg:
@@ -442,7 +642,7 @@ async def update_settings(req: SettingsUpdateRequest):
                     session.add(SystemConfig(key="TRADING_MODE", value=mode_val))
 
         if req.live_trading_enabled is not None:
-            settings.LIVE_TRADING_ENABLED = req.live_trading_enabled
+            settings.LIVE_TRADING_ENABLED = bool(req.live_trading_enabled)
             res = await session.execute(select(SystemConfig).where(SystemConfig.key == "LIVE_TRADING_ENABLED"))
             cfg = res.scalars().first()
             val = str(req.live_trading_enabled).lower()
@@ -450,15 +650,60 @@ async def update_settings(req: SettingsUpdateRequest):
                 cfg.value = val
             else:
                 session.add(SystemConfig(key="LIVE_TRADING_ENABLED", value=val))
+            env_updates["LIVE_TRADING_ENABLED"] = bool(req.live_trading_enabled)
+
+        if req.max_fee_drag_pct is not None:
+            drag_val = float(req.max_fee_drag_pct)
+            if 0.5 <= drag_val <= 15.0:
+                settings.MAX_FEE_DRAG_PCT = drag_val
+                res = await session.execute(select(SystemConfig).where(SystemConfig.key == "MAX_FEE_DRAG_PCT"))
+                cfg = res.scalars().first()
+                if cfg:
+                    cfg.value = str(drag_val)
+                else:
+                    session.add(SystemConfig(key="MAX_FEE_DRAG_PCT", value=str(drag_val)))
+                env_updates["MAX_FEE_DRAG_PCT"] = drag_val
+
+        if req.gemini_api_key is not None:
+            gk = req.gemini_api_key.strip()
+            if gk:
+                settings.GEMINI_API_KEY = gk
+                env_updates["GEMINI_API_KEY"] = gk
+
+        if req.telegram_bot_token is not None:
+            tt = req.telegram_bot_token.strip()
+            if tt:
+                settings.TELEGRAM_BOT_TOKEN = tt
+                env_updates["TELEGRAM_BOT_TOKEN"] = tt
+
+        if req.telegram_chat_id is not None:
+            tc = req.telegram_chat_id.strip()
+            if tc:
+                settings.TELEGRAM_CHAT_ID = tc
+                env_updates["TELEGRAM_CHAT_ID"] = tc
 
         await session.commit()
-    return {"success": True, "message": "Settings updated successfully."}
+        await active_broker.adjust_triggers_dynamically()
+
+    if env_updates:
+        update_env_file(env_updates)
+
+    if was_live and get_active_broker() is not live_broker:
+        # Nothing syncs resting T212 entry orders once live is disarmed: cancel them now
+        await live_broker.cancel_resting_entries("live trading disarmed")
+
+    return {"success": True, "message": "Settings updated and saved successfully."}
 
 @router.post("/api/scheduler/trigger")
 async def trigger_scan(market: str = "ALL"):
     """Allows triggering an immediate market session scan from the UI."""
     asyncio.create_task(trading_scheduler.run_market_session(market=market, session="MANUAL_SCAN"))
     return {"success": True, "message": f"Market scan triggered for {market} in background."}
+
+@router.post("/api/market-data/refresh")
+async def refresh_market_data():
+    """Manually pulls fresh market data and runs the trigger and stop/target checks immediately."""
+    return await trading_scheduler.refresh_market_data_now()
 
 class MarketSessionRequest(BaseModel):
     market: Optional[str] = "EU"
@@ -538,7 +783,7 @@ async def calibrate_learning_parameters():
 @router.post("/api/killswitch")
 async def toggle_killswitch(active: bool):
     """Emergency halt switch to immediately block or resume all automated buying."""
-    settings.KILL_SWITCH_ACTIVE = active
+    await set_kill_switch(active)
     return {
         "success": True,
         "kill_switch_active": settings.KILL_SWITCH_ACTIVE,
@@ -554,3 +799,55 @@ async def sync_account():
     return {"success": True, "portfolio": summary}
 
 
+
+# Deposits and withdrawals on the live account (kept out of the portfolio gain)
+class CashFlowRequest(BaseModel):
+    amount_eur: float  # Positive = deposit, negative = withdrawal
+    note: Optional[str] = None
+
+@router.get("/api/cash-flows")
+async def get_cash_flows():
+    from src.trading.cash_flows import scan_live_cash_flows, list_cash_flows, net_cash_flows_eur
+    await scan_live_cash_flows()
+    return {
+        "net_deposits_eur": await net_cash_flows_eur(is_live=True),
+        "min_detect_eur": settings.CASH_FLOW_MIN_EUR,
+        "flows": await list_cash_flows(is_live=True),
+    }
+
+@router.post("/api/cash-flows")
+async def add_cash_flow(req: CashFlowRequest):
+    """Records a deposit or withdrawal the automatic detection missed."""
+    from src.trading.cash_flows import add_cash_flow as _add
+    if not req.amount_eur or abs(req.amount_eur) > 10_000_000:
+        raise HTTPException(status_code=400, detail="Enter a non-zero amount.")
+    return {"success": True, **(await _add(req.amount_eur, req.note))}
+
+@router.delete("/api/cash-flows/{flow_id}")
+async def remove_cash_flow(flow_id: int):
+    """Removes a deposit or withdrawal, e.g. one that was detected by mistake."""
+    from src.trading.cash_flows import delete_cash_flow
+    if not await delete_cash_flow(flow_id):
+        raise HTTPException(status_code=404, detail="No such deposit or withdrawal.")
+    return {"success": True}
+
+# 9. Shadow paper portfolios (simulated strategy variants next to the main portfolio)
+@router.get("/api/shadow")
+async def get_shadow_comparison():
+    """Main portfolio versus every enabled shadow strategy, each measured since the shadow started."""
+    from src.trading.shadow import shadow_portfolios
+    main_is_live = settings.TRADING_MODE.upper() == "LIVE" and settings.LIVE_TRADING_ENABLED
+    try:
+        main_summary = await active_broker.get_portfolio_summary()
+    except Exception as e:
+        logger.warning(f"Shadow comparison: main portfolio summary unavailable: {e}")
+        main_summary = {}
+    return await shadow_portfolios.get_comparison(main_summary, main_is_live)
+
+@router.post("/api/shadow/{strategy_key}/reset")
+async def reset_shadow(strategy_key: str):
+    """Restarts one shadow portfolio from fresh simulated capital. Never touches the main portfolio."""
+    from src.trading.shadow import shadow_portfolios
+    if not await shadow_portfolios.reset(strategy_key.strip().lower()):
+        raise HTTPException(status_code=404, detail=f"No shadow portfolio named '{strategy_key}'.")
+    return {"success": True, "message": f"Shadow portfolio '{strategy_key}' was reset."}

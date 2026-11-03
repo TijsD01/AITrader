@@ -86,3 +86,18 @@ class BaseBroker(ABC):
     async def sync_account_state(self) -> Dict[str, Any]:
         """Synchronizes local database records with broker cash and open positions."""
         pass
+
+    @abstractmethod
+    async def sync_cash_balance(self) -> None:
+        """Refreshes the locally recorded cash balance from the broker without reconciling positions."""
+        pass
+
+    @abstractmethod
+    async def check_connection(self, force: bool = False) -> Dict[str, Any]:
+        """Checks connectivity with the broker API and returns detailed status and latency."""
+        pass
+
+    @abstractmethod
+    async def adjust_triggers_dynamically(self) -> List[Dict[str, Any]]:
+        """Recalculates and updates allocations for pending triggers based on available cash and remaining position slots."""
+        pass

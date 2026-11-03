@@ -6,6 +6,11 @@ from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
 
+
+def _current_broker():
+    from config.settings import settings
+    return (settings.LIVE_BROKER or "").lower()
+
 class WatchlistItem(Base):
     __tablename__ = "watchlist"
 
@@ -40,6 +45,7 @@ class Position(Base):
     unrealized_pnl_eur = Column(Float, default=0.0)
     unrealized_pnl_pct = Column(Float, default=0.0)
     
+    fees_eur = Column(Float, default=0.0)  # Total broker commissions and fees
     status = Column(String(20), default="OPEN")  # OPEN, CLOSED
     is_live = Column(Boolean, default=False)
     broker_order_id = Column(String(100), nullable=True)
@@ -59,6 +65,7 @@ class Trade(Base):
     price_native = Column(Float, nullable=False)
     price_eur = Column(Float, nullable=False)
     total_eur = Column(Float, nullable=False)
+    fee_eur = Column(Float, default=0.0)  # Broker commission and exchange fees
     
     realized_pnl_eur = Column(Float, nullable=True)  # Only for SELL
     realized_pnl_pct = Column(Float, nullable=True)
@@ -81,6 +88,22 @@ class PortfolioSnapshot(Base):
     daily_pnl_pct = Column(Float, default=0.0)
     open_positions_count = Column(Integer, default=0)
     is_live = Column(Boolean, default=False)
+    # Live broker when written (NULL = written before this column existed). A broker switch starts a new history.
+    broker = Column(String(20), nullable=True, default=_current_broker)
+
+# Money moved into or out of the account (deposits positive, withdrawals negative). Kept apart from
+# trades so the portfolio gain counts only what the bot earned, not what was put in.
+class CashFlow(Base):
+    __tablename__ = "cash_flows"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    timestamp = Column(DateTime, default=datetime.datetime.utcnow, index=True)
+    amount_eur = Column(Float, nullable=False)
+    source = Column(String(10), default="auto")  # auto (guessed from a cash jump), broker (broker's own record) or manual
+    snapshot_id = Column(Integer, nullable=True, unique=True)  # Broker snapshot that showed the jump (auto only)
+    broker_ref = Column(String(64), nullable=True, index=True)  # Broker transaction reference (broker only)
+    note = Column(String(200), nullable=True)
+    is_live = Column(Boolean, default=True, index=True)
 
 class AnalysisReport(Base):
     __tablename__ = "analysis_reports"
@@ -162,3 +185,78 @@ class TradeLesson(Base):
     lesson = Column(Text, nullable=False)
     parameter_adjustments = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow, index=True)
+
+# Shadow paper portfolios: simulated strategy variants that follow the live bot's committee
+# verdicts with different parameters. Fully separate from the tables above; never sent to a broker.
+class ShadowAccount(Base):
+    __tablename__ = "shadow_accounts"
+
+    strategy = Column(String(40), primary_key=True)
+    cash_eur = Column(Float, nullable=False)
+    initial_capital_eur = Column(Float, nullable=False)
+    # Main portfolio value when this shadow started, so both returns are measured over the same period
+    main_value_at_start_eur = Column(Float, nullable=True)
+    # Main-bot parameters the shadow builds on (trigger threshold, breakeven %, max positions), frozen at start
+    # so the learner's later recalibrations of the main bot do not change the experiment halfway
+    frozen_params = Column(JSON, nullable=True)
+    # Main-account deposits minus withdrawals since the start, already booked into cash_eur
+    cash_flows_eur = Column(Float, default=0.0)
+    started_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+class ShadowTrigger(Base):
+    __tablename__ = "shadow_triggers"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    strategy = Column(String(40), nullable=False, index=True)
+    ticker = Column(String(20), nullable=False, index=True)
+    name = Column(String(100), nullable=True)
+    currency = Column(String(10), default="USD")
+    trigger_type = Column(String(20), nullable=False)  # LIMIT_PULLBACK, BREAKOUT_BUY, MARKET
+    target_price = Column(Float, nullable=False)
+    current_price_at_creation = Column(Float, nullable=False)
+    stop_loss = Column(Float, nullable=True)
+    take_profit = Column(Float, nullable=True)
+    consensus_score = Column(Integer, nullable=True)
+    followed_main = Column(Boolean, default=False)  # True when the main bot armed a trigger on the same verdict
+    status = Column(String(20), default="PENDING", index=True)  # PENDING, TRIGGERED, CANCELLED, EXPIRED
+    note = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    triggered_at = Column(DateTime, nullable=True)
+
+class ShadowPosition(Base):
+    __tablename__ = "shadow_positions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    strategy = Column(String(40), nullable=False, index=True)
+    trigger_id = Column(Integer, nullable=True)
+    ticker = Column(String(20), nullable=False, index=True)
+    name = Column(String(100), nullable=True)
+    currency = Column(String(10), default="USD")
+    shares = Column(Float, nullable=False)
+    entry_price_native = Column(Float, nullable=False)
+    current_price_native = Column(Float, nullable=False)
+    highest_price_native = Column(Float, nullable=False)
+    stop_loss_native = Column(Float, nullable=True)
+    take_profit_native = Column(Float, nullable=True)
+    entry_price_eur = Column(Float, nullable=False)
+    current_price_eur = Column(Float, nullable=False)
+    cost_basis_eur = Column(Float, nullable=False)
+    fees_eur = Column(Float, default=0.0)
+    consensus_score = Column(Integer, nullable=True)
+    followed_main = Column(Boolean, default=False)
+    status = Column(String(20), default="OPEN", index=True)  # OPEN, CLOSED
+    exit_price_native = Column(Float, nullable=True)
+    realized_pnl_eur = Column(Float, nullable=True)
+    realized_pnl_pct = Column(Float, nullable=True)
+    exit_reason = Column(String(255), nullable=True)
+    opened_at = Column(DateTime, default=datetime.datetime.utcnow)
+    closed_at = Column(DateTime, nullable=True)
+
+class ShadowSnapshot(Base):
+    __tablename__ = "shadow_snapshots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    strategy = Column(String(40), nullable=False, index=True)  # strategy key, or "MAIN" for the main portfolio
+    timestamp = Column(DateTime, default=datetime.datetime.utcnow, index=True)
+    total_value_eur = Column(Float, nullable=False)
+    return_pct = Column(Float, default=0.0)
