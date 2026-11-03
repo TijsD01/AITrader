@@ -138,6 +138,8 @@ class Settings(BaseSettings):
     TRADING212_API_KEY: Optional[str] = None
     TRADING212_API_SECRET: Optional[str] = None
     TRADING212_DEMO: bool = True            # True = demo.trading212.com (practice money); False = live account
+    T212_RESTING_ORDERS: bool = False       # Rest entry/stop orders at Trading 212 instead of polling prices (needs LIVE_BROKER=trading212)
+    BREAKOUT_LIMIT_BUFFER_PCT: float = 0.5  # Breakout stop-limit: limit price sits this % above the stop price
 
     # Alpaca Config (Supports US equities)
     ALPACA_API_KEY: Optional[str] = None

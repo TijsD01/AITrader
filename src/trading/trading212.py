@@ -159,6 +159,11 @@ class Trading212Client:
         return await self._request("POST", "/equity/orders/stop", json={
             "ticker": ticker, "quantity": quantity, "stopPrice": stop_price, "timeValidity": validity})
 
+    async def place_stop_limit(self, ticker: str, quantity: float, stop_price: float, limit_price: float, validity: str = "DAY") -> Dict[str, Any]:
+        return await self._request("POST", "/equity/orders/stop_limit", json={
+            "ticker": ticker, "quantity": quantity, "stopPrice": stop_price,
+            "limitPrice": limit_price, "timeValidity": validity})
+
     async def get_order(self, order_id: int) -> Optional[Dict[str, Any]]:
         """A pending order, or None once it is no longer pending (filled, cancelled, rejected)."""
         try:

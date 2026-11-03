@@ -464,6 +464,10 @@ class LiveBroker(BaseBroker):
                 logger.error(f"Trading 212 exit for {ticker} failed: {e}")
         return None
 
+    @staticmethod
+    def resting_orders_on() -> bool:
+        return settings.T212_RESTING_ORDERS and settings.LIVE_BROKER.lower() == "trading212"
+
     def is_live_armed(self) -> Tuple[bool, str]:
         """Verifies if live real-money execution is safely enabled."""
         if settings.KILL_SWITCH_ACTIVE:
