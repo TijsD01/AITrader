@@ -48,8 +48,8 @@ MAIN_KEY = "MAIN"
 SNAPSHOT_INTERVAL = datetime.timedelta(minutes=55)
 
 
-def _main_return_pct(value: float, start: float, flows: float) -> float:
-    """Main bot gain over everything put in: a deposit adds to the base, so it neither counts as gain nor inflates the %."""
+def _return_pct(value: float, start: float, flows: float) -> float:
+    """Gain over everything put in: a deposit adds to the base, so it neither counts as gain nor inflates the %."""
     base = start + flows
     return round((value - flows - start) / base * 100, 2) if base > 0 else 0.0
 
@@ -296,9 +296,28 @@ class ShadowPortfolios:
                 if missing:
                     acc.frozen_params = {**frozen, **missing}
                     changed = True
+        changed = await self._apply_main_cash_flows(accounts.values()) or changed
         if changed:
             await session.commit()
         return accounts
+
+    @staticmethod
+    async def _apply_main_cash_flows(accounts) -> bool:
+        """Books the main account's deposits and withdrawals since each shadow's start into its cash, so both
+        work with the same money. Only the change since the last call is booked, so a flow deleted by hand is
+        taken back. A withdrawal can push cash below zero; the shadow then buys nothing until a sale refills it."""
+        main_is_live = settings.TRADING_MODE.upper() == "LIVE" and settings.LIVE_TRADING_ENABLED
+        flows = await list_cash_flow_points(is_live=main_is_live)
+        changed = False
+        for acc in accounts:
+            total = round(sum(a for t, a in flows if acc.started_at is None or t > acc.started_at), 2)
+            delta = round(total - (acc.cash_flows_eur or 0.0), 2)
+            if delta:
+                acc.cash_eur = round(acc.cash_eur + delta, 2)
+                acc.cash_flows_eur = total
+                changed = True
+                logger.info(f"Shadow '{acc.strategy}' followed a main deposit/withdrawal of €{delta:.2f}.")
+        return changed
 
     async def _breakeven_pct(self, session) -> float:
         res = await session.execute(select(SystemConfig).where(SystemConfig.key == "BREAKEVEN_TRIGGER_PCT"))
@@ -659,7 +678,7 @@ class ShadowPortfolios:
                                 continue
                             acc = accounts[s.key]
                             value = await self._total_value(session, acc)
-                            ret = round((value / acc.initial_capital_eur - 1.0) * 100, 2) if acc.initial_capital_eur else 0.0
+                            ret = _return_pct(value, acc.initial_capital_eur, acc.cash_flows_eur or 0.0)
                             session.add(ShadowSnapshot(strategy=s.key, timestamp=now, total_value_eur=value, return_pct=ret))
                     await session.commit()
         except Exception as e:
@@ -706,7 +725,9 @@ class ShadowPortfolios:
         main_value = main_summary.get("total_value_eur")
         main_flows = await list_cash_flow_points(is_live=main_is_live)
         async with AsyncSessionLocal() as session:
-            accounts = await self._ensure_accounts(session, strategies)
+            # Locked: booking a deposit into cash must not race a shadow buy on the same account
+            async with self._lock:
+                accounts = await self._ensure_accounts(session, strategies)
             current_main = await self._main_params(session)
             for s in strategies:
                 acc = accounts[s.key]
@@ -734,7 +755,7 @@ class ShadowPortfolios:
                 main_start = acc.main_value_at_start_eur
                 # Deposits into the main account after the shadow started are not main-bot gain
                 main_flows_since = sum(a for t, a in main_flows if since is None or t > since)
-                main_return = _main_return_pct(main_value, main_start, main_flows_since) if main_value and main_start else None
+                main_return = _return_pct(main_value, main_start, main_flows_since) if main_value and main_start else None
 
                 hist_res = await session.execute(select(ShadowSnapshot).where(
                     ShadowSnapshot.strategy.in_([s.key, MAIN_KEY]), ShadowSnapshot.timestamp >= since
@@ -745,7 +766,7 @@ class ShadowPortfolios:
                         if main_start:
                             flows = sum(a for t, a in main_flows if (since is None or t > since) and t <= snap.timestamp)
                             history["main"].append([snap.timestamp.strftime("%Y-%m-%d %H:%M"),
-                                                    _main_return_pct(snap.total_value_eur, main_start, flows)])
+                                                    _return_pct(snap.total_value_eur, main_start, flows)])
                     else:
                         history["shadow"].append([snap.timestamp.strftime("%Y-%m-%d %H:%M"), snap.return_pct])
 
@@ -771,7 +792,7 @@ class ShadowPortfolios:
                     "cash_eur": round(acc.cash_eur, 2),
                     "equity_eur": round(equity, 2),
                     "total_value_eur": value,
-                    "return_pct": round((value / acc.initial_capital_eur - 1.0) * 100, 2) if acc.initial_capital_eur else 0.0,
+                    "return_pct": _return_pct(value, acc.initial_capital_eur, acc.cash_flows_eur or 0.0),
                     "unrealized_pnl_eur": round(sum(p.current_price_eur * p.shares - p.cost_basis_eur for p in open_positions), 2),
                     "fees_eur": round(sum(p.fees_eur or 0.0 for p in list(open_positions) + list(closed)), 2),
                     **self._trade_stats([p.realized_pnl_eur for p in closed if p.realized_pnl_eur is not None]),
