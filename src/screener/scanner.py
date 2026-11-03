@@ -1,5 +1,6 @@
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional
 from config.default_universe import EU_STOCKS, US_STOCKS
 from src.data.market import market_data_provider
@@ -10,6 +11,8 @@ logger = logging.getLogger(__name__)
 # ponytail: in-memory scan cache, 5-min TTL
 _scan_cache: Dict[str, tuple[float, List[Dict[str, Any]]]] = {}
 _SCAN_TTL: float = 300.0
+# Parallel Yahoo fetches; kept small so a ~100-ticker scan stays under Yahoo's rate limit
+_SCAN_WORKERS: int = 6
 
 class MarketScanner:
     @staticmethod
@@ -51,9 +54,11 @@ class MarketScanner:
 
         ranked_candidates: List[Dict[str, Any]] = []
 
-        for item in pool:
+        with ThreadPoolExecutor(max_workers=_SCAN_WORKERS) as ex:
+            fetched = list(ex.map(lambda i: market_data_provider.get_stock_data(i["ticker"]), pool))
+
+        for item, data in zip(pool, fetched):
             ticker = item["ticker"]
-            data = market_data_provider.get_stock_data(ticker)
             if not data:
                 continue
 

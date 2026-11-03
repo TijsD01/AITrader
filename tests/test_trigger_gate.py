@@ -155,6 +155,7 @@ def test_market_data_carries_the_quote_type(info, expected):
         assert is_tradable_quote_type(data["quote_type"]) is (expected != "INDEX")
     finally:
         market._stock_cache.pop(symbol, None)
+        market._info_cache.pop(symbol, None)
 
 
 # --- Unit tests: verdict rules ---------------------------------------------------------
