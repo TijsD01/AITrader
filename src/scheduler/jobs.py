@@ -136,6 +136,15 @@ class TradingScheduler:
             id="market_opportunity_scanner"
         )
 
+        # 8. Trading 212 resting-order sync (no-op unless T212_RESTING_ORDERS is on)
+        self.scheduler.add_job(
+            self.monitor_resting_orders,
+            IntervalTrigger(minutes=1),
+            id="t212_order_sync",
+            max_instances=1,
+            coalesce=True
+        )
+
         self.scheduler.start()
         logger.info("Background Trading Scheduler initiated successfully.")
 
@@ -151,6 +160,7 @@ class TradingScheduler:
         automatically triggers the opening market session!
         """
         try:
+            await self.monitor_resting_orders()
             now = datetime.datetime.now(ZoneInfo(settings.TIMEZONE))
             today_date = now.date()
 
@@ -414,6 +424,26 @@ class TradingScheduler:
             await shadow_portfolios.check_exits()
             await shadow_portfolios.record_snapshots(main_summary_fn=get_active_broker().get_portfolio_summary)
             return closed
+
+    async def monitor_resting_orders(self) -> List[Dict[str, Any]]:
+        """Books fills of resting Trading 212 entry orders and re-checks stops. Returns booked fills."""
+        broker = get_active_broker()
+        if not getattr(broker, "resting_orders_on", lambda: False)():
+            return []
+        async with self._monitor_lock:
+            try:
+                try:
+                    await broker.sync_cash_balance()
+                except Exception as e:
+                    logger.error(f"Cash balance sync failed before resting order sync: {e}")
+                fills = await broker.sync_resting_entries()
+                for t in fills:
+                    await telegram_bot.notify_trigger_executed(t)
+                await self._check_stops_and_targets()
+                return fills
+            except Exception as e:
+                logger.error(f"Resting order sync failed: {e}", exc_info=True)
+                return []
 
     async def _check_stops_and_targets(self) -> List[Dict[str, Any]]:
         try:

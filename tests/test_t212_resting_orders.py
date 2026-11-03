@@ -385,3 +385,52 @@ async def test_stop_loss_branch_still_market(rest, asml):
     await _check(650.0)
     assert any(p[0] == "market" for p in rest.posts)
     assert not any(p[0] == "limit" for p in rest.posts)
+
+
+def _fake_broker(on, fills=()):
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        resting_orders_on=lambda: on,
+        sync_cash_balance=AsyncMock(),
+        sync_resting_entries=AsyncMock(return_value=list(fills)),
+    )
+
+
+async def test_monitor_resting_orders_noop_when_flag_off():
+    from src.scheduler.jobs import TradingScheduler
+    broker = _fake_broker(False)
+    sched = TradingScheduler()
+    with patch("src.scheduler.jobs.get_active_broker", return_value=broker):
+        assert await sched.monitor_resting_orders() == []
+    broker.sync_resting_entries.assert_not_awaited()
+
+
+async def test_monitor_resting_orders_books_and_notifies():
+    from src.scheduler.jobs import TradingScheduler
+    fill = {"ticker": "ASML"}
+    broker = _fake_broker(True, [fill])
+    sched = TradingScheduler()
+    with patch("src.scheduler.jobs.get_active_broker", return_value=broker), \
+         patch("src.scheduler.jobs.telegram_bot.notify_trigger_executed", new=AsyncMock()) as notify, \
+         patch.object(sched, "_check_stops_and_targets", new=AsyncMock(return_value=[])) as stops:
+        assert await sched.monitor_resting_orders() == [fill]
+    broker.sync_cash_balance.assert_awaited_once()
+    notify.assert_awaited_once_with(fill)
+    stops.assert_awaited_once()
+
+
+async def test_monitor_resting_orders_swallows_errors():
+    from src.scheduler.jobs import TradingScheduler
+    broker = _fake_broker(True)
+    broker.sync_resting_entries.side_effect = RuntimeError("boom")
+    with patch("src.scheduler.jobs.get_active_broker", return_value=broker):
+        assert await TradingScheduler().monitor_resting_orders() == []
+
+
+def test_scheduler_registers_t212_order_sync():
+    from src.scheduler.jobs import TradingScheduler
+    sched = TradingScheduler()
+    with patch.object(sched.scheduler, "add_job") as add_job, patch.object(sched.scheduler, "start"):
+        sched.start()
+    kwargs = next(c.kwargs for c in add_job.call_args_list if c.kwargs.get("id") == "t212_order_sync")
+    assert kwargs["max_instances"] == 1 and kwargs["coalesce"] is True
