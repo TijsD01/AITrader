@@ -509,17 +509,18 @@ async function loadPortfolio() {
       const color = ALLOC_COLORS[i % ALLOC_COLORS.length];
       const isOpen = openPositions.has(pos.ticker);
       const shares = `${esc(pos.shares)} share${Number(pos.shares) === 1 ? '' : 's'}`;
+      const weight = totalVal > 0 ? `${((Number(pos.current_value_eur) || 0) / totalVal * 100).toFixed(0)}%<span class="sr-only"> of portfolio</span> · ` : '';
       return `
         <div class="pos-row${isOpen ? ' open' : ''}">
           <button type="button" class="pos-head" data-action="toggle-position" data-ticker="${esc(pos.ticker)}" aria-expanded="${isOpen ? 'true' : 'false'}">
-            <span class="pos-mono" style="color:${color}">${esc(mono)}</span>
+            <span class="pos-mono" style="color:${color}" aria-hidden="true">${esc(mono)}</span>
             <span class="flex-1 min-w-0">
-              <span class="block font-semibold text-[15px] text-white truncate">${esc(pos.ticker)}</span>
-              <span class="block text-xs text-slate-500 truncate">${shares}${pos.name ? ` · ${esc(pos.name)}` : ''}</span>
+              <span class="block font-semibold text-base text-white truncate">${esc(pos.ticker)}</span>
+              <span class="block text-xs text-slate-500 truncate">${weight}${shares}${pos.name ? ` · ${esc(pos.name)}` : ''}</span>
             </span>
             <span class="text-right shrink-0">
               <span class="block ui-num font-semibold text-[15px] text-white">${eur(pos.current_value_eur)}</span>
-              <span class="block ui-num text-xs font-semibold ${tone}">${pctText}</span>
+              <span class="block ui-num text-xs font-semibold ${tone}"><span class="max-md:hidden">${signedEur(pnl)} · </span>${pctText}</span>
             </span>
             <i class="fa-solid fa-chevron-down pos-chevron" aria-hidden="true"></i>
           </button>

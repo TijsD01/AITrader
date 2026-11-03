@@ -172,7 +172,7 @@
       <!-- Broker offline alert (LIVE mode only) -->
       <div id="brokerDisconnectBanner" class="hidden ui-card ui-card-pad" style="background: var(--danger-surface); border-color: var(--danger-line);">
         <div class="flex items-start gap-3">
-          <i class="fa-solid fa-triangle-exclamation text-rose-300 text-lg mt-0.5"></i>
+          <i class="fa-solid fa-triangle-exclamation text-rose-300 text-lg mt-0.5" aria-hidden="true"></i>
           <div class="flex-1 min-w-0">
             <div class="flex items-center justify-between gap-2">
               <span class="font-bold text-sm text-rose-200">Broker offline: live orders halted</span>
@@ -180,32 +180,59 @@
             </div>
             <p id="brokerDisconnectDetail" class="mt-1 text-xs text-slate-300">Broker gateway is currently unreachable. Live order routing and account synchronization cannot proceed until reconnected.</p>
             <div class="mt-3 flex flex-wrap gap-2">
-              <button type="button" onclick="reconnectBroker()" class="ui-btn ui-btn-sm" style="background:#C2334A;border-color:#C2334A;color:#fff"><i class="fa-solid fa-bolt"></i> Reconnect</button>
-              <button type="button" onclick="switchTab('settings')" class="ui-btn ui-btn-sm"><i class="fa-solid fa-sliders"></i> Diagnostics</button>
+              <button type="button" onclick="reconnectBroker()" class="ui-btn ui-btn-sm" style="background:#C2334A;border-color:#C2334A;color:#fff"><i class="fa-solid fa-bolt" aria-hidden="true"></i> Reconnect</button>
+              <button type="button" onclick="switchTab('settings')" class="ui-btn ui-btn-sm"><i class="fa-solid fa-sliders" aria-hidden="true"></i> Diagnostics</button>
             </div>
           </div>
-        </div>
-      </div>
-
-      <!-- Broker online strip (LIVE mode only) -->
-      <div id="brokerConnectedStrip" class="hidden ui-card px-4 py-3 flex flex-wrap items-center justify-between gap-2 text-xs">
-        <div class="flex items-center flex-wrap gap-x-3 gap-y-1 text-slate-400 min-w-0">
-          <span class="flex items-center gap-1.5 font-semibold text-emerald-300"><span class="ui-dot" style="background:var(--gain)"></span><span id="stripBrokerName">Broker</span> online</span>
-          <span><strong id="stripBrokerEndpoint" class="text-slate-200 font-mono font-medium">172.17.0.2:4003</strong></span>
-          <span><strong id="stripBrokerLatency" class="text-slate-200 font-mono font-medium">-- ms</strong></span>
-          <span class="hidden sm:inline">Account <strong id="stripBrokerAccount" class="text-slate-200 font-mono font-medium">--</strong></span>
-        </div>
-        <div class="flex items-center gap-2">
-          <button type="button" onclick="syncAccountWithBroker()" class="ui-btn ui-btn-sm"><i class="fa-solid fa-arrows-rotate"></i> Sync</button>
-          <button type="button" onclick="pingBrokerStatus(true)" class="ui-btn ui-btn-sm"><i class="fa-solid fa-wifi"></i> Ping</button>
         </div>
       </div>
 
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-3.5 sm:gap-5">
         <div class="lg:col-span-2 space-y-3.5 sm:space-y-5 min-w-0">
 
+          <!-- Status and controls: market + cash-limit chips, broker strip, control tiles -->
+          <section class="status-block" aria-label="Status and controls">
+            <!-- Market status + capital limit -->
+            <div class="flex flex-wrap gap-2">
+              <span id="mobileMarketStatusPill" class="ui-chip"><span id="mobileMarketDot" class="ui-dot"></span><span id="mobileMarketStatusText">Markets: Checking...</span></span>
+              <span class="ui-chip">Cash limit <span id="capitalLimitBadge" class="ui-num text-slate-200">100%</span></span>
+            </div>
+
+            <!-- Broker online strip (LIVE mode only) -->
+            <div id="brokerConnectedStrip" class="hidden ui-card px-4 py-3 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div class="flex items-center flex-wrap gap-x-3 gap-y-1 text-slate-400 min-w-0">
+                <span class="flex items-center gap-1.5 font-semibold text-emerald-300"><span class="ui-dot" style="background:var(--gain)"></span><span id="stripBrokerName">Broker</span> online</span>
+                <span><strong id="stripBrokerEndpoint" class="text-slate-200 font-mono font-medium">172.17.0.2:4003</strong></span>
+                <span><strong id="stripBrokerLatency" class="text-slate-200 font-mono font-medium">-- ms</strong></span>
+                <span class="hidden sm:inline">Account <strong id="stripBrokerAccount" class="text-slate-200 font-mono font-medium">--</strong></span>
+              </div>
+              <div class="flex items-center gap-2">
+                <button type="button" onclick="syncAccountWithBroker()" class="ui-btn ui-btn-sm"><i class="fa-solid fa-arrows-rotate" aria-hidden="true"></i> Sync</button>
+                <button type="button" onclick="pingBrokerStatus(true)" class="ui-btn ui-btn-sm"><i class="fa-solid fa-wifi" aria-hidden="true"></i> Ping</button>
+              </div>
+            </div>
+
+            <!-- Controls: auto-buy and kill switch -->
+            <div class="grid grid-cols-2 gap-2.5">
+              <button type="button" onclick="switchTab('settings')" id="mobileAutoBuyPill" class="control-tile" title="Open settings to change auto-buy">
+                <span class="min-w-0">
+                  <span class="tile-label">Auto-buy</span>
+                  <span class="tile-value" id="mobileAutoBuyText">On</span>
+                </span>
+                <span id="mobileAutoBuyDot" class="ui-switch on" aria-hidden="true"></span>
+              </button>
+              <button type="button" onclick="toggleKillSwitch()" id="killSwitchBtn" class="control-tile kill-tile" title="Emergency kill switch: halt or resume all new automated buying">
+                <span class="min-w-0">
+                  <span class="tile-label">Kill switch</span>
+                  <span class="tile-value kill-switch-label">Stop buying</span>
+                </span>
+                <i class="fa-solid fa-power-off text-xl" aria-hidden="true"></i>
+              </button>
+            </div>
+          </section>
+
           <!-- Hero: total value, return, allocation bar -->
-          <section class="ui-card p-[18px] sm:p-6 space-y-4" aria-label="Portfolio value">
+          <section class="ui-card p-4 sm:p-6 space-y-3 sm:space-y-4" aria-label="Portfolio value">
             <div class="space-y-1">
               <div class="ui-label text-[13px]">Portfolio value</div>
               <div id="metricTotalVal" class="hero-value truncate">&euro;0.00</div>
@@ -221,32 +248,8 @@
             </div>
           </section>
 
-          <!-- Controls: auto-buy and kill switch -->
-          <section class="grid grid-cols-2 gap-2.5" aria-label="Controls">
-            <button type="button" onclick="switchTab('settings')" id="mobileAutoBuyPill" class="control-tile" title="Open settings to change auto-buy">
-              <span class="min-w-0">
-                <span class="tile-label">Auto-buy</span>
-                <span class="tile-value" id="mobileAutoBuyText">On</span>
-              </span>
-              <span id="mobileAutoBuyDot" class="ui-switch on" aria-hidden="true"></span>
-            </button>
-            <button type="button" onclick="toggleKillSwitch()" id="killSwitchBtn" class="control-tile kill-tile" title="Emergency kill switch: halt or resume all new automated buying">
-              <span class="min-w-0">
-                <span class="tile-label">Kill switch</span>
-                <span class="tile-value kill-switch-label">Stop buying</span>
-              </span>
-              <i class="fa-solid fa-power-off text-xl"></i>
-            </button>
-          </section>
-
-          <!-- Market status + capital limit -->
-          <section class="flex flex-wrap gap-2" aria-label="Market status">
-            <span id="mobileMarketStatusPill" class="ui-chip"><span id="mobileMarketDot" class="ui-dot"></span><span id="mobileMarketStatusText">Markets: Checking...</span></span>
-            <span class="ui-chip">Cash limit <span id="capitalLimitBadge" class="ui-num text-slate-200">100%</span></span>
-          </section>
-
           <!-- KPIs -->
-          <section class="grid grid-cols-2 gap-2.5" aria-label="Key figures">
+          <section class="home-kpis grid grid-cols-3 gap-2" aria-label="Key figures">
             <div class="ui-card kpi">
               <span class="ui-label">Deployable cash</span>
               <span id="metricCash" class="kpi-value">&euro;0.00</span>
@@ -257,29 +260,23 @@
               <span id="metricUnrealizedPnl" class="kpi-value">&euro;0.00</span>
               <span class="kpi-sub"><span id="metricPosCount">0 open positions</span><span id="metricUnrealizedPnlSub" class="sr-only">Open paper positions</span></span>
             </div>
+            <!-- Pending triggers (opens the Triggers tab) -->
+            <button type="button" onclick="switchTab('triggers')" id="pendingTriggersSummary" class="trigger-link">
+              <span class="ui-label"><i class="fa-solid fa-crosshairs" aria-hidden="true"></i> Triggers</span>
+              <span id="pendingTriggersSummaryText" class="trigger-text">0 pending triggers</span>
+              <span id="pendingTriggersSummarySub" class="kpi-sub max-md:sr-only">Limit orders waiting for their price</span>
+            </button>
           </section>
-
-          <!-- Pending triggers (opens the Triggers tab) -->
-          <button type="button" onclick="switchTab('triggers')" id="pendingTriggersSummary" class="trigger-link">
-            <span class="flex items-center gap-3 min-w-0">
-              <span class="icon-well"><i class="fa-solid fa-crosshairs"></i></span>
-              <span class="min-w-0">
-                <span id="pendingTriggersSummaryText" class="block font-semibold text-[15px] text-white">0 pending triggers</span>
-                <span id="pendingTriggersSummarySub" class="block text-xs text-slate-400">Limit orders waiting for their price</span>
-              </span>
-            </span>
-            <i class="fa-solid fa-chevron-right text-xs text-slate-400 shrink-0"></i>
-          </button>
 
           <!-- Positions -->
           <section class="space-y-2.5" aria-labelledby="positionsTitle">
             <div class="flex items-center justify-between px-0.5">
               <h2 id="positionsTitle" class="ui-section-title">Positions <span id="positionsCount" class="ui-count">0</span></h2>
-              <button type="button" onclick="loadPortfolio()" class="ui-btn ui-btn-quiet ui-btn-sm" aria-label="Reload positions"><i class="fa-solid fa-arrows-rotate"></i></button>
+              <button type="button" onclick="loadPortfolio()" class="ui-btn ui-btn-quiet ui-btn-sm ui-icon-btn" aria-label="Reload positions"><i class="fa-solid fa-arrows-rotate" aria-hidden="true"></i></button>
             </div>
             <div id="positionsContainer" class="ui-list">
               <div class="text-center py-10 text-slate-400 text-sm">
-                <i class="fa-solid fa-circle-notch fa-spin text-xl mb-2 text-accent block"></i>
+                <i class="fa-solid fa-circle-notch fa-spin text-xl mb-2 text-accent block" aria-hidden="true"></i>
                 Loading positions...
               </div>
             </div>
