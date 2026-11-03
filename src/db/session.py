@@ -38,6 +38,7 @@ def _run_migrations(connection):
         ("order_triggers", "broker_order_id", "VARCHAR(100)"),
         ("portfolio_snapshots", "is_live", "BOOLEAN DEFAULT 0"),
         ("cash_flows", "broker_ref", "VARCHAR(64)"),
+        ("portfolio_snapshots", "broker", "VARCHAR(20)"),
     ]
     for table, col, col_type in migrations:
         try:
