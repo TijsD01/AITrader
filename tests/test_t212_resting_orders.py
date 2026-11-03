@@ -325,3 +325,63 @@ async def test_cancel_trigger_with_fill_books_position(rest, asml):
     assert res["success"] is False and "filled" in res["message"]
     assert (await _trigger(tid)).status == "TRIGGERED"
     assert len(await _positions()) == 1
+
+
+# --- Take-profit on live T212 price (Task 5) ---
+
+async def _tp_position(entry=600.0, stop=570.0, tp=660.0, shares=0.5):
+    async with AsyncSessionLocal() as s:
+        # highest above every test price, so the trailing stop never moves
+        s.add(Position(ticker="ASML.AS", name="ASML", currency="EUR", shares=shares, entry_price_native=entry,
+                       current_price_native=entry, highest_price_native=1000.0, entry_price_eur=entry,
+                       current_price_eur=entry, cost_basis_eur=shares * entry, stop_loss_native=stop,
+                       take_profit_native=tp, status="OPEN", is_live=True))
+        await s.commit()
+
+
+def _t212_held(rest, price, qty=0.5, stop=570.0):
+    rest.positions_answers = [[dict(_held("ASMLa_EQ", qty, avg=600.0), currentPrice=price)]]
+    rest.pending = [{"id": 20, "ticker": "ASMLa_EQ", "type": "STOP", "side": "SELL", "quantity": -qty, "stopPrice": stop}]
+
+
+async def _check(yahoo):
+    with _quote(yahoo), patch("src.telegram.bot.telegram_bot.send_message", AsyncMock()), \
+         patch("src.telegram.bot.telegram_bot.notify_position_closed", AsyncMock()):
+        return await LiveBroker().check_stops_and_targets()
+
+
+async def test_refresh_uses_t212_current_price(rest, asml):
+    await _tp_position(entry=100.0, stop=90.0, tp=200.0)
+    _t212_held(rest, 110.0, stop=90.0)
+    with _quote(100.0):
+        await LiveBroker().refresh_positions_pnl()
+    assert (await _positions())[0].current_price_native == 110.0
+
+
+async def test_take_profit_sends_limit_sell_at_target(rest, asml):
+    await _tp_position()
+    _t212_held(rest, 665.0)
+    rest.fill_on_poll = (0.5, 660.0)
+    await _check(650.0)
+    assert ("limit", "ASMLa_EQ", -0.5, 660.0) in rest.posts
+    assert not any(p[0] == "market" for p in rest.posts)
+    assert not await _positions()
+
+
+async def test_tp_limit_sell_unfilled_restores_stop(rest, asml):
+    await _tp_position()
+    _t212_held(rest, 665.0)
+    rest.history = [{"order": {"id": 1, "status": "CANCELLED"}}]
+    await _check(650.0)
+    assert ("limit", "ASMLa_EQ", -0.5, 660.0) in rest.posts
+    assert 1 in rest.cancelled
+    assert ("stop", "ASMLa_EQ", -0.5, 570.0) in rest.posts
+    assert len(await _positions()) == 1
+
+
+async def test_stop_loss_branch_still_market(rest, asml):
+    await _tp_position()
+    _t212_held(rest, 560.0)
+    await _check(650.0)
+    assert any(p[0] == "market" for p in rest.posts)
+    assert not any(p[0] == "limit" for p in rest.posts)

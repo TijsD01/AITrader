@@ -335,9 +335,9 @@ class LiveBroker(BaseBroker):
             logger.error(f"Trading 212 stop restore for {ticker} failed: {e}")
             await self._t212_alert(f"Trading 212 exit for {ticker} failed and its stop at {stop} could not be restored")
 
-    async def _t212_close(self, ticker: str, shares: float, currency: str) -> Optional[str]:
+    async def _t212_close(self, ticker: str, shares: float, currency: str, limit_price: Optional[float] = None) -> Optional[str]:
         """
-        Cancels the resting SELL orders, then sells the position at market and returns the id only once T212 reports
+        Cancels the resting SELL orders, then sells the position at market (or a DAY limit at limit_price) and returns the id only once T212 reports
         the full fill. On any failure the cancelled stop is put back, so the position is never left unprotected.
         """
         client = trading212.get_client()
@@ -351,7 +351,7 @@ class LiveBroker(BaseBroker):
         sells = self._t212_sells(await client.pending_orders(), t212_ticker)
         stop = next((float(o["stopPrice"]) for o in sells if o.get("type") == "STOP" and o.get("stopPrice")), None)
         try:
-            exit_id = await self._t212_exit(client, t212_ticker, ticker, shares, sells)
+            exit_id = await self._t212_exit(client, t212_ticker, ticker, shares, sells, limit_price)
         except Exception as e:
             logger.error(f"Trading 212 exit for {ticker} failed: {e}")
             exit_id = None
@@ -359,7 +359,9 @@ class LiveBroker(BaseBroker):
             await self._t212_restore_stop(client, t212_ticker, ticker, stop)
         return exit_id
 
-    async def _t212_exit(self, client: Any, t212_ticker: str, ticker: str, shares: float, sells: List[Dict[str, Any]]) -> Optional[str]:
+    async def _t212_exit(
+        self, client: Any, t212_ticker: str, ticker: str, shares: float, sells: List[Dict[str, Any]], limit_price: Optional[float] = None
+    ) -> Optional[str]:
         # Cancel the resting stop first, otherwise it can still fill after the market sell
         for o in sells:
             await client.cancel_order(o["id"])
@@ -385,9 +387,9 @@ class LiveBroker(BaseBroker):
             # Nothing is booked; the next sync aligns the local share count with the broker
             logger.error(f"Trading 212 has only {free:g} of {shares:g} {ticker} free to sell; exit not sent.")
             return None
-        order = await self._t212_post(
-            client, lambda: client.place_market(t212_ticker, -shares), t212_ticker, -shares, f"SELL {shares} {ticker}"
-        )
+        place = (lambda: client.place_limit(t212_ticker, -shares, self._t212_price(limit_price), "DAY")) if limit_price \
+            else (lambda: client.place_market(t212_ticker, -shares))
+        order = await self._t212_post(client, place, t212_ticker, -shares, f"SELL {shares} {ticker}")
         if not order:
             return None
         oid = order["id"]
@@ -426,8 +428,8 @@ class LiveBroker(BaseBroker):
             float((acct.get("investments") or {}).get("currentValue") or 0.0),
         )
 
-    async def _dispatch_real_close(self, ticker: str, shares: float, currency: str = "USD") -> Optional[str]:
-        """Dispatches live position exit to configured broker API."""
+    async def _dispatch_real_close(self, ticker: str, shares: float, currency: str = "USD", limit_price: Optional[float] = None) -> Optional[str]:
+        """Dispatches live position exit to configured broker API. limit_price: Trading 212 only, Alpaca sells at market."""
         broker = settings.LIVE_BROKER.lower()
         if broker == "alpaca":
             try:
@@ -462,7 +464,7 @@ class LiveBroker(BaseBroker):
                 logger.info(f"Alpaca close note: {e}")
         elif broker == "trading212":
             try:
-                return await self._t212_close(ticker, shares, currency)
+                return await self._t212_close(ticker, shares, currency, limit_price)
             except Exception as e:
                 logger.error(f"Trading 212 exit for {ticker} failed: {e}")
         return None
@@ -1002,7 +1004,8 @@ class LiveBroker(BaseBroker):
         }
 
     async def execute_sell(
-        self, ticker: str, reason: str = "Manual Close", broker_flat: bool = False, exit_price_native: Optional[float] = None
+        self, ticker: str, reason: str = "Manual Close", broker_flat: bool = False, exit_price_native: Optional[float] = None,
+        limit_price_native: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Submits real sell order to brokerage API to close live position.
@@ -1022,7 +1025,8 @@ class LiveBroker(BaseBroker):
                 return {"success": False, "message": f"No open live position found for {ticker}."}
 
             self._t212_exit_prices.pop(ticker.upper(), None)
-            dispatched_id = "broker_flat" if broker_flat else await self._dispatch_real_close(ticker=ticker, shares=pos.shares, currency=pos.currency)
+            dispatched_id = "broker_flat" if broker_flat else await self._dispatch_real_close(
+                ticker=ticker, shares=pos.shares, currency=pos.currency, limit_price=limit_price_native)
             if not dispatched_id:
                 logger.error(f"[LIVE EXECUTION] SELL {ticker} was not accepted by {settings.LIVE_BROKER.upper()}; position left open.")
                 return {"success": False, "message": f"Exit order for {ticker} could not be placed at {settings.LIVE_BROKER.upper()} (broker not connected or order rejected)."}
@@ -1715,12 +1719,14 @@ class LiveBroker(BaseBroker):
 
             for p in positions:
                 if p.stop_loss_native and p.current_price_native <= p.stop_loss_native:
-                    tickers_to_close.append((p.ticker, f"Live Stop-Loss triggered at {p.current_price_native} <= {p.stop_loss_native}"))
+                    tickers_to_close.append((p.ticker, f"Live Stop-Loss triggered at {p.current_price_native} <= {p.stop_loss_native}", None))
                 elif p.take_profit_native and p.current_price_native >= p.take_profit_native:
-                    tickers_to_close.append((p.ticker, f"Live Take-Profit triggered at {p.current_price_native} >= {p.take_profit_native}"))
+                    # Resting mode: a limit at the target, so a spike seen on the T212 price cannot sell below it
+                    limit = p.take_profit_native if self.resting_orders_on() else None
+                    tickers_to_close.append((p.ticker, f"Live Take-Profit triggered at {p.current_price_native} >= {p.take_profit_native}", limit))
 
-        for ticker, reason in tickers_to_close:
-            sell_res = await self.execute_sell(ticker, reason=reason)
+        for ticker, reason, limit in tickers_to_close:
+            sell_res = await self.execute_sell(ticker, reason=reason, limit_price_native=limit)
             if sell_res.get("success"):
                 triggered.append(sell_res)
 
@@ -1747,15 +1753,27 @@ class LiveBroker(BaseBroker):
                     self._last_pnl_refresh = now
                     return
 
+                # Resting mode: the broker's own price drives exits; Yahoo is the fallback
+                client, t212_prices = (trading212.get_client() if self.resting_orders_on() else None), {}
+                if client:
+                    try:
+                        held = {bp["instrument"]["ticker"]: bp.get("currentPrice") for bp in await client.positions()}
+                        t212_prices = {p.ticker: held.get(await client.resolve_ticker(p.ticker, p.currency)) for p in positions}
+                    except Exception as e:
+                        logger.warning(f"Trading 212 positions for live prices failed, using Yahoo: {e}")
+
                 for p in positions:
                     is_open, _ = check_market_hours(p.ticker)
                     if not is_open and p.current_price_native and p.current_price_native > 0:
                         continue
 
-                    data = await asyncio.to_thread(market_data_provider.get_stock_data, p.ticker)
-                    curr_price = data["price"] if data else None
+                    curr_price = t212_prices.get(p.ticker)
+                    if not curr_price:
+                        data = await asyncio.to_thread(market_data_provider.get_stock_data, p.ticker)
+                        curr_price = data["price"] if data else None
 
                     if curr_price:
+                        curr_price = float(curr_price)
                         p.current_price_native = curr_price
                         p.current_price_eur = currency_service.to_eur(curr_price, p.currency)
                         if curr_price > (p.highest_price_native or 0.0):
