@@ -394,3 +394,51 @@ async def test_daily_loss_limit_counts_only_todays_drop_and_turns_on_kill_switch
             await session.execute(delete(Position).where(Position.ticker == ticker))
             await session.execute(delete(CashFlow).where(CashFlow.is_live == True))
             await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_broker_switch_starts_a_new_history_for_loss_and_return():
+    import datetime as dt
+    from unittest.mock import AsyncMock
+    from src.db.models import CashFlow
+    await init_db()
+    now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    try:
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True))
+            await session.execute(delete(CashFlow).where(CashFlow.is_live == True))
+            # The old IBKR account (and untagged rows from before the broker column) was worth €10,000
+            legacy = PortfolioSnapshot(cash_eur=10000.0, equity_eur=0.0, total_value_eur=10000.0, is_live=True,
+                                       timestamp=now - dt.timedelta(days=3))
+            session.add(legacy)
+            await session.flush()
+            legacy.broker = None  # rows written before the column existed are NULL (an insert would apply the default)
+            session.add(PortfolioSnapshot(cash_eur=10000.0, equity_eur=0.0, total_value_eur=10000.0, is_live=True,
+                                          broker="ibkr", timestamp=now - dt.timedelta(days=1)))
+            # The Trading 212 account starts with €2,000, funded by a deposit before its first snapshot
+            session.add(CashFlow(amount_eur=2000.0, source="broker", is_live=True, timestamp=now - dt.timedelta(hours=2)))
+            session.add(PortfolioSnapshot(cash_eur=2000.0, equity_eur=0.0, total_value_eur=2000.0, is_live=True,
+                                          broker="trading212", timestamp=now - dt.timedelta(hours=1)))
+            await session.commit()
+        with patch.object(settings, "LIVE_BROKER", "trading212"), \
+             patch.object(live_broker, "_fetch_t212_account_values", AsyncMock(return_value=(2000.0, 2000.0, 0.0))), \
+             patch("src.trading.live.scan_live_cash_flows", AsyncMock(return_value=0)), \
+             patch.object(live_broker, "refresh_positions_pnl", AsyncMock()), \
+             patch.object(live_broker, "adjust_triggers_dynamically", AsyncMock(return_value=[])):
+            assert await live_broker.get_daily_loss_eur() == 0.0  # not €8,000
+            summary = await live_broker.get_portfolio_summary()
+        assert summary["initial_capital_eur"] == 2000.0
+        assert summary["net_deposits_eur"] == 0.0  # the funding deposit is inside the start value
+        assert summary["total_gain_eur"] == 0.0
+        # Only untagged rows before it (the switch happened before the broker column existed): still a new history
+        from src.trading.cash_flows import live_history_start
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(PortfolioSnapshot).where(PortfolioSnapshot.broker == "ibkr"))
+            await session.commit()
+            with patch.object(settings, "LIVE_BROKER", "trading212"):
+                assert await live_history_start(session) == now - dt.timedelta(hours=1)
+    finally:
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True))
+            await session.execute(delete(CashFlow).where(CashFlow.is_live == True))
+            await session.commit()

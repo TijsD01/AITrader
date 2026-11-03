@@ -58,6 +58,27 @@ def detect_flow(
     return round(d_cash, 2)
 
 
+async def live_history_start(session) -> Optional[datetime.datetime]:
+    """
+    When the current live broker took over from another one: the time of its first snapshot, else None.
+    Live snapshots before it (another broker, or untagged rows from before the broker column) belong to the old
+    account, so start capital, daily loss and deposits are measured from here on.
+    """
+    broker = settings.LIVE_BROKER.lower()
+    first_own = (await session.execute(
+        select(func.min(PortfolioSnapshot.timestamp)).where(PortfolioSnapshot.is_live == True, PortfolioSnapshot.broker == broker)
+    )).scalar()
+    if first_own is None:
+        return None
+    older = (await session.execute(
+        select(PortfolioSnapshot.id).where(
+            PortfolioSnapshot.is_live == True, PortfolioSnapshot.timestamp < first_own,
+            (PortfolioSnapshot.broker != broker) | PortfolioSnapshot.broker.is_(None),
+        ).limit(1)
+    )).scalar()
+    return first_own if older is not None else None
+
+
 def broker_flow_amount(item: Dict[str, Any]) -> Optional[float]:
     """EUR deposit (positive) or withdrawal (negative) for one T212 transaction, or None when it is no flow."""
     kind = (item.get("type") or "").upper()
@@ -95,9 +116,12 @@ async def sync_broker_cash_flows(client) -> int:
     inside that snapshot's value, the starting capital. Replaces flows guessed from balances. Returns how many were added.
     """
     async with db_session.AsyncSessionLocal() as session:
+        start = await live_history_start(session)
+        first_q = select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True)
+        if start is not None:
+            first_q = first_q.where(PortfolioSnapshot.timestamp >= start)
         first = (await session.execute(
-            select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True)
-            .order_by(PortfolioSnapshot.timestamp, PortfolioSnapshot.id).limit(1)
+            first_q.order_by(PortfolioSnapshot.timestamp, PortfolioSnapshot.id).limit(1)
         )).scalars().first()
         known = set((await session.execute(
             select(CashFlow.broker_ref).where(CashFlow.broker_ref.is_not(None))

@@ -6,6 +6,11 @@ from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
 
+
+def _current_broker():
+    from config.settings import settings
+    return (settings.LIVE_BROKER or "").lower()
+
 class WatchlistItem(Base):
     __tablename__ = "watchlist"
 
@@ -83,6 +88,8 @@ class PortfolioSnapshot(Base):
     daily_pnl_pct = Column(Float, default=0.0)
     open_positions_count = Column(Integer, default=0)
     is_live = Column(Boolean, default=False)
+    # Live broker when written (NULL = written before this column existed). A broker switch starts a new history.
+    broker = Column(String(20), nullable=True, default=_current_broker)
 
 # Money moved into or out of the account (deposits positive, withdrawals negative). Kept apart from
 # trades so the portfolio gain counts only what the bot earned, not what was put in.

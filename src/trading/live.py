@@ -15,7 +15,7 @@ from src.data.market import market_data_provider
 from src.trading.risk import risk_guardrail, get_effective_deployable_cash, allocate_pending_triggers, evaluate_trigger_condition, is_trigger_expired, validate_trigger_levels, compute_trailing_stop, check_market_regime, affordable_share_count, fit_allocation_to_share, new_entry_allocation, risk_capped_allocation, plan_pending_triggers
 from src.data.market_hours import check_market_hours
 from src.trading.base import BaseBroker
-from src.trading.cash_flows import scan_live_cash_flows, net_cash_flows_eur
+from src.trading.cash_flows import scan_live_cash_flows, net_cash_flows_eur, live_history_start
 from src.trading import trading212
 
 logger = logging.getLogger(__name__)
@@ -480,8 +480,12 @@ class LiveBroker(BaseBroker):
         as a positive loss (0 when up). A position that was already under water yesterday only counts today's move.
         """
         today_start = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
-        live_snaps = select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True)
         async with AsyncSessionLocal() as session:
+            live_snaps = select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True)
+            # After a broker switch the old account's value is not today's start
+            start = await live_history_start(session)
+            if start is not None:
+                live_snaps = live_snaps.where(PortfolioSnapshot.timestamp >= start)
             # Start value: the last snapshot before today, else today's first one
             base = (await session.execute(
                 live_snaps.where(PortfolioSnapshot.timestamp < today_start)
@@ -539,7 +543,11 @@ class LiveBroker(BaseBroker):
             await scan_live_cash_flows()
         except Exception as e:
             logger.warning(f"Deposit scan failed: {e}")
-        net_deposits = await net_cash_flows_eur(is_live=True)
+        async with AsyncSessionLocal() as session:
+            # After a broker switch, start capital and deposits count from the new broker's first snapshot
+            start = await live_history_start(session)
+        # A flow stamped at the first snapshot itself is already inside that value
+        net_deposits = await net_cash_flows_eur(is_live=True, since=start)
         async with AsyncSessionLocal() as session:
             res = await session.execute(
                 select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True).order_by(desc(PortfolioSnapshot.timestamp))
@@ -581,9 +589,10 @@ class LiveBroker(BaseBroker):
             daily_loss = await self.get_daily_loss_eur()
 
             # Baseline initial capital for live trading
-            first_snap_res = await session.execute(
-                select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True).order_by(PortfolioSnapshot.timestamp.asc())
-            )
+            first_q = select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True)
+            if start is not None:
+                first_q = first_q.where(PortfolioSnapshot.timestamp >= start)
+            first_snap_res = await session.execute(first_q.order_by(PortfolioSnapshot.timestamp.asc()))
             first_snap = first_snap_res.scalars().first()
             initial_cap = first_snap.total_value_eur if first_snap else total_val
             # Deposits and withdrawals are not gain: measure against everything that was put in
