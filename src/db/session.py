@@ -1,11 +1,16 @@
+import asyncio
 import os
 from pathlib import Path
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy import select
 
+import logging
 from config.settings import settings
 from config.default_universe import DEFAULT_WATCHLIST, EU_STOCKS, US_STOCKS
+
 from src.db.models import Base, WatchlistItem, PortfolioSnapshot, SystemConfig
+
+logger = logging.getLogger(__name__)
 
 engine = create_async_engine(
     settings.DATABASE_URL,
@@ -179,4 +184,19 @@ async def set_kill_switch(active: bool) -> bool:
             session.add(SystemConfig(key="KILL_SWITCH_ACTIVE", value=str(active).lower()))
         await session.commit()
     settings.KILL_SWITCH_ACTIVE = active
+    if active:
+        # A task, not an await: sync_resting_entries can reach here holding the broker's T212 lock, which the cancel needs
+        from src.trading.broker import live_broker
+        task = asyncio.create_task(live_broker.cancel_resting_entries("kill switch on"))
+        _cancel_tasks.add(task)
+        task.add_done_callback(_cancel_done)
     return active
+
+
+_cancel_tasks: set = set()
+
+
+def _cancel_done(task: "asyncio.Task") -> None:
+    _cancel_tasks.discard(task)
+    if not task.cancelled() and task.exception():
+        logger.error(f"Cancelling resting orders on kill switch failed: {task.exception()}")

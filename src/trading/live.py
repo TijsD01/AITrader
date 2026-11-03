@@ -37,6 +37,8 @@ class LiveBroker(BaseBroker):
         self._refresh_lock = asyncio.Lock()
         # Last broker buying power (Trading 212 availableToTrade): buys never size past unsettled cash
         self._available_funds_eur: Optional[float] = None
+        # Trading 212 reservedForOrders: cash held for our own resting buys, added back to buying power when they are on
+        self._reserved_for_orders_eur: float = 0.0
         self._last_connection_check: float = 0.0
         self._connection_check_ttl: float = 15.0  # 15s cache to prevent socket churn
         self._last_connection_status: Optional[Dict[str, Any]] = None
@@ -333,9 +335,9 @@ class LiveBroker(BaseBroker):
             logger.error(f"Trading 212 stop restore for {ticker} failed: {e}")
             await self._t212_alert(f"Trading 212 exit for {ticker} failed and its stop at {stop} could not be restored")
 
-    async def _t212_close(self, ticker: str, shares: float, currency: str) -> Optional[str]:
+    async def _t212_close(self, ticker: str, shares: float, currency: str, limit_price: Optional[float] = None) -> Optional[str]:
         """
-        Cancels the resting SELL orders, then sells the position at market and returns the id only once T212 reports
+        Cancels the resting SELL orders, then sells the position at market (or a DAY limit at limit_price) and returns the id only once T212 reports
         the full fill. On any failure the cancelled stop is put back, so the position is never left unprotected.
         """
         client = trading212.get_client()
@@ -349,7 +351,7 @@ class LiveBroker(BaseBroker):
         sells = self._t212_sells(await client.pending_orders(), t212_ticker)
         stop = next((float(o["stopPrice"]) for o in sells if o.get("type") == "STOP" and o.get("stopPrice")), None)
         try:
-            exit_id = await self._t212_exit(client, t212_ticker, ticker, shares, sells)
+            exit_id = await self._t212_exit(client, t212_ticker, ticker, shares, sells, limit_price)
         except Exception as e:
             logger.error(f"Trading 212 exit for {ticker} failed: {e}")
             exit_id = None
@@ -357,7 +359,9 @@ class LiveBroker(BaseBroker):
             await self._t212_restore_stop(client, t212_ticker, ticker, stop)
         return exit_id
 
-    async def _t212_exit(self, client: Any, t212_ticker: str, ticker: str, shares: float, sells: List[Dict[str, Any]]) -> Optional[str]:
+    async def _t212_exit(
+        self, client: Any, t212_ticker: str, ticker: str, shares: float, sells: List[Dict[str, Any]], limit_price: Optional[float] = None
+    ) -> Optional[str]:
         # Cancel the resting stop first, otherwise it can still fill after the market sell
         for o in sells:
             await client.cancel_order(o["id"])
@@ -383,9 +387,9 @@ class LiveBroker(BaseBroker):
             # Nothing is booked; the next sync aligns the local share count with the broker
             logger.error(f"Trading 212 has only {free:g} of {shares:g} {ticker} free to sell; exit not sent.")
             return None
-        order = await self._t212_post(
-            client, lambda: client.place_market(t212_ticker, -shares), t212_ticker, -shares, f"SELL {shares} {ticker}"
-        )
+        place = (lambda: client.place_limit(t212_ticker, -shares, self._t212_price(limit_price), "DAY")) if limit_price \
+            else (lambda: client.place_market(t212_ticker, -shares))
+        order = await self._t212_post(client, place, t212_ticker, -shares, f"SELL {shares} {ticker}")
         if not order:
             return None
         oid = order["id"]
@@ -416,6 +420,7 @@ class LiveBroker(BaseBroker):
         cash = acct.get("cash") or {}
         available = float(cash.get("availableToTrade") or 0.0)
         self._available_funds_eur = max(0.0, available)
+        self._reserved_for_orders_eur = max(0.0, float(cash.get("reservedForOrders") or 0.0))
         total = acct.get("totalValue")
         return (
             available + float(cash.get("reservedForOrders") or 0.0),
@@ -423,8 +428,8 @@ class LiveBroker(BaseBroker):
             float((acct.get("investments") or {}).get("currentValue") or 0.0),
         )
 
-    async def _dispatch_real_close(self, ticker: str, shares: float, currency: str = "USD") -> Optional[str]:
-        """Dispatches live position exit to configured broker API."""
+    async def _dispatch_real_close(self, ticker: str, shares: float, currency: str = "USD", limit_price: Optional[float] = None) -> Optional[str]:
+        """Dispatches live position exit to configured broker API. limit_price: Trading 212 only, Alpaca sells at market."""
         broker = settings.LIVE_BROKER.lower()
         if broker == "alpaca":
             try:
@@ -459,10 +464,14 @@ class LiveBroker(BaseBroker):
                 logger.info(f"Alpaca close note: {e}")
         elif broker == "trading212":
             try:
-                return await self._t212_close(ticker, shares, currency)
+                return await self._t212_close(ticker, shares, currency, limit_price)
             except Exception as e:
                 logger.error(f"Trading 212 exit for {ticker} failed: {e}")
         return None
+
+    @staticmethod
+    def resting_orders_on() -> bool:
+        return settings.T212_RESTING_ORDERS and settings.LIVE_BROKER.lower() == "trading212"
 
     def is_live_armed(self) -> Tuple[bool, str]:
         """Verifies if live real-money execution is safely enabled."""
@@ -679,6 +688,72 @@ class LiveBroker(BaseBroker):
         Submits real buy order to the brokerage API (Trading 212 / Alpaca) with real money.
         Validates kill switch, daily drawdown, market hours, and settled capital.
         """
+        plan = await self._plan_live_buy(
+            ticker, price_native, currency, stop_loss_native, take_profit_native,
+            allocation_eur, consensus_score, is_manual=is_manual, trigger_id=trigger_id
+        )
+        if not plan["success"]:
+            return plan
+        shares = plan["shares"]
+
+        # Trading 212: the lock holds until the position is committed, so a sync cannot adopt these shares as untracked
+        async with (self._t212_lock if settings.LIVE_BROKER.lower() == "trading212" else contextlib.nullcontext()):
+            # 9. Dispatch real order to broker API
+            dispatched = await self._dispatch_real_order(
+                ticker=ticker,
+                shares=shares,
+                price=price_native,
+                currency=currency,
+                stop_loss=stop_loss_native,
+                take_profit=take_profit_native
+            )
+            if not dispatched:
+                logger.error(f"[LIVE EXECUTION] BUY {ticker} was not accepted by {settings.LIVE_BROKER.upper()}; nothing recorded.")
+                return {"success": False, "message": f"Order for {ticker} could not be placed at {settings.LIVE_BROKER.upper()} (broker not connected or order rejected)."}
+            broker_order_id, filled, fill_price = dispatched
+            if filled <= 0:
+                msg = f"BUY {ticker} @ {price_native} {currency} did not fill within {FILL_WAIT_SECONDS:.0f}s and was cancelled; nothing recorded."
+                logger.warning(f"[LIVE EXECUTION] {msg}")
+                return {"success": False, "unfilled": True, "message": msg}
+            # Book what the broker filled, not what was asked
+            result = await self._book_live_fill(
+                ticker=ticker, name=name, currency=currency, shares=filled, price_native=fill_price,
+                stop_loss_native=stop_loss_native, take_profit_native=take_profit_native,
+                rationale=rationale, consensus_score=consensus_score, broker_order_id=broker_order_id
+            )
+        await self.adjust_triggers_dynamically()
+
+        # Record into TencentDB Agent Memory
+        try:
+            import asyncio
+            from src.memory.client import agent_memory_client
+            asyncio.create_task(agent_memory_client.record_trade_event(
+                ticker=ticker,
+                order_type="BUY",
+                shares=result["shares"],
+                price=result["price_native"],
+                currency=currency,
+                fee_eur=result["fee_eur"],
+                rationale=rationale
+            ))
+        except Exception:
+            pass
+
+        return result
+
+    async def _plan_live_buy(
+        self,
+        ticker: str,
+        price_native: float,
+        currency: str,
+        stop_loss_native: Optional[float],
+        take_profit_native: Optional[float],
+        allocation_eur: float,
+        consensus_score: int,
+        is_manual: bool = False,
+        trigger_id: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Run every pre-order check and size the buy. Returns a failure dict or {success, shares, price_eur, allocation_eur}."""
         # 1. Verify live execution interlocks
         armed, arm_msg = self.is_live_armed()
         if not armed:
@@ -810,136 +885,127 @@ class LiveBroker(BaseBroker):
             if shares <= 0 or actual_cost_eur + fee_eur > cash_eur:
                 return {"success": False, "message": f"Insufficient cash (€{cash_eur:.2f}) for {ticker} cost €{actual_cost_eur:.2f} plus fee €{fee_eur:.2f}."}
 
-            # Trading 212: the lock holds until the position is committed, so a sync cannot adopt these shares as untracked
-            async with (self._t212_lock if settings.LIVE_BROKER.lower() == "trading212" else contextlib.nullcontext()):
-                # 9. Dispatch real order to broker API
-                dispatched = await self._dispatch_real_order(
-                    ticker=ticker,
-                    shares=shares,
-                    price=price_native,
-                    currency=currency,
-                    stop_loss=stop_loss_native,
-                    take_profit=take_profit_native
-                )
-                if not dispatched:
-                    logger.error(f"[LIVE EXECUTION] BUY {ticker} was not accepted by {settings.LIVE_BROKER.upper()}; nothing recorded.")
-                    return {"success": False, "message": f"Order for {ticker} could not be placed at {settings.LIVE_BROKER.upper()} (broker not connected or order rejected)."}
-                broker_order_id, filled, fill_price = dispatched
-                if filled <= 0:
-                    msg = f"BUY {ticker} @ {price_native} {currency} did not fill within {FILL_WAIT_SECONDS:.0f}s and was cancelled; nothing recorded."
-                    logger.warning(f"[LIVE EXECUTION] {msg}")
-                    return {"success": False, "unfilled": True, "message": msg}
-                # Book what the broker filled, not what was asked
-                shares, price_native = filled, fill_price
-                price_eur = currency_service.to_eur(price_native, currency)
-                actual_cost_eur = round(shares * price_eur, 2)
-                fee_info = calculate_broker_fee(
-                    ticker=ticker, shares=shares, price_native=price_native, currency=currency, broker=settings.LIVE_BROKER, order_action="BUY"
-                )
-                fee_eur = fee_info["fee_eur"]
-                logger.info(
-                    f"[LIVE EXECUTION] Submitting real order to {settings.LIVE_BROKER.upper()}: "
-                    f"BUY {shares} {ticker} @ {price_native} {currency} (Cost: €{actual_cost_eur}, Fee: €{fee_eur:.2f} [{fee_info['breakdown']}]) | "
-                    f"SL: {stop_loss_native} | TP: {take_profit_native} | Order ID: {broker_order_id}"
-                )
+        return {"success": True, "shares": shares, "price_eur": price_eur, "allocation_eur": allocation_eur}
 
-                utc_now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    async def _book_live_fill(
+        self,
+        *,
+        ticker: str,
+        name: str,
+        currency: str,
+        shares: float,
+        price_native: float,
+        stop_loss_native: Optional[float],
+        take_profit_native: Optional[float],
+        rationale: str,
+        consensus_score: int,
+        broker_order_id: str
+    ) -> Dict[str, Any]:
+        """Record a filled live BUY: position, trade and snapshot. Callers hold _t212_lock (Trading 212)."""
+        from src.trading.fees import calculate_broker_fee
+        price_eur = currency_service.to_eur(price_native, currency)
+        actual_cost_eur = round(shares * price_eur, 2)
+        fee_info = calculate_broker_fee(
+            ticker=ticker, shares=shares, price_native=price_native, currency=currency, broker=settings.LIVE_BROKER, order_action="BUY"
+        )
+        fee_eur = fee_info["fee_eur"]
+        logger.info(
+            f"[LIVE EXECUTION] Submitting real order to {settings.LIVE_BROKER.upper()}: "
+            f"BUY {shares} {ticker} @ {price_native} {currency} (Cost: €{actual_cost_eur}, Fee: €{fee_eur:.2f} [{fee_info['breakdown']}]) | "
+            f"SL: {stop_loss_native} | TP: {take_profit_native} | Order ID: {broker_order_id}"
+        )
 
-                # Record live position in database
-                new_pos = Position(
-                    ticker=ticker.upper(),
-                    name=name,
-                    currency=currency,
-                    shares=shares,
-                    entry_price_native=price_native,
-                    current_price_native=price_native,
-                    highest_price_native=price_native,
-                    stop_loss_native=stop_loss_native,
-                    take_profit_native=take_profit_native,
-                    entry_price_eur=price_eur,
-                    current_price_eur=price_eur,
-                    cost_basis_eur=actual_cost_eur,
-                    fees_eur=fee_eur,
-                    unrealized_pnl_eur=0.0,
-                    unrealized_pnl_pct=0.0,
-                    status="OPEN",
-                    is_live=True,
-                    broker_order_id=broker_order_id,
-                    opened_at=utc_now
-                )
-                session.add(new_pos)
+        async with AsyncSessionLocal() as session:
+            pos_res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == True))
+            open_positions = pos_res.scalars().all()
+            snap_res = await session.execute(
+                select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True).order_by(desc(PortfolioSnapshot.timestamp))
+            )
+            snapshot = snap_res.scalars().first()
+            cash_eur = snapshot.cash_eur if snapshot else 0.0
+            equity_eur = sum(p.current_price_eur * p.shares for p in open_positions)
 
-                # Record Trade
-                trade = Trade(
-                    ticker=ticker.upper(),
-                    name=name,
-                    order_type="BUY",
-                    shares=shares,
-                    currency=currency,
-                    price_native=price_native,
-                    price_eur=price_eur,
-                    total_eur=actual_cost_eur,
-                    fee_eur=fee_eur,
-                    rationale=f"[LIVE {settings.LIVE_BROKER.upper()}] {rationale} (Fee: €{fee_eur:.2f})",
-                    consensus_score=consensus_score,
-                    is_live=True,
-                    broker_order_id=broker_order_id,
-                    executed_at=utc_now
-                )
-                session.add(trade)
+            utc_now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
-                # Update Portfolio Snapshot (cash decreases by cost + commission fee)
-                new_cash_eur = round(cash_eur - actual_cost_eur - fee_eur, 2)
-                new_equity_eur = equity_eur + actual_cost_eur
-                new_snapshot = PortfolioSnapshot(
-                    cash_eur=new_cash_eur,
-                    equity_eur=new_equity_eur,
-                    total_value_eur=round(new_cash_eur + new_equity_eur, 2),
-                    open_positions_count=len(open_positions) + 1,
-                    is_live=True,
-                    timestamp=utc_now
-                )
-                session.add(new_snapshot)
+            # Record live position in database
+            new_pos = Position(
+                ticker=ticker.upper(),
+                name=name,
+                currency=currency,
+                shares=shares,
+                entry_price_native=price_native,
+                current_price_native=price_native,
+                highest_price_native=price_native,
+                stop_loss_native=stop_loss_native,
+                take_profit_native=take_profit_native,
+                entry_price_eur=price_eur,
+                current_price_eur=price_eur,
+                cost_basis_eur=actual_cost_eur,
+                fees_eur=fee_eur,
+                unrealized_pnl_eur=0.0,
+                unrealized_pnl_pct=0.0,
+                status="OPEN",
+                is_live=True,
+                broker_order_id=broker_order_id,
+                opened_at=utc_now
+            )
+            session.add(new_pos)
 
-                await session.commit()
-            self._last_pnl_refresh = 0.0
-            await self.adjust_triggers_dynamically()
+            # Record Trade
+            trade = Trade(
+                ticker=ticker.upper(),
+                name=name,
+                order_type="BUY",
+                shares=shares,
+                currency=currency,
+                price_native=price_native,
+                price_eur=price_eur,
+                total_eur=actual_cost_eur,
+                fee_eur=fee_eur,
+                rationale=f"[LIVE {settings.LIVE_BROKER.upper()}] {rationale} (Fee: €{fee_eur:.2f})",
+                consensus_score=consensus_score,
+                is_live=True,
+                broker_order_id=broker_order_id,
+                executed_at=utc_now
+            )
+            session.add(trade)
 
-            # Record into TencentDB Agent Memory
-            try:
-                import asyncio
-                from src.memory.client import agent_memory_client
-                asyncio.create_task(agent_memory_client.record_trade_event(
-                    ticker=ticker,
-                    order_type="BUY",
-                    shares=shares,
-                    price=price_native,
-                    currency=currency,
-                    fee_eur=fee_eur,
-                    rationale=rationale
-                ))
-            except Exception:
-                pass
+            # Update Portfolio Snapshot (cash decreases by cost + commission fee)
+            new_cash_eur = round(cash_eur - actual_cost_eur - fee_eur, 2)
+            new_equity_eur = equity_eur + actual_cost_eur
+            new_snapshot = PortfolioSnapshot(
+                cash_eur=new_cash_eur,
+                equity_eur=new_equity_eur,
+                total_value_eur=round(new_cash_eur + new_equity_eur, 2),
+                open_positions_count=len(open_positions) + 1,
+                is_live=True,
+                timestamp=utc_now
+            )
+            session.add(new_snapshot)
 
-            return {
-                "success": True,
-                "is_live": True,
-                "broker": settings.LIVE_BROKER.upper(),
-                "broker_order_id": broker_order_id,
-                "ticker": ticker,
-                "shares": shares,
-                "price_native": price_native,
-                "price_eur": price_eur,
-                "total_eur": actual_cost_eur,
-                "fee_eur": fee_eur,
-                "fee_breakdown": fee_info["breakdown"],
-                "stop_loss": stop_loss_native,
-                "take_profit": take_profit_native,
-                "message": f"Real money order submitted to {settings.LIVE_BROKER.upper()}: {shares} shares of {ticker} for €{actual_cost_eur:.2f} (Fee: €{fee_eur:.2f})."
-            }
+            await session.commit()
+        self._last_pnl_refresh = 0.0
+
+        return {
+            "success": True,
+            "is_live": True,
+            "broker": settings.LIVE_BROKER.upper(),
+            "broker_order_id": broker_order_id,
+            "ticker": ticker,
+            "shares": shares,
+            "price_native": price_native,
+            "price_eur": price_eur,
+            "total_eur": actual_cost_eur,
+            "fee_eur": fee_eur,
+            "fee_breakdown": fee_info["breakdown"],
+            "stop_loss": stop_loss_native,
+            "take_profit": take_profit_native,
+            "message": f"Real money order submitted to {settings.LIVE_BROKER.upper()}: {shares} shares of {ticker} for €{actual_cost_eur:.2f} (Fee: €{fee_eur:.2f})."
+        }
 
     async def execute_sell(
-        self, ticker: str, reason: str = "Manual Close", broker_flat: bool = False, exit_price_native: Optional[float] = None
+        self, ticker: str, reason: str = "Manual Close", broker_flat: bool = False, exit_price_native: Optional[float] = None,
+        limit_price_native: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Submits real sell order to brokerage API to close live position.
@@ -959,7 +1025,8 @@ class LiveBroker(BaseBroker):
                 return {"success": False, "message": f"No open live position found for {ticker}."}
 
             self._t212_exit_prices.pop(ticker.upper(), None)
-            dispatched_id = "broker_flat" if broker_flat else await self._dispatch_real_close(ticker=ticker, shares=pos.shares, currency=pos.currency)
+            dispatched_id = "broker_flat" if broker_flat else await self._dispatch_real_close(
+                ticker=ticker, shares=pos.shares, currency=pos.currency, limit_price=limit_price_native)
             if not dispatched_id:
                 logger.error(f"[LIVE EXECUTION] SELL {ticker} was not accepted by {settings.LIVE_BROKER.upper()}; position left open.")
                 return {"success": False, "message": f"Exit order for {ticker} could not be placed at {settings.LIVE_BROKER.upper()} (broker not connected or order rejected)."}
@@ -1285,16 +1352,56 @@ class LiveBroker(BaseBroker):
 
     async def cancel_price_trigger(self, trigger_id: int) -> Dict[str, Any]:
         """Cancels a pending live trigger."""
-        async with AsyncSessionLocal() as session:
-            res = await session.execute(select(OrderTrigger).where(OrderTrigger.id == trigger_id))
-            trigger = res.scalars().first()
-            if not trigger:
-                return {"success": False, "message": f"Trigger #{trigger_id} not found."}
-            if trigger.status != "PENDING":
-                return {"success": False, "message": f"Trigger #{trigger_id} is already {trigger.status}."}
-            trigger.status = "CANCELLED"
-            await session.commit()
-            return {"success": True, "message": f"Trigger #{trigger_id} for {trigger.ticker} cancelled."}
+        # Read and cancel under the T212 lock, so the resting-order sync cannot place or clear an order in between
+        async with (self._t212_lock if settings.LIVE_BROKER.lower() == "trading212" else contextlib.nullcontext()):
+            async with AsyncSessionLocal() as session:
+                res = await session.execute(select(OrderTrigger).where(OrderTrigger.id == trigger_id))
+                trigger = res.scalars().first()
+                if not trigger:
+                    return {"success": False, "message": f"Trigger #{trigger_id} not found."}
+                if trigger.status != "PENDING":
+                    return {"success": False, "message": f"Trigger #{trigger_id} is already {trigger.status}."}
+                if trigger.broker_order_id and (client := trading212.get_client()):
+                    fills = await self._t212_cancel_entry(client, trigger)
+                    await session.commit()
+                    if fills:
+                        return {"success": False, "message": f"Trigger #{trigger_id} for {trigger.ticker} filled before the cancel; position booked."}
+                    if trigger.broker_order_id:
+                        return {"success": False, "message": f"Trigger #{trigger_id}: resting order could not be cancelled; still pending."}
+                trigger.status = "CANCELLED"
+                await session.commit()
+                return {"success": True, "message": f"Trigger #{trigger_id} for {trigger.ticker} cancelled."}
+
+    async def cancel_resting_entries(self, reason: str) -> List[Dict[str, Any]]:
+        """
+        Cancels every resting T212 entry order (triggers stay PENDING), also with the feature flag off.
+        Books and announces fills that already happened; returns them.
+        """
+        if settings.LIVE_BROKER.lower() != "trading212" or not (client := trading212.get_client()):
+            return []
+        booked: List[Dict[str, Any]] = []
+        async with self._t212_lock:
+            async with AsyncSessionLocal() as session:
+                triggers = (await session.execute(select(OrderTrigger).where(
+                    OrderTrigger.status == "PENDING", OrderTrigger.is_live == True,
+                    OrderTrigger.broker_order_id.isnot(None)))).scalars().all()
+                for t in triggers:
+                    try:
+                        booked += await self._t212_cancel_entry(client, t)
+                        await session.commit()
+                    except Exception as e:
+                        logger.error(f"Cancel of resting order for trigger #{t.id} ({t.ticker}) failed: {e}")
+        if triggers:
+            logger.warning(f"Cancelled {len(triggers)} resting entry order(s): {reason}.")
+        if booked:
+            from src.telegram.bot import telegram_bot
+            for fill in booked:
+                try:
+                    await telegram_bot.notify_trigger_executed(fill)
+                except Exception as e:
+                    logger.error(f"Fill alert for trigger #{fill.get('trigger_id')} failed: {e}")
+            await self.adjust_triggers_dynamically()
+        return booked
 
     async def adjust_triggers_dynamically(self) -> List[Dict[str, Any]]:
         """
@@ -1397,6 +1504,8 @@ class LiveBroker(BaseBroker):
     async def check_and_execute_triggers(self) -> List[Dict[str, Any]]:
         """Evaluates pending triggers and executes live orders when conditions are met."""
         await self.adjust_triggers_dynamically()
+        if self.resting_orders_on():
+            return []  # sync_resting_entries places, books and cancels the entries at Trading 212
         async with AsyncSessionLocal() as session:
             res = await session.execute(select(OrderTrigger).where(OrderTrigger.status == "PENDING", OrderTrigger.is_live == True))
             pending = res.scalars().all()
@@ -1405,6 +1514,20 @@ class LiveBroker(BaseBroker):
 
             executed = []
             for t in pending:
+                if t.broker_order_id:
+                    # Resting order left from flag-on mode: cancel it (booking any fill) before the bot buys itself
+                    if not (client := trading212.get_client()):
+                        continue
+                    try:
+                        async with self._t212_lock:
+                            fills = await self._t212_cancel_entry(client, t)
+                            await session.commit()
+                    except Exception as e:
+                        logger.error(f"Cancel of resting order for trigger #{t.id} ({t.ticker}) failed: {e}")
+                        continue
+                    executed += fills
+                    if fills or t.broker_order_id:
+                        continue
                 if is_trigger_expired(t.created_at):
                     logger.info(f"Trigger #{t.id} for {t.ticker} expired (older than {settings.TRIGGER_EXPIRY_DAYS} days).")
                     t.status = "EXPIRED"
@@ -1467,6 +1590,160 @@ class LiveBroker(BaseBroker):
 
             return executed
 
+    async def _t212_cancel_entry(self, client: Any, trigger: OrderTrigger, order: Any = ...) -> List[Dict[str, Any]]:
+        """
+        Cancels a trigger's resting entry order and books whatever filled (trigger TRIGGERED), else clears its order id.
+        Keeps the id when the cancel is not confirmed. The caller holds _t212_lock and commits the trigger.
+        `order` is the pending order the caller just read (None: gone); left out, it is read here.
+        """
+        oid = int(trigger.broker_order_id.removeprefix("t212_"))
+        t212_ticker = await client.resolve_ticker(trigger.ticker, trigger.currency)
+        if not t212_ticker:
+            logger.error(f"Resting order {oid} for {trigger.ticker}: no unique T212 instrument; left as is.")
+            return []
+        # An order that is already gone is not cancelled again (T212 may answer that with an error)
+        if order is ...:
+            order = await client.get_order(oid)
+        if order is not None and not await self._t212_cancel(client, oid):
+            logger.error(f"Resting order {oid} for {trigger.ticker} could not be cancelled; it stays tracked.")
+            return []
+        filled, avg_price, final = await self._t212_fills(client, t212_ticker, oid)
+        if filled <= 0 and final not in ("CANCELLED", "REJECTED"):
+            # Outcome unknown (history lags): the broker position is the truth
+            filled, avg_price = await self._t212_unbooked_shares(client, t212_ticker, trigger.ticker, float("inf"))
+        if filled <= 0:
+            logger.info(f"Resting order {oid} for {trigger.ticker} is gone without a fill ({final or 'no history'}).")
+            trigger.broker_order_id = None
+            return []
+        trigger.status = "TRIGGERED"
+        trigger.triggered_at = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+        async with AsyncSessionLocal() as session:
+            # Booked on an earlier run whose trigger update was lost: never book a fill twice
+            if (await session.execute(select(Trade.id).where(
+                    Trade.broker_order_id == trigger.broker_order_id, Trade.order_type == "BUY", Trade.is_live == True))).first():
+                return []
+        price = avg_price or trigger.target_price
+        await self._t212_place_stop(client, t212_ticker, trigger.ticker, filled, trigger.stop_loss or price * 0.95)
+        res = await self._book_live_fill(
+            ticker=trigger.ticker, name=trigger.name or trigger.ticker, currency=trigger.currency, shares=filled,
+            price_native=price, stop_loss_native=trigger.stop_loss, take_profit_native=trigger.take_profit,
+            rationale=f"Resting order #{trigger.id} filled ({trigger.trigger_type} @ {trigger.target_price})",
+            consensus_score=trigger.consensus_score or 80, broker_order_id=trigger.broker_order_id,
+        )
+        return [dict(res, trigger_id=trigger.id)]
+
+    async def sync_resting_entries(self) -> List[Dict[str, Any]]:
+        """
+        Trading 212 resting DAY entry orders, one per funded PENDING live trigger: books fills (with a stop),
+        cancels orders whose trigger no longer holds, and places orders for triggers that have none.
+        Returns the booked fills.
+        """
+        if not self.resting_orders_on():
+            return []
+        client = trading212.get_client()
+        if not client:
+            return []
+        # Before the lock: turning the kill switch on (which cancels resting buys) must not wait for it
+        loss_msg = await self.enforce_daily_loss_limit()
+        booked: List[Dict[str, Any]] = []
+        async with self._t212_lock:
+            await self.adjust_triggers_dynamically()
+            async with AsyncSessionLocal() as session:
+                pending = (await session.execute(
+                    select(OrderTrigger).where(OrderTrigger.status == "PENDING", OrderTrigger.is_live == True)
+                )).scalars().all()
+                tracked = {t.broker_order_id for t in pending if t.broker_order_id}
+                broker_orders: Optional[List[Dict[str, Any]]] = None  # GET /equity/orders allows 1 per 5 s: read once
+                placed = 0
+                now = datetime.datetime.now(datetime.timezone.utc)
+                for t in pending:
+                    try:
+                        data = await asyncio.to_thread(market_data_provider.get_stock_data, t.ticker)
+                        price = data["price"] if data else None
+                        invalid = evaluate_trigger_condition(t.trigger_type, t.target_price, price, t.stop_loss, t.take_profit)[1] if price else None
+                        expired = is_trigger_expired(t.created_at)
+                        breakout = t.trigger_type == "BREAKOUT_BUY"
+                        limit = t.target_price * (1 + settings.BREAKOUT_LIMIT_BUFFER_PCT / 100) if breakout else t.target_price
+                        armed = self.is_live_armed()[0] and not loss_msg
+
+                        if t.broker_order_id:
+                            order = await client.get_order(int(t.broker_order_id.removeprefix("t212_")))
+                            if order is not None and not float(order.get("filledQuantity") or 0) \
+                                    and not expired and not invalid and armed and t.allocation_eur > 0 \
+                                    and (await asyncio.to_thread(check_market_regime, t.ticker, t.currency))[0]:
+                                # Compared with what a placement now would buy, so sizing rules cannot cause a cancel/re-place loop
+                                plan = await self._plan_live_buy(
+                                    t.ticker, limit, t.currency, t.stop_loss, t.take_profit, t.allocation_eur,
+                                    t.consensus_score or 80, trigger_id=t.id)
+                                qty = abs(float(order.get("quantity") or 0))
+                                if plan["success"] and abs(plan["shares"] - qty) <= 0.1 * qty:
+                                    continue
+                            fills = await self._t212_cancel_entry(client, t, order)
+                            booked += fills
+                            if not fills and t.broker_order_id is None and (expired or invalid):
+                                t.status = "EXPIRED" if expired else "CANCELLED"
+                            await session.commit()
+                            continue
+
+                        if expired or invalid:
+                            logger.info(f"Live trigger #{t.id} for {t.ticker} {'expired' if expired else f'cancelled: {invalid}'}.")
+                            t.status = "EXPIRED" if expired else "CANCELLED"
+                            await session.commit()
+                            continue
+                        # Yahoo lags EU quotes ~15 min: no placement until the market has been open 20 min
+                        if t.allocation_eur <= 0 or not armed or not price or placed >= 3 \
+                                or not check_market_hours(t.ticker, now)[0] \
+                                or not check_market_hours(t.ticker, now - datetime.timedelta(minutes=20))[0] \
+                                or not (await asyncio.to_thread(check_market_regime, t.ticker, t.currency))[0]:
+                            continue
+                        t212_ticker = await client.resolve_ticker(t.ticker, t.currency)
+                        if not t212_ticker:
+                            continue
+                        if broker_orders is None:
+                            broker_orders = await client.pending_orders()
+                        # A crash between POST and commit left our order at T212: take it over instead of placing a second one.
+                        # Only an order at the price this trigger would place (a user's own BUY is left alone).
+                        existing = next((o for o in broker_orders if o.get("ticker") == t212_ticker
+                                         and float(o.get("quantity") or 0) > 0 and f"t212_{o.get('id')}" not in tracked
+                                         and o.get("stopPrice" if breakout else "limitPrice") is not None
+                                         and abs(float(o["stopPrice" if breakout else "limitPrice"]) - self._t212_price(t.target_price)) < 1e-9), None)
+                        if existing:
+                            logger.warning(f"Live trigger #{t.id}: taking over pending T212 BUY {existing['id']} for {t.ticker}.")
+                        else:
+                            plan = await self._plan_live_buy(
+                                t.ticker, limit, t.currency, t.stop_loss, t.take_profit, t.allocation_eur,
+                                t.consensus_score or 80, trigger_id=t.id)
+                            if not plan["success"]:
+                                if plan.get("unaffordable"):
+                                    # Not even one whole share fits: release the reserved cash for other triggers
+                                    t.status = "CANCELLED"
+                                    await session.commit()
+                                continue
+                            await session.refresh(t)
+                            if t.status != "PENDING":
+                                continue
+                            if placed:
+                                await asyncio.sleep(2.1)  # limit and stop-limit POSTs allow 1 per 2 s
+                            placed += 1
+                            shares = plan["shares"]
+                            if breakout:
+                                place = lambda: client.place_stop_limit(
+                                    t212_ticker, shares, self._t212_price(t.target_price), self._t212_price(limit), "DAY")
+                            else:
+                                place = lambda: client.place_limit(t212_ticker, shares, self._t212_price(limit), "DAY")
+                            existing = await self._t212_post(client, place, t212_ticker, shares, f"resting BUY {shares} {t.ticker}")
+                            if not existing or existing.get("status") == "REJECTED":
+                                logger.error(f"Resting BUY {shares} {t.ticker} for trigger #{t.id} not placed: {existing}")
+                                continue
+                        t.broker_order_id = f"t212_{existing['id']}"
+                        tracked.add(t.broker_order_id)
+                        await session.commit()
+                    except Exception as e:
+                        logger.error(f"Resting order sync for trigger #{t.id} ({t.ticker}) failed: {e}")
+            if booked:
+                await self.adjust_triggers_dynamically()
+        return booked
+
     async def check_stops_and_targets(self) -> List[Dict[str, Any]]:
         """Monitors open live positions for stop-loss and take-profit."""
         await self.refresh_positions_pnl()
@@ -1479,12 +1756,14 @@ class LiveBroker(BaseBroker):
 
             for p in positions:
                 if p.stop_loss_native and p.current_price_native <= p.stop_loss_native:
-                    tickers_to_close.append((p.ticker, f"Live Stop-Loss triggered at {p.current_price_native} <= {p.stop_loss_native}"))
+                    tickers_to_close.append((p.ticker, f"Live Stop-Loss triggered at {p.current_price_native} <= {p.stop_loss_native}", None))
                 elif p.take_profit_native and p.current_price_native >= p.take_profit_native:
-                    tickers_to_close.append((p.ticker, f"Live Take-Profit triggered at {p.current_price_native} >= {p.take_profit_native}"))
+                    # Resting mode: a limit at the target, so a spike seen on the T212 price cannot sell below it
+                    limit = p.take_profit_native if self.resting_orders_on() else None
+                    tickers_to_close.append((p.ticker, f"Live Take-Profit triggered at {p.current_price_native} >= {p.take_profit_native}", limit))
 
-        for ticker, reason in tickers_to_close:
-            sell_res = await self.execute_sell(ticker, reason=reason)
+        for ticker, reason, limit in tickers_to_close:
+            sell_res = await self.execute_sell(ticker, reason=reason, limit_price_native=limit)
             if sell_res.get("success"):
                 triggered.append(sell_res)
 
@@ -1511,15 +1790,27 @@ class LiveBroker(BaseBroker):
                     self._last_pnl_refresh = now
                     return
 
+                # Resting mode: the broker's own price drives exits; Yahoo is the fallback
+                client, t212_prices = (trading212.get_client() if self.resting_orders_on() else None), {}
+                if client:
+                    try:
+                        held = {bp["instrument"]["ticker"]: bp.get("currentPrice") for bp in await client.positions()}
+                        t212_prices = {p.ticker: held.get(await client.resolve_ticker(p.ticker, p.currency)) for p in positions}
+                    except Exception as e:
+                        logger.warning(f"Trading 212 positions for live prices failed, using Yahoo: {e}")
+
                 for p in positions:
                     is_open, _ = check_market_hours(p.ticker)
                     if not is_open and p.current_price_native and p.current_price_native > 0:
                         continue
 
-                    data = await asyncio.to_thread(market_data_provider.get_stock_data, p.ticker)
-                    curr_price = data["price"] if data else None
+                    curr_price = t212_prices.get(p.ticker)
+                    if not curr_price:
+                        data = await asyncio.to_thread(market_data_provider.get_stock_data, p.ticker)
+                        curr_price = data["price"] if data else None
 
                     if curr_price:
+                        curr_price = float(curr_price)
                         p.current_price_native = curr_price
                         p.current_price_eur = currency_service.to_eur(curr_price, p.currency)
                         if curr_price > (p.highest_price_native or 0.0):
@@ -1552,7 +1843,9 @@ class LiveBroker(BaseBroker):
         """Cash a buy may use: the balance, capped at the broker's buying power when known (unsettled sale proceeds, deposit holds)."""
         if self._available_funds_eur is None:
             return cash_eur
-        return min(cash_eur, self._available_funds_eur)
+        # A resting buy's own reserved cash must not defund its trigger (cancel and re-place every minute)
+        reserved = self._reserved_for_orders_eur if self.resting_orders_on() else 0.0
+        return min(cash_eur, self._available_funds_eur + reserved)
 
     async def sync_cash_balance(self) -> None:
         """
@@ -1704,9 +1997,18 @@ class LiveBroker(BaseBroker):
                     local[t212_ticker] = pos
                 else:
                     logger.warning(f"Trading 212 sync: {pos.ticker} has no unique T212 instrument; not reconciled.")
+            # A resting entry's fill is booked against its trigger by sync_resting_entries, never adopted here
+            resting = set()
+            if self.resting_orders_on():
+                for t in (await session.execute(select(OrderTrigger).where(
+                        OrderTrigger.status == "PENDING", OrderTrigger.is_live == True, OrderTrigger.broker_order_id.isnot(None)))).scalars().all():
+                    resting.add(await client.resolve_ticker(t.ticker, t.currency))
             adopted: List[str] = []
             stops_to_place: List[tuple] = []
             for t212_ticker, bp in held.items():
+                if t212_ticker in resting:
+                    logger.info(f"Trading 212 sync: {t212_ticker} has a resting entry order; its fill is booked by the order sync.")
+                    continue
                 inst = bp["instrument"]
                 shares, cost_native, curr_code = float(bp["quantity"]), float(bp["averagePricePaid"]), inst.get("currency") or "USD"
                 if t212_ticker in local:
