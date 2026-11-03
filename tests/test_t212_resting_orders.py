@@ -267,3 +267,61 @@ async def test_flag_off_keeps_bot_trigger_path(rest, asml, monkeypatch):
     tid = await _seed()
     assert await _sync() == []
     assert rest.posts == [] and (await _trigger(tid)).broker_order_id is None
+
+
+# --- Cancel resting buys at once (Task 4) ---
+
+async def _drain_kill_switch_tasks():
+    from src.db import session as db_session
+    await asyncio.gather(*list(db_session._cancel_tasks))
+
+
+async def test_kill_switch_on_cancels_resting_buys(rest, asml, monkeypatch):
+    from src.db.session import set_kill_switch
+    monkeypatch.setattr(settings, "TRADING_MODE", "LIVE")
+    monkeypatch.setattr(settings, "LIVE_TRADING_ENABLED", True)
+    a = await _seed(order_id="t212_1")
+    b = await _seed(order_id="t212_2")
+    rest.order_state[1] = {"id": 1, "status": "NEW", "ticker": "ASMLa_EQ", "quantity": 0.5, "filledQuantity": 0}
+    rest.order_state[2] = {"id": 2, "status": "NEW", "ticker": "ASMLa_EQ", "quantity": 0.5, "filledQuantity": 0}
+    rest.history = [{"order": {"id": 1, "status": "CANCELLED"}}, {"order": {"id": 2, "status": "CANCELLED"}}]
+    try:
+        await set_kill_switch(True)
+        await _drain_kill_switch_tasks()
+    finally:
+        await set_kill_switch(False)
+    assert sorted(rest.cancelled) == [1, 2]
+    for tid in (a, b):
+        t = await _trigger(tid)
+        assert t.status == "PENDING" and t.broker_order_id is None
+
+
+async def test_kill_switch_does_not_deadlock_on_t212_lock(rest, monkeypatch):
+    from src.db.session import set_kill_switch
+    from src.trading.broker import live_broker as broker
+    monkeypatch.setattr(settings, "TRADING_MODE", "LIVE")
+    monkeypatch.setattr(settings, "LIVE_TRADING_ENABLED", True)
+    try:
+        async with broker._t212_lock:
+            await asyncio.wait_for(set_kill_switch(True), 1)
+        await _drain_kill_switch_tasks()
+    finally:
+        await set_kill_switch(False)
+
+
+async def test_cancel_trigger_cancels_broker_order(rest, asml):
+    tid = await _seed(order_id="t212_1")
+    _resting(rest)
+    res = await LiveBroker().cancel_price_trigger(tid)
+    assert res["success"] is True and rest.cancelled == [1]
+    assert (await _trigger(tid)).status == "CANCELLED"
+
+
+async def test_cancel_trigger_with_fill_books_position(rest, asml):
+    tid = await _seed(order_id="t212_1")
+    rest.order_state[1] = {"id": 1, "status": "NEW", "ticker": "ASMLa_EQ", "quantity": 0.5, "filledQuantity": 0.5}
+    rest.history = [{"order": {"id": 1, "status": "FILLED"}, "fill": {"quantity": 0.5, "price": 598.0}}]
+    res = await LiveBroker().cancel_price_trigger(tid)
+    assert res["success"] is False and "filled" in res["message"]
+    assert (await _trigger(tid)).status == "TRIGGERED"
+    assert len(await _positions()) == 1

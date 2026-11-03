@@ -1355,9 +1355,35 @@ class LiveBroker(BaseBroker):
                 return {"success": False, "message": f"Trigger #{trigger_id} not found."}
             if trigger.status != "PENDING":
                 return {"success": False, "message": f"Trigger #{trigger_id} is already {trigger.status}."}
+            if trigger.broker_order_id and self.resting_orders_on() and (client := trading212.get_client()):
+                async with self._t212_lock:
+                    fills = await self._t212_cancel_entry(client, trigger)
+                    await session.commit()
+                if fills:
+                    return {"success": False, "message": f"Trigger #{trigger_id} for {trigger.ticker} filled before the cancel; position booked."}
+                if trigger.broker_order_id:
+                    return {"success": False, "message": f"Trigger #{trigger_id}: resting order could not be cancelled; still pending."}
             trigger.status = "CANCELLED"
             await session.commit()
             return {"success": True, "message": f"Trigger #{trigger_id} for {trigger.ticker} cancelled."}
+
+    async def cancel_resting_entries(self, reason: str) -> int:
+        """Cancels every resting entry order (triggers stay PENDING) and books fills that already happened. Returns the count."""
+        if not self.resting_orders_on() or not (client := trading212.get_client()):
+            return 0
+        async with self._t212_lock:
+            async with AsyncSessionLocal() as session:
+                triggers = (await session.execute(select(OrderTrigger).where(
+                    OrderTrigger.status == "PENDING", OrderTrigger.is_live == True,
+                    OrderTrigger.broker_order_id.isnot(None)))).scalars().all()
+                for t in triggers:
+                    try:
+                        await self._t212_cancel_entry(client, t)
+                        await session.commit()
+                    except Exception as e:
+                        logger.error(f"Cancel of resting order for trigger #{t.id} ({t.ticker}) failed: {e}")
+        logger.warning(f"Cancelled {len(triggers)} resting entry order(s): {reason}.")
+        return len(triggers)
 
     async def adjust_triggers_dynamically(self) -> List[Dict[str, Any]]:
         """
