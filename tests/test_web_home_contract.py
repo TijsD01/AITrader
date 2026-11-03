@@ -33,10 +33,10 @@ def test_home_ids_present():
 
 
 def test_kill_switch_button_hooks():
-    m = re.search(r'<button\b[^>]*id="killSwitchBtn".*?</button>', _html(), re.S)
-    assert m
-    assert 'onclick="toggleKillSwitch()"' in m.group(0)
-    assert "kill-switch-label" in m.group(0)
+    m = re.search(r'(<button\b[^>]*id="killSwitchBtn"[^>]*>)(.*?)</button>', _html(), re.S)
+    assert m is not None, "#killSwitchBtn button not found"
+    assert 'onclick="toggleKillSwitch()"' in m.group(1)
+    assert re.search(r'class="(?:[^"]*\s)?kill-switch-label(?:\s[^"]*)?"', m.group(2))
 
 
 def test_banner_before_total_value():
@@ -46,5 +46,5 @@ def test_banner_before_total_value():
 
 def test_app_js_position_actions():
     js = APP_JS.read_text(encoding="utf-8")
-    assert 'data-action="toggle-position"' in js
-    assert 'data-action="close-position"' in js
+    for action in ("toggle-position", "close-position"):
+        assert re.search(rf'<[^>]*\bdata-action="{action}"[^>]*\bdata-ticker=', js), action
