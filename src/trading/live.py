@@ -683,6 +683,72 @@ class LiveBroker(BaseBroker):
         Submits real buy order to the brokerage API (Trading 212 / Alpaca) with real money.
         Validates kill switch, daily drawdown, market hours, and settled capital.
         """
+        plan = await self._plan_live_buy(
+            ticker, price_native, currency, stop_loss_native, take_profit_native,
+            allocation_eur, consensus_score, is_manual=is_manual, trigger_id=trigger_id
+        )
+        if not plan["success"]:
+            return plan
+        shares = plan["shares"]
+
+        # Trading 212: the lock holds until the position is committed, so a sync cannot adopt these shares as untracked
+        async with (self._t212_lock if settings.LIVE_BROKER.lower() == "trading212" else contextlib.nullcontext()):
+            # 9. Dispatch real order to broker API
+            dispatched = await self._dispatch_real_order(
+                ticker=ticker,
+                shares=shares,
+                price=price_native,
+                currency=currency,
+                stop_loss=stop_loss_native,
+                take_profit=take_profit_native
+            )
+            if not dispatched:
+                logger.error(f"[LIVE EXECUTION] BUY {ticker} was not accepted by {settings.LIVE_BROKER.upper()}; nothing recorded.")
+                return {"success": False, "message": f"Order for {ticker} could not be placed at {settings.LIVE_BROKER.upper()} (broker not connected or order rejected)."}
+            broker_order_id, filled, fill_price = dispatched
+            if filled <= 0:
+                msg = f"BUY {ticker} @ {price_native} {currency} did not fill within {FILL_WAIT_SECONDS:.0f}s and was cancelled; nothing recorded."
+                logger.warning(f"[LIVE EXECUTION] {msg}")
+                return {"success": False, "unfilled": True, "message": msg}
+            # Book what the broker filled, not what was asked
+            result = await self._book_live_fill(
+                ticker=ticker, name=name, currency=currency, shares=filled, price_native=fill_price,
+                stop_loss_native=stop_loss_native, take_profit_native=take_profit_native,
+                rationale=rationale, consensus_score=consensus_score, broker_order_id=broker_order_id
+            )
+        await self.adjust_triggers_dynamically()
+
+        # Record into TencentDB Agent Memory
+        try:
+            import asyncio
+            from src.memory.client import agent_memory_client
+            asyncio.create_task(agent_memory_client.record_trade_event(
+                ticker=ticker,
+                order_type="BUY",
+                shares=result["shares"],
+                price=result["price_native"],
+                currency=currency,
+                fee_eur=result["fee_eur"],
+                rationale=rationale
+            ))
+        except Exception:
+            pass
+
+        return result
+
+    async def _plan_live_buy(
+        self,
+        ticker: str,
+        price_native: float,
+        currency: str,
+        stop_loss_native: Optional[float],
+        take_profit_native: Optional[float],
+        allocation_eur: float,
+        consensus_score: int,
+        is_manual: bool = False,
+        trigger_id: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Run every pre-order check and size the buy. Returns a failure dict or {success, shares, price_eur, allocation_eur}."""
         # 1. Verify live execution interlocks
         armed, arm_msg = self.is_live_armed()
         if not armed:
@@ -814,133 +880,123 @@ class LiveBroker(BaseBroker):
             if shares <= 0 or actual_cost_eur + fee_eur > cash_eur:
                 return {"success": False, "message": f"Insufficient cash (€{cash_eur:.2f}) for {ticker} cost €{actual_cost_eur:.2f} plus fee €{fee_eur:.2f}."}
 
-            # Trading 212: the lock holds until the position is committed, so a sync cannot adopt these shares as untracked
-            async with (self._t212_lock if settings.LIVE_BROKER.lower() == "trading212" else contextlib.nullcontext()):
-                # 9. Dispatch real order to broker API
-                dispatched = await self._dispatch_real_order(
-                    ticker=ticker,
-                    shares=shares,
-                    price=price_native,
-                    currency=currency,
-                    stop_loss=stop_loss_native,
-                    take_profit=take_profit_native
-                )
-                if not dispatched:
-                    logger.error(f"[LIVE EXECUTION] BUY {ticker} was not accepted by {settings.LIVE_BROKER.upper()}; nothing recorded.")
-                    return {"success": False, "message": f"Order for {ticker} could not be placed at {settings.LIVE_BROKER.upper()} (broker not connected or order rejected)."}
-                broker_order_id, filled, fill_price = dispatched
-                if filled <= 0:
-                    msg = f"BUY {ticker} @ {price_native} {currency} did not fill within {FILL_WAIT_SECONDS:.0f}s and was cancelled; nothing recorded."
-                    logger.warning(f"[LIVE EXECUTION] {msg}")
-                    return {"success": False, "unfilled": True, "message": msg}
-                # Book what the broker filled, not what was asked
-                shares, price_native = filled, fill_price
-                price_eur = currency_service.to_eur(price_native, currency)
-                actual_cost_eur = round(shares * price_eur, 2)
-                fee_info = calculate_broker_fee(
-                    ticker=ticker, shares=shares, price_native=price_native, currency=currency, broker=settings.LIVE_BROKER, order_action="BUY"
-                )
-                fee_eur = fee_info["fee_eur"]
-                logger.info(
-                    f"[LIVE EXECUTION] Submitting real order to {settings.LIVE_BROKER.upper()}: "
-                    f"BUY {shares} {ticker} @ {price_native} {currency} (Cost: €{actual_cost_eur}, Fee: €{fee_eur:.2f} [{fee_info['breakdown']}]) | "
-                    f"SL: {stop_loss_native} | TP: {take_profit_native} | Order ID: {broker_order_id}"
-                )
+        return {"success": True, "shares": shares, "price_eur": price_eur, "allocation_eur": allocation_eur}
 
-                utc_now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    async def _book_live_fill(
+        self,
+        *,
+        ticker: str,
+        name: str,
+        currency: str,
+        shares: float,
+        price_native: float,
+        stop_loss_native: Optional[float],
+        take_profit_native: Optional[float],
+        rationale: str,
+        consensus_score: int,
+        broker_order_id: str
+    ) -> Dict[str, Any]:
+        """Record a filled live BUY: position, trade and snapshot. Callers hold _t212_lock (Trading 212)."""
+        from src.trading.fees import calculate_broker_fee
+        price_eur = currency_service.to_eur(price_native, currency)
+        actual_cost_eur = round(shares * price_eur, 2)
+        fee_info = calculate_broker_fee(
+            ticker=ticker, shares=shares, price_native=price_native, currency=currency, broker=settings.LIVE_BROKER, order_action="BUY"
+        )
+        fee_eur = fee_info["fee_eur"]
+        logger.info(
+            f"[LIVE EXECUTION] Submitting real order to {settings.LIVE_BROKER.upper()}: "
+            f"BUY {shares} {ticker} @ {price_native} {currency} (Cost: €{actual_cost_eur}, Fee: €{fee_eur:.2f} [{fee_info['breakdown']}]) | "
+            f"SL: {stop_loss_native} | TP: {take_profit_native} | Order ID: {broker_order_id}"
+        )
 
-                # Record live position in database
-                new_pos = Position(
-                    ticker=ticker.upper(),
-                    name=name,
-                    currency=currency,
-                    shares=shares,
-                    entry_price_native=price_native,
-                    current_price_native=price_native,
-                    highest_price_native=price_native,
-                    stop_loss_native=stop_loss_native,
-                    take_profit_native=take_profit_native,
-                    entry_price_eur=price_eur,
-                    current_price_eur=price_eur,
-                    cost_basis_eur=actual_cost_eur,
-                    fees_eur=fee_eur,
-                    unrealized_pnl_eur=0.0,
-                    unrealized_pnl_pct=0.0,
-                    status="OPEN",
-                    is_live=True,
-                    broker_order_id=broker_order_id,
-                    opened_at=utc_now
-                )
-                session.add(new_pos)
+        async with AsyncSessionLocal() as session:
+            pos_res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == True))
+            open_positions = pos_res.scalars().all()
+            snap_res = await session.execute(
+                select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True).order_by(desc(PortfolioSnapshot.timestamp))
+            )
+            snapshot = snap_res.scalars().first()
+            cash_eur = snapshot.cash_eur if snapshot else 0.0
+            equity_eur = sum(p.current_price_eur * p.shares for p in open_positions)
 
-                # Record Trade
-                trade = Trade(
-                    ticker=ticker.upper(),
-                    name=name,
-                    order_type="BUY",
-                    shares=shares,
-                    currency=currency,
-                    price_native=price_native,
-                    price_eur=price_eur,
-                    total_eur=actual_cost_eur,
-                    fee_eur=fee_eur,
-                    rationale=f"[LIVE {settings.LIVE_BROKER.upper()}] {rationale} (Fee: €{fee_eur:.2f})",
-                    consensus_score=consensus_score,
-                    is_live=True,
-                    broker_order_id=broker_order_id,
-                    executed_at=utc_now
-                )
-                session.add(trade)
+            utc_now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
-                # Update Portfolio Snapshot (cash decreases by cost + commission fee)
-                new_cash_eur = round(cash_eur - actual_cost_eur - fee_eur, 2)
-                new_equity_eur = equity_eur + actual_cost_eur
-                new_snapshot = PortfolioSnapshot(
-                    cash_eur=new_cash_eur,
-                    equity_eur=new_equity_eur,
-                    total_value_eur=round(new_cash_eur + new_equity_eur, 2),
-                    open_positions_count=len(open_positions) + 1,
-                    is_live=True,
-                    timestamp=utc_now
-                )
-                session.add(new_snapshot)
+            # Record live position in database
+            new_pos = Position(
+                ticker=ticker.upper(),
+                name=name,
+                currency=currency,
+                shares=shares,
+                entry_price_native=price_native,
+                current_price_native=price_native,
+                highest_price_native=price_native,
+                stop_loss_native=stop_loss_native,
+                take_profit_native=take_profit_native,
+                entry_price_eur=price_eur,
+                current_price_eur=price_eur,
+                cost_basis_eur=actual_cost_eur,
+                fees_eur=fee_eur,
+                unrealized_pnl_eur=0.0,
+                unrealized_pnl_pct=0.0,
+                status="OPEN",
+                is_live=True,
+                broker_order_id=broker_order_id,
+                opened_at=utc_now
+            )
+            session.add(new_pos)
 
-                await session.commit()
-            self._last_pnl_refresh = 0.0
-            await self.adjust_triggers_dynamically()
+            # Record Trade
+            trade = Trade(
+                ticker=ticker.upper(),
+                name=name,
+                order_type="BUY",
+                shares=shares,
+                currency=currency,
+                price_native=price_native,
+                price_eur=price_eur,
+                total_eur=actual_cost_eur,
+                fee_eur=fee_eur,
+                rationale=f"[LIVE {settings.LIVE_BROKER.upper()}] {rationale} (Fee: €{fee_eur:.2f})",
+                consensus_score=consensus_score,
+                is_live=True,
+                broker_order_id=broker_order_id,
+                executed_at=utc_now
+            )
+            session.add(trade)
 
-            # Record into TencentDB Agent Memory
-            try:
-                import asyncio
-                from src.memory.client import agent_memory_client
-                asyncio.create_task(agent_memory_client.record_trade_event(
-                    ticker=ticker,
-                    order_type="BUY",
-                    shares=shares,
-                    price=price_native,
-                    currency=currency,
-                    fee_eur=fee_eur,
-                    rationale=rationale
-                ))
-            except Exception:
-                pass
+            # Update Portfolio Snapshot (cash decreases by cost + commission fee)
+            new_cash_eur = round(cash_eur - actual_cost_eur - fee_eur, 2)
+            new_equity_eur = equity_eur + actual_cost_eur
+            new_snapshot = PortfolioSnapshot(
+                cash_eur=new_cash_eur,
+                equity_eur=new_equity_eur,
+                total_value_eur=round(new_cash_eur + new_equity_eur, 2),
+                open_positions_count=len(open_positions) + 1,
+                is_live=True,
+                timestamp=utc_now
+            )
+            session.add(new_snapshot)
 
-            return {
-                "success": True,
-                "is_live": True,
-                "broker": settings.LIVE_BROKER.upper(),
-                "broker_order_id": broker_order_id,
-                "ticker": ticker,
-                "shares": shares,
-                "price_native": price_native,
-                "price_eur": price_eur,
-                "total_eur": actual_cost_eur,
-                "fee_eur": fee_eur,
-                "fee_breakdown": fee_info["breakdown"],
-                "stop_loss": stop_loss_native,
-                "take_profit": take_profit_native,
-                "message": f"Real money order submitted to {settings.LIVE_BROKER.upper()}: {shares} shares of {ticker} for €{actual_cost_eur:.2f} (Fee: €{fee_eur:.2f})."
-            }
+            await session.commit()
+        self._last_pnl_refresh = 0.0
+
+        return {
+            "success": True,
+            "is_live": True,
+            "broker": settings.LIVE_BROKER.upper(),
+            "broker_order_id": broker_order_id,
+            "ticker": ticker,
+            "shares": shares,
+            "price_native": price_native,
+            "price_eur": price_eur,
+            "total_eur": actual_cost_eur,
+            "fee_eur": fee_eur,
+            "fee_breakdown": fee_info["breakdown"],
+            "stop_loss": stop_loss_native,
+            "take_profit": take_profit_native,
+            "message": f"Real money order submitted to {settings.LIVE_BROKER.upper()}: {shares} shares of {ticker} for €{actual_cost_eur:.2f} (Fee: €{fee_eur:.2f})."
+        }
 
     async def execute_sell(
         self, ticker: str, reason: str = "Manual Close", broker_flat: bool = False, exit_price_native: Optional[float] = None
