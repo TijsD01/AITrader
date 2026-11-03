@@ -187,22 +187,49 @@
         </div>
       </div>
 
-      <!-- Broker online strip (LIVE mode only) -->
-      <div id="brokerConnectedStrip" class="hidden ui-card px-4 py-3 flex flex-wrap items-center justify-between gap-2 text-xs">
-        <div class="flex items-center flex-wrap gap-x-3 gap-y-1 text-slate-400 min-w-0">
-          <span class="flex items-center gap-1.5 font-semibold text-emerald-300"><span class="ui-dot" style="background:var(--gain)"></span><span id="stripBrokerName">Broker</span> online</span>
-          <span><strong id="stripBrokerEndpoint" class="text-slate-200 font-mono font-medium">172.17.0.2:4003</strong></span>
-          <span><strong id="stripBrokerLatency" class="text-slate-200 font-mono font-medium">-- ms</strong></span>
-          <span class="hidden sm:inline">Account <strong id="stripBrokerAccount" class="text-slate-200 font-mono font-medium">--</strong></span>
-        </div>
-        <div class="flex items-center gap-2">
-          <button type="button" onclick="syncAccountWithBroker()" class="ui-btn ui-btn-sm"><i class="fa-solid fa-arrows-rotate"></i> Sync</button>
-          <button type="button" onclick="pingBrokerStatus(true)" class="ui-btn ui-btn-sm"><i class="fa-solid fa-wifi"></i> Ping</button>
-        </div>
-      </div>
-
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-3.5 sm:gap-5">
         <div class="lg:col-span-2 space-y-3.5 sm:space-y-5 min-w-0">
+
+          <!-- Status and controls: market + cash-limit chips, broker strip, control tiles -->
+          <section class="status-block" aria-label="Status and controls">
+            <!-- Market status + capital limit -->
+            <div class="flex flex-wrap gap-2">
+              <span id="mobileMarketStatusPill" class="ui-chip"><span id="mobileMarketDot" class="ui-dot"></span><span id="mobileMarketStatusText">Markets: Checking...</span></span>
+              <span class="ui-chip">Cash limit <span id="capitalLimitBadge" class="ui-num text-slate-200">100%</span></span>
+            </div>
+
+            <!-- Broker online strip (LIVE mode only) -->
+            <div id="brokerConnectedStrip" class="hidden ui-card px-4 py-3 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div class="flex items-center flex-wrap gap-x-3 gap-y-1 text-slate-400 min-w-0">
+                <span class="flex items-center gap-1.5 font-semibold text-emerald-300"><span class="ui-dot" style="background:var(--gain)"></span><span id="stripBrokerName">Broker</span> online</span>
+                <span><strong id="stripBrokerEndpoint" class="text-slate-200 font-mono font-medium">172.17.0.2:4003</strong></span>
+                <span><strong id="stripBrokerLatency" class="text-slate-200 font-mono font-medium">-- ms</strong></span>
+                <span class="hidden sm:inline">Account <strong id="stripBrokerAccount" class="text-slate-200 font-mono font-medium">--</strong></span>
+              </div>
+              <div class="flex items-center gap-2">
+                <button type="button" onclick="syncAccountWithBroker()" class="ui-btn ui-btn-sm"><i class="fa-solid fa-arrows-rotate"></i> Sync</button>
+                <button type="button" onclick="pingBrokerStatus(true)" class="ui-btn ui-btn-sm"><i class="fa-solid fa-wifi"></i> Ping</button>
+              </div>
+            </div>
+
+            <!-- Controls: auto-buy and kill switch -->
+            <div class="grid grid-cols-2 gap-2.5">
+              <button type="button" onclick="switchTab('settings')" id="mobileAutoBuyPill" class="control-tile" title="Open settings to change auto-buy">
+                <span class="min-w-0">
+                  <span class="tile-label">Auto-buy</span>
+                  <span class="tile-value" id="mobileAutoBuyText">On</span>
+                </span>
+                <span id="mobileAutoBuyDot" class="ui-switch on" aria-hidden="true"></span>
+              </button>
+              <button type="button" onclick="toggleKillSwitch()" id="killSwitchBtn" class="control-tile kill-tile" title="Emergency kill switch: halt or resume all new automated buying">
+                <span class="min-w-0">
+                  <span class="tile-label">Kill switch</span>
+                  <span class="tile-value kill-switch-label">Stop buying</span>
+                </span>
+                <i class="fa-solid fa-power-off text-xl"></i>
+              </button>
+            </div>
+          </section>
 
           <!-- Hero: total value, return, allocation bar -->
           <section class="ui-card p-[18px] sm:p-6 space-y-4" aria-label="Portfolio value">
@@ -219,30 +246,6 @@
               </div>
               <div id="allocationLegend" class="alloc-legend"></div>
             </div>
-          </section>
-
-          <!-- Controls: auto-buy and kill switch -->
-          <section class="grid grid-cols-2 gap-2.5" aria-label="Controls">
-            <button type="button" onclick="switchTab('settings')" id="mobileAutoBuyPill" class="control-tile" title="Open settings to change auto-buy">
-              <span class="min-w-0">
-                <span class="tile-label">Auto-buy</span>
-                <span class="tile-value" id="mobileAutoBuyText">On</span>
-              </span>
-              <span id="mobileAutoBuyDot" class="ui-switch on" aria-hidden="true"></span>
-            </button>
-            <button type="button" onclick="toggleKillSwitch()" id="killSwitchBtn" class="control-tile kill-tile" title="Emergency kill switch: halt or resume all new automated buying">
-              <span class="min-w-0">
-                <span class="tile-label">Kill switch</span>
-                <span class="tile-value kill-switch-label">Stop buying</span>
-              </span>
-              <i class="fa-solid fa-power-off text-xl"></i>
-            </button>
-          </section>
-
-          <!-- Market status + capital limit -->
-          <section class="flex flex-wrap gap-2" aria-label="Market status">
-            <span id="mobileMarketStatusPill" class="ui-chip"><span id="mobileMarketDot" class="ui-dot"></span><span id="mobileMarketStatusText">Markets: Checking...</span></span>
-            <span class="ui-chip">Cash limit <span id="capitalLimitBadge" class="ui-num text-slate-200">100%</span></span>
           </section>
 
           <!-- KPIs -->
