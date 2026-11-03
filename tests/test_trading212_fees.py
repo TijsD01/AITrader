@@ -40,3 +40,12 @@ def test_uk_stamp_duty_buy_only():
 def test_no_min_order_floor():
     assert get_min_viable_order_eur("ASML.AS", "EUR") < 10
     assert get_min_viable_order_eur("AAPL", "USD") < 10
+
+
+def test_pence_fee_is_not_read_as_pounds():
+    # 100 VOD.L at 72p is £72; pence must not be converted as if they were pounds
+    pence = _fee("VOD.L", "GBp", price=72.0, shares=100.0)
+    pounds = _fee("VOD.L", "GBP", price=0.72, shares=100.0)
+    assert pence["trade_value_eur"] == pytest.approx(pounds["trade_value_eur"], rel=1e-6)
+    assert pence["fee_eur"] == pytest.approx(pounds["fee_eur"], abs=0.01)
+    assert pence["fee_eur"] < 1.0

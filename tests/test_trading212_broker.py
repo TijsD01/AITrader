@@ -442,3 +442,95 @@ async def test_instruments_fetched_once_and_stale_cache_served(monkeypatch):
     client._instruments_at -= trading212.INSTRUMENTS_TTL + 1
     fail.append(True)
     assert (await client.instruments())[0]["ticker"] == "SAPd_EQ"
+
+
+def _live(monkeypatch):
+    monkeypatch.setattr(settings, "TRADING_MODE", "LIVE")
+    monkeypatch.setattr(settings, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(settings, "KILL_SWITCH_ACTIVE", False)
+    monkeypatch.setattr(settings, "ENFORCE_MARKET_HOURS", False)
+
+
+async def _open_position(ticker, shares=3.0, price=100.0):
+    async with AsyncSessionLocal() as s:
+        s.add(Position(ticker=ticker, name=ticker, currency="EUR", shares=shares, entry_price_native=price,
+                       current_price_native=price, highest_price_native=price, entry_price_eur=price,
+                       current_price_eur=price, cost_basis_eur=shares * price, status="OPEN", is_live=True))
+        await s.commit()
+
+
+async def _cleanup(ticker):
+    async with AsyncSessionLocal() as s:
+        await s.execute(delete(Position).where(Position.ticker == ticker))
+        await s.execute(delete(Trade).where(Trade.ticker == ticker))
+        await s.commit()
+
+
+async def test_sell_books_the_broker_fill_price_not_the_quote(fake, monkeypatch, clean_snapshots):
+    _live(monkeypatch)
+    _with_stop(fake)
+    fake.positions_answers = [[_held("ASMLa_EQ", 3.0)]]
+    await _open_position("ASML.AS")
+    try:
+        with patch("src.trading.live.market_data_provider.get_stock_data", return_value={"price": 105.0}), \
+             patch("src.telegram.bot.telegram_bot.notify_position_closed", AsyncMock()):
+            res = await LiveBroker().execute_sell("ASML.AS")
+        assert res["success"] and res["exit_price_native"] == 101.0  # FakeT212 fills market sells at 101
+        async with AsyncSessionLocal() as s:
+            trade = (await s.execute(select(Trade).where(Trade.ticker == "ASML.AS", Trade.order_type == "SELL"))).scalars().first()
+        assert trade.price_native == 101.0
+    finally:
+        await _cleanup("ASML.AS")
+
+
+async def test_sell_after_broker_stop_books_stop_fill_without_adding_cash(fake, monkeypatch, clean_snapshots):
+    _live(monkeypatch)
+    fake.positions_answers = [[]]  # the broker stop already sold the shares
+    fake.history = [{"order": {"id": 60, "side": "SELL", "quantity": -3.0}, "fill": {"quantity": -3.0, "price": 92.0, "filledAt": "2026-11-03T09:00:00Z"}}]
+    await _open_position("ASML.AS")
+    async with AsyncSessionLocal() as s:
+        snaps_before = len((await s.execute(select(PortfolioSnapshot.id))).scalars().all())
+    try:
+        with patch("src.trading.live.market_data_provider.get_stock_data", return_value={"price": 105.0}), \
+             patch("src.telegram.bot.telegram_bot.notify_position_closed", AsyncMock()):
+            res = await LiveBroker().execute_sell("ASML.AS")
+        assert res["success"] and res["exit_price_native"] == 92.0
+        async with AsyncSessionLocal() as s:
+            # The broker already holds the proceeds: no snapshot with extra cash
+            assert len((await s.execute(select(PortfolioSnapshot.id))).scalars().all()) == snaps_before
+    finally:
+        await _cleanup("ASML.AS")
+
+
+async def test_sync_waits_for_buy_to_book_its_position(fake, monkeypatch, clean_snapshots):
+    _live(monkeypatch)
+    async with AsyncSessionLocal() as s:
+        s.add(PortfolioSnapshot(cash_eur=5000.0, equity_eur=0.0, total_value_eur=5000.0, is_live=True, open_positions_count=0))
+        await s.commit()
+    broker = LiveBroker()
+    fake.positions_answers = [[_held("ASMLa_EQ", 1.0, avg=600.0)]]
+    real_dispatch = broker._dispatch_real_order
+    syncs = []
+
+    async def dispatch_then_sync(**kwargs):
+        res = await real_dispatch(**kwargs)
+        # A manual sync arrives the moment the broker fill is known, before the position is booked
+        syncs.append(asyncio.create_task(broker._sync_t212_account()))
+        await asyncio.sleep(0)
+        return res
+
+    fake.limit_answer = {"id": 3, "status": "FILLED"}
+    fake.history = [{"order": {"id": 3, "status": "FILLED"}, "fill": {"quantity": 1.0, "price": 600.0}}]
+    try:
+        with patch.object(broker, "enforce_daily_loss_limit", AsyncMock(return_value=None)), \
+             patch.object(broker, "_dispatch_real_order", dispatch_then_sync), \
+             patch.object(broker, "adjust_triggers_dynamically", AsyncMock(return_value=[])), \
+             patch("src.telegram.bot.telegram_bot.send_message", AsyncMock()):
+            res = await broker.execute_buy("ASML.AS", "ASML", 600.0, "EUR", 570.0, 700.0, 600.0, 90, "test", is_manual=True)
+            await asyncio.gather(*syncs)
+        assert res["success"], res
+        async with AsyncSessionLocal() as s:
+            open_ = (await s.execute(select(Position).where(Position.ticker == "ASML.AS", Position.status == "OPEN"))).scalars().all()
+        assert len(open_) == 1  # not adopted a second time
+    finally:
+        await _cleanup("ASML.AS")

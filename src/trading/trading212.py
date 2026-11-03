@@ -3,6 +3,7 @@ Minimal async client for the Trading 212 Public API v0 (equity endpoints only).
 Auth is HTTP Basic (API key, API secret). Order POSTs are NOT idempotent, so they are never retried here.
 """
 import asyncio
+import datetime
 import logging
 import time
 from typing import Any, Dict, List, Optional
@@ -33,6 +34,19 @@ EXCHANGE_HINTS = {
     "L": ("london", "lse"),
     "SW": ("six", "swiss"),
 }
+
+
+def _older_than(page: List[Dict[str, Any]], since: Optional[datetime.datetime]) -> bool:
+    """True when the last (oldest) item of a newest-first page is at or before since (naive UTC)."""
+    if since is None or not page:
+        return False
+    try:
+        ts = datetime.datetime.fromisoformat(str(page[-1].get("dateTime")).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if ts.tzinfo is not None:
+        ts = ts.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+    return ts <= since
 
 
 class Trading212Error(Exception):
@@ -168,10 +182,13 @@ class Trading212Client:
         res = await self._request("GET", "/equity/history/orders", params={"ticker": ticker, "limit": limit})
         return (res or {}).get("items", [])
 
-    async def history_transactions(self, known_refs: Optional[set] = None, max_pages: int = 20) -> List[Dict[str, Any]]:
+    async def history_transactions(
+        self, known_refs: Optional[set] = None, since: Optional[datetime.datetime] = None, max_pages: int = 20
+    ) -> List[Dict[str, Any]]:
         """
         Account cash movements (DEPOSIT, WITHDRAW, FEE, TRANSFER), newest first.
-        Stops at the first page holding a reference in known_refs: older pages were read before.
+        Stops at the first page holding a reference in known_refs (older pages were read before)
+        or reaching back to since (naive UTC): older movements are not needed.
         """
         known_refs = known_refs or set()
         items: List[Dict[str, Any]] = []
@@ -181,7 +198,7 @@ class Trading212Client:
             page = res.get("items") or []
             items.extend(page)
             path = res.get("nextPagePath")
-            if not path or any(str(i.get("reference")) in known_refs for i in page):
+            if not path or any(str(i.get("reference")) in known_refs for i in page) or _older_than(page, since):
                 break
             # nextPagePath is absolute ("/api/v0/..."); the client base URL already ends in /api/v0
             if path.startswith("/api/v0"):
