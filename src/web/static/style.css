@@ -318,13 +318,13 @@ button.ui-chip { cursor: pointer; }
 }
 .kill-switch-engaged .tile-label { color: #FFE1E5 !important; }
 
-.kpi { padding: 10px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.kpi .kpi-value { font: 600 16px/1.2 var(--font-mono); letter-spacing: -0.02em; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.kpi .kpi-sub { font-size: 11px; color: var(--text-3); line-height: 1.35; }
+.kpi { padding: 14px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.kpi .kpi-value { font: 600 19px/1.2 var(--font-mono); letter-spacing: -0.02em; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kpi .kpi-sub { font-size: 12px; color: var(--text-3); line-height: 1.35; }
 
 .trigger-link, button.trigger-link {
   display: flex; flex-direction: column; gap: 4px; min-width: 0; min-height: 44px;
-  padding: 10px; text-align: left; border-radius: 16px;
+  padding: 14px; text-align: left; border-radius: 16px;
   background: #151A2E; border: 1px solid #2E3760; color: var(--text); cursor: pointer;
 }
 .trigger-text { font-size: 13px; font-weight: 600; line-height: 1.25; color: var(--text); overflow-wrap: anywhere; }
@@ -469,8 +469,8 @@ button.ui-chip { cursor: pointer; }
 .adv-details .adv-chev { transition: transform .2s ease; }
 .adv-details[open] .adv-chev { transform: rotate(180deg); }
 
-@media (min-width: 768px) {
-  .kpi, .trigger-link, button.trigger-link { padding: 14px; }
-  .kpi .kpi-value { font-size: 19px; }
-  .kpi .kpi-sub { font-size: 12px; }
+@media (max-width: 767px) {
+  .home-kpis .kpi, .home-kpis .trigger-link { padding: 10px; }
+  .home-kpis .kpi-value { font-size: 13px; }
+  .home-kpis .kpi-sub { font-size: 11px; }
 }
