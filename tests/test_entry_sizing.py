@@ -187,7 +187,7 @@ def test_eur_capital_cap_counts_invested_money():
 
 
 def test_main_return_after_deposit_is_not_inflated():
-    from src.trading.shadow import _main_return_pct
+    from src.trading.shadow import _return_pct
     # €500 start, €500 deposit, €50 gain = 5%, not 10%
-    assert _main_return_pct(1050.0, 500.0, 500.0) == 5.0
-    assert _main_return_pct(525.0, 500.0, 0.0) == 5.0
+    assert _return_pct(1050.0, 500.0, 500.0) == 5.0
+    assert _return_pct(525.0, 500.0, 0.0) == 5.0

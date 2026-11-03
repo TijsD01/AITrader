@@ -44,6 +44,7 @@ def _run_migrations(connection):
         ("portfolio_snapshots", "is_live", "BOOLEAN DEFAULT 0"),
         ("cash_flows", "broker_ref", "VARCHAR(64)"),
         ("portfolio_snapshots", "broker", "VARCHAR(20)"),
+        ("shadow_accounts", "cash_flows_eur", "FLOAT DEFAULT 0.0"),
     ]
     for table, col, col_type in migrations:
         try:

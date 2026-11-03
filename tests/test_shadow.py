@@ -400,3 +400,44 @@ async def test_shadow_starts_with_the_main_account_value(shadows, monkeypatch):
         accounts = await shadow_portfolios._ensure_accounts(session, get_strategies())
     assert accounts["baseline"].cash_eur == accounts["baseline"].initial_capital_eur == 500.26
     await shadow_portfolios.reset("baseline")
+
+
+async def test_main_deposits_and_withdrawals_reach_the_shadow_cash(shadows):
+    from sqlalchemy import delete
+    from src.db.models import CashFlow, ShadowAccount
+    enable, reset_all = shadows
+    enable(["baseline"])
+    await reset_all()
+    async with AsyncSessionLocal() as session:
+        acc = (await shadow_portfolios._ensure_accounts(session, get_strategies()))["baseline"]
+        start = acc.started_at
+        session.add_all([
+            # Before the shadow started: already in its start capital
+            CashFlow(amount_eur=999.0, source="manual", is_live=False, timestamp=start - datetime.timedelta(days=1)),
+            CashFlow(amount_eur=2000.0, source="broker", is_live=False, timestamp=start + datetime.timedelta(minutes=5)),
+            CashFlow(amount_eur=-500.0, source="broker", is_live=False, timestamp=start + datetime.timedelta(minutes=9)),
+            # Other account (live) while the main bot runs paper
+            CashFlow(amount_eur=777.0, source="broker", is_live=True, timestamp=start + datetime.timedelta(minutes=7)),
+        ])
+        await session.commit()
+    try:
+        comparison = await shadow_portfolios.get_comparison({"total_value_eur": 11500.0, "trading_mode": "PAPER"}, False)
+        row = comparison["strategies"][0]
+        assert row["cash_eur"] == 11500.0
+        # A deposit is not gain for the shadow either
+        assert row["return_pct"] == 0.0
+
+        # A flow removed by hand is taken back once, not twice
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(CashFlow).where(CashFlow.amount_eur == -500.0))
+            await session.commit()
+        for _ in range(2):
+            async with AsyncSessionLocal() as session:
+                await shadow_portfolios._ensure_accounts(session, get_strategies())
+        async with AsyncSessionLocal() as session:
+            acc = await session.get(ShadowAccount, "baseline")
+            assert (acc.cash_eur, acc.cash_flows_eur) == (12000.0, 2000.0)
+    finally:
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(CashFlow))
+            await session.commit()

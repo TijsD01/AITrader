@@ -199,6 +199,8 @@ class ShadowAccount(Base):
     # Main-bot parameters the shadow builds on (trigger threshold, breakeven %, max positions), frozen at start
     # so the learner's later recalibrations of the main bot do not change the experiment halfway
     frozen_params = Column(JSON, nullable=True)
+    # Main-account deposits minus withdrawals since the start, already booked into cash_eur
+    cash_flows_eur = Column(Float, default=0.0)
     started_at = Column(DateTime, default=datetime.datetime.utcnow)
 
 class ShadowTrigger(Base):
