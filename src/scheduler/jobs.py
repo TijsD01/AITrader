@@ -160,6 +160,12 @@ class TradingScheduler:
         automatically triggers the opening market session!
         """
         try:
+            if get_active_broker() is not live_broker or not live_broker.resting_orders_on():
+                # Resting T212 entry orders left from an earlier run are no longer synced: cancel them
+                try:
+                    await live_broker.cancel_resting_entries("resting orders off or live disarmed at startup")
+                except Exception as e:
+                    logger.error(f"Startup cancel of resting T212 orders failed: {e}")
             await self.monitor_resting_orders()
             now = datetime.datetime.now(ZoneInfo(settings.TIMEZONE))
             today_date = now.date()

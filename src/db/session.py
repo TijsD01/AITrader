@@ -186,12 +186,10 @@ async def set_kill_switch(active: bool) -> bool:
     settings.KILL_SWITCH_ACTIVE = active
     if active:
         # A task, not an await: sync_resting_entries can reach here holding the broker's T212 lock, which the cancel needs
-        from src.trading.broker import get_active_broker
-        cancel = getattr(get_active_broker(), "cancel_resting_entries", None)
-        if cancel:
-            task = asyncio.create_task(cancel("kill switch on"))
-            _cancel_tasks.add(task)
-            task.add_done_callback(_cancel_done)
+        from src.trading.broker import live_broker
+        task = asyncio.create_task(live_broker.cancel_resting_entries("kill switch on"))
+        _cancel_tasks.add(task)
+        task.add_done_callback(_cancel_done)
     return active
 
 

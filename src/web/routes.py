@@ -522,6 +522,7 @@ async def get_settings():
 @router.post("/api/settings")
 async def update_settings(req: SettingsUpdateRequest):
     env_updates: Dict[str, Any] = {}
+    was_live = get_active_broker() is live_broker
     async with AsyncSessionLocal() as session:
         if req.auto_buy_enabled is not None:
             res = await session.execute(select(SystemConfig).where(SystemConfig.key == "AUTO_BUY_ENABLED"))
@@ -686,6 +687,10 @@ async def update_settings(req: SettingsUpdateRequest):
 
     if env_updates:
         update_env_file(env_updates)
+
+    if was_live and get_active_broker() is not live_broker:
+        # Nothing syncs resting T212 entry orders once live is disarmed: cancel them now
+        await live_broker.cancel_resting_entries("live trading disarmed")
 
     return {"success": True, "message": "Settings updated and saved successfully."}
 

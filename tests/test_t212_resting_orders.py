@@ -234,10 +234,88 @@ async def test_kill_switch_cancels_but_keeps_trigger_pending(rest, asml, monkeyp
 
 async def test_sync_takes_over_existing_pending_buy(rest, asml):
     tid = await _seed()
-    rest.pending = [{"id": 5, "ticker": "ASMLa_EQ", "quantity": 0.5, "status": "NEW"}]
-    rest.order_state[5] = dict(rest.pending[0], limitPrice=600.0)
+    rest.pending = [{"id": 5, "ticker": "ASMLa_EQ", "quantity": 0.5, "status": "NEW", "limitPrice": 600.0}]
+    rest.order_state[5] = dict(rest.pending[0])
     await _sync()
     assert rest.posts == [] and (await _trigger(tid)).broker_order_id == "t212_5"
+
+
+async def test_sync_leaves_user_buy_at_other_price_alone(rest, asml):
+    tid = await _seed()
+    rest.pending = [{"id": 5, "ticker": "ASMLa_EQ", "quantity": 0.5, "status": "NEW", "limitPrice": 590.0}]
+    rest.order_state[5] = dict(rest.pending[0])
+    await _sync()
+    assert len(rest.posts) == 1 and rest.posts[0][0] == "limit"
+    assert (await _trigger(tid)).broker_order_id == "t212_1"
+
+
+def _breakout():
+    return _seed(trigger_type="BREAKOUT_BUY", target_price=100.0, current_price_at_creation=98.0,
+                 stop_loss=95.0, take_profit=120.0)
+
+
+async def test_breakout_takes_over_stop_limit_at_trigger_price(rest, asml):
+    tid = await _breakout()
+    rest.pending = [{"id": 6, "ticker": "ASMLa_EQ", "quantity": 0.5, "status": "NEW", "stopPrice": 100.0, "limitPrice": 100.5}]
+    await _sync(price=99.0)
+    assert rest.posts == [] and (await _trigger(tid)).broker_order_id == "t212_6"
+
+
+async def test_breakout_ignores_limit_buy_at_trigger_price(rest, asml):
+    tid = await _breakout()
+    rest.pending = [{"id": 5, "ticker": "ASMLa_EQ", "quantity": 0.5, "status": "NEW", "limitPrice": 100.0}]
+    await _sync(price=99.0)
+    assert len(rest.posts) == 1 and rest.posts[0][0] == "stop_limit"
+    assert (await _trigger(tid)).broker_order_id == "t212_1"
+
+
+async def test_sync_does_not_book_a_fill_twice(rest, asml):
+    tid = await _seed(order_id="t212_1")
+    async with AsyncSessionLocal() as s:
+        s.add(Trade(ticker="ASML.AS", name="ASML", order_type="BUY", shares=0.5, currency="EUR", price_native=598.0,
+                    price_eur=598.0, total_eur=299.0, is_live=True, broker_order_id="t212_1"))
+        await s.commit()
+    rest.history = [{"order": {"id": 1, "status": "FILLED"}, "fill": {"quantity": 0.5, "price": 598.0}}]
+    assert await _sync() == []
+    assert not await _positions()
+    assert not any(p[0] == "stop" for p in rest.posts)
+    async with AsyncSessionLocal() as s:
+        trades = (await s.execute(select(Trade).where(Trade.ticker == "ASML.AS", Trade.order_type == "BUY"))).scalars().all()
+    assert len(trades) == 1
+    assert (await _trigger(tid)).status == "TRIGGERED"
+
+
+async def test_placement_timeout_takes_over_the_order_it_created(rest, asml):
+    tid = await _seed()
+    place = rest.place_limit
+
+    async def place_then_timeout(ticker, quantity, limit_price, validity="DAY"):
+        order = await place(ticker, quantity, limit_price, validity)
+        rest.pending.append(dict(order, limitPrice=limit_price, createdAt=datetime.datetime.now(
+            datetime.timezone.utc).isoformat().replace("+00:00", "Z")))
+        raise httpx.ReadTimeout("timed out")
+    rest.place_limit = place_then_timeout
+    await _sync()
+    assert len(rest.posts) == 1
+    assert (await _trigger(tid)).broker_order_id == "t212_1"
+
+
+async def test_sync_cancel_reuses_the_order_it_read(rest, asml):
+    await _seed(order_id="t212_1", created_days_ago=60)
+    _resting(rest)
+    calls = []
+    get_order, cancel_order = rest.get_order, rest.cancel_order
+
+    async def counting_get(oid):
+        calls.append("get")
+        return await get_order(oid)
+
+    async def counting_cancel(oid):
+        calls.append("cancel")
+        return await cancel_order(oid)
+    rest.get_order, rest.cancel_order = counting_get, counting_cancel
+    await _sync()
+    assert calls.index("cancel") == 1  # one read, then the cancel
 
 
 async def test_resting_order_cash_does_not_defund_its_trigger(rest, asml, monkeypatch):
@@ -315,6 +393,84 @@ async def test_cancel_trigger_cancels_broker_order(rest, asml):
     res = await LiveBroker().cancel_price_trigger(tid)
     assert res["success"] is True and rest.cancelled == [1]
     assert (await _trigger(tid)).status == "CANCELLED"
+
+
+async def test_cancel_during_sync_placement_cancels_the_new_order(rest, asml):
+    tid = await _seed()
+    rest.history = [{"order": {"id": 1, "status": "CANCELLED"}}]
+    entered, release = asyncio.Event(), asyncio.Event()
+    place = rest.place_limit
+
+    async def slow_place(*a, **kw):
+        entered.set()
+        await release.wait()
+        return await place(*a, **kw)
+    rest.place_limit = slow_place
+    broker = LiveBroker()
+    with _quote(610.0), patch("src.telegram.bot.telegram_bot.send_message", AsyncMock()):
+        sync = asyncio.create_task(broker.sync_resting_entries())
+        await entered.wait()
+        cancel = asyncio.create_task(broker.cancel_price_trigger(tid))
+        await asyncio.wait({cancel}, timeout=0.5)  # old code: the cancel finishes here, before the order exists
+        release.set()
+        await sync
+        res = await cancel
+    t = await _trigger(tid)
+    assert res["success"] is True and t.status == "CANCELLED"
+    assert rest.cancelled == [1] and t.broker_order_id is None
+
+
+async def test_cancel_resting_entries_with_flag_off_books_and_alerts_fills(rest, asml, monkeypatch):
+    monkeypatch.setattr(settings, "T212_RESTING_ORDERS", False)
+    a = await _seed(order_id="t212_1")
+    rest.history = [{"order": {"id": 1, "status": "FILLED"}, "fill": {"quantity": 0.5, "price": 598.0}}]
+    broker = LiveBroker()
+    with patch("src.telegram.bot.telegram_bot.notify_trigger_executed", new=AsyncMock()) as notify, \
+         patch.object(broker, "adjust_triggers_dynamically", new=AsyncMock(return_value=[])) as adjust:
+        booked = await broker.cancel_resting_entries("test")
+    assert len(booked) == 1 and booked[0]["trigger_id"] == a
+    notify.assert_awaited_once_with(booked[0])
+    adjust.assert_awaited_once()
+    assert (await _trigger(a)).status == "TRIGGERED" and len(await _positions()) == 1
+
+
+async def test_flag_off_trigger_path_cancels_leftover_resting_order_first(rest, asml, monkeypatch):
+    monkeypatch.setattr(settings, "T212_RESTING_ORDERS", False)
+    monkeypatch.setattr(live_module, "check_market_hours", lambda t, now=None: (True, ""))
+    tid = await _seed(order_id="t212_1")
+    rest.history = [{"order": {"id": 1, "status": "FILLED"}, "fill": {"quantity": 0.5, "price": 598.0}}]
+    with _quote(599.0):
+        executed = await LiveBroker().check_and_execute_triggers()
+    assert len(executed) == 1 and executed[0]["trigger_id"] == tid
+    assert (await _trigger(tid)).status == "TRIGGERED"
+    assert len(await _positions()) == 1
+    assert not any(p[0] in ("limit", "market") for p in rest.posts)
+
+
+async def test_settings_disarm_cancels_resting_orders(rest, asml, monkeypatch):
+    from src.db.models import SystemConfig
+    from src.web import routes
+    monkeypatch.setattr(settings, "TRADING_MODE", "LIVE")
+    monkeypatch.setattr(settings, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(routes, "update_env_file", lambda updates: None)
+    tid = await _seed(order_id="t212_1")
+    _resting(rest)
+    try:
+        await routes.update_settings(routes.SettingsUpdateRequest(live_trading_enabled=False))
+    finally:
+        async with AsyncSessionLocal() as s:
+            await s.execute(delete(SystemConfig).where(SystemConfig.key == "LIVE_TRADING_ENABLED"))
+            await s.commit()
+    assert rest.cancelled == [1] and (await _trigger(tid)).broker_order_id is None
+
+
+async def test_startup_cancels_resting_orders_when_not_synced():
+    from src.scheduler.jobs import TradingScheduler, live_broker
+    sched = TradingScheduler()
+    with patch.object(live_broker, "cancel_resting_entries", new=AsyncMock(return_value=[])) as cancel, \
+         patch.object(sched, "monitor_resting_orders", new=AsyncMock(side_effect=RuntimeError("stop here"))):
+        await sched.check_and_run_startup_sessions()
+    cancel.assert_awaited_once()
 
 
 async def test_cancel_trigger_with_fill_books_position(rest, asml):
