@@ -333,7 +333,7 @@ button.ui-chip { cursor: pointer; }
 .pos-row { display: block; }
 .pos-head {
   display: flex; align-items: center; gap: 12px; width: 100%;
-  padding: 12px 14px; min-height: 64px; text-align: left;
+  padding: 14px; min-height: 64px; text-align: left;
   background: transparent; border: 0; color: var(--text); cursor: pointer;
 }
 .pos-head:active { transform: none; background: var(--surface-2); }
