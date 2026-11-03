@@ -520,7 +520,7 @@ async function loadPortfolio() {
             </span>
             <span class="text-right shrink-0">
               <span class="block ui-num font-semibold text-[15px] text-white">${eur(pos.current_value_eur)}</span>
-              <span class="block ui-num text-xs font-semibold ${tone}">${signedEur(pnl)} · ${pctText}</span>
+              <span class="block ui-num text-xs font-semibold ${tone}"><span class="max-md:hidden">${signedEur(pnl)} · </span>${pctText}</span>
             </span>
             <i class="fa-solid fa-chevron-down pos-chevron" aria-hidden="true"></i>
           </button>

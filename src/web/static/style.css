@@ -474,5 +474,4 @@ button.ui-chip { cursor: pointer; }
 @media (max-width: 767px) {
   .home-kpis .kpi, .home-kpis .trigger-link { padding: 10px; }
   .home-kpis .kpi-value { font-size: 13px; }
-  .home-kpis .kpi-sub { font-size: 11px; }
 }
