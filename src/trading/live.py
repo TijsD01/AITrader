@@ -1463,6 +1463,41 @@ class LiveBroker(BaseBroker):
             logger.error(f"Failed to send release alert: {e}")
         return {"success": True, "message": f"{ticker} is now yours."}
 
+    async def take_from_user(self, ticker: str) -> Dict[str, Any]:
+        """
+        Mine -> Bot: hands a My holdings row to the bot, adopted the way the sync adopts an untracked holding.
+        A broker stop is placed only if a live buy plan exists.
+        """
+        if not holdings_enabled():
+            return {"success": False, "message": "Only for live Trading 212."}
+        ticker = ticker.upper()
+        unreachable = {"success": False, "message": "Could not reach Trading 212. Nothing changed."}
+        async with self._t212_lock:
+            async with AsyncSessionLocal() as session:
+                row = (await session.execute(select(UserHolding).where(UserHolding.ticker == ticker))).scalars().first()
+                if not row:
+                    return {"success": False, "message": f"{ticker} is not in your holdings."}
+                client = trading212.get_client()
+                if not client:
+                    return unreachable
+                try:
+                    bp = next((p for p in await client.positions()
+                               if p["instrument"]["ticker"] == row.t212_ticker and float(p.get("quantity") or 0) > 0), None)
+                except Exception as e:
+                    logger.error(f"Take of {ticker}: Trading 212 positions call failed: {e}")
+                    return unreachable
+                await session.delete(row)
+                if not bp:
+                    await session.commit()
+                    return {"success": False, "message": f"Trading 212 no longer holds {ticker}."}
+                adopted: List[str] = []
+                stops_to_place: List[tuple] = []
+                await self._adopt_holding(session, row.ticker, row.name, row.currency, float(bp["quantity"]),
+                                          float(bp["averagePricePaid"]), 0.0, adopted, stops_to_place)
+                await session.commit()
+            await self._finish_sync("Trading 212", [], stops_to_place, adopted)
+        return {"success": True, "message": f"The bot now trades {ticker}."}
+
     async def cancel_resting_entries(self, reason: str) -> List[Dict[str, Any]]:
         """
         Cancels every resting T212 entry order (triggers stay PENDING), also with the feature flag off.

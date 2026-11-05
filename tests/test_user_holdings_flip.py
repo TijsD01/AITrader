@@ -190,3 +190,86 @@ async def test_exit_waits_for_flip_and_skips_released_position(fake, bot_positio
     assert fake.posts == []
     pos, _, sells, _ = await _state()
     assert pos.status == "RELEASED" and sells == []
+
+
+@pytest.fixture
+async def mine_holding(fake, monkeypatch):
+    """Live T212 mode, ASML.AS in My holdings and held at T212 (1 share, avg 600)."""
+    await init_db()
+    _live(monkeypatch)
+    fake.positions_answers = [[_held("ASMLa_EQ", 1.0, avg=600.0)]]
+    async with AsyncSessionLocal() as s:
+        s.add(UserHolding(ticker=TICKER, t212_ticker="ASMLa_EQ", name="ASML", currency="EUR", shares=1.0,
+                          avg_price_native=600.0, current_price_native=610.0, current_price_eur=610.0, cost_basis_eur=600.0))
+        await s.commit()
+    try:
+        with patch("src.telegram.bot.telegram_bot.send_message", AsyncMock()):
+            yield
+    finally:
+        async with AsyncSessionLocal() as s:
+            for model in (Position, UserHolding, Trade, OrderTrigger):
+                await s.execute(delete(model).where(model.ticker == TICKER))
+            await s.commit()
+
+
+async def _take_state():
+    async with AsyncSessionLocal() as s:
+        pos = (await s.execute(select(Position).where(Position.ticker == TICKER))).scalars().first()
+        holding = (await s.execute(select(UserHolding).where(UserHolding.ticker == TICKER))).scalars().first()
+        return pos, holding
+
+
+async def test_take_adopts_with_plan_and_places_stop(fake, mine_holding):
+    async with AsyncSessionLocal() as s:
+        s.add(OrderTrigger(ticker=TICKER, target_price=600.0, current_price_at_creation=610.0, stop_loss=570.0,
+                           take_profit=700.0, allocation_eur=600.0, status="TRIGGERED", is_live=True))
+        await s.commit()
+    res = await LiveBroker().take_from_user(TICKER.lower())
+    assert res == {"success": True, "message": "The bot now trades ASML.AS."}
+    pos, holding = await _take_state()
+    assert holding is None
+    assert (pos.status, pos.is_live, pos.shares, pos.stop_loss_native) == ("OPEN", True, 1.0, 570.0)
+    assert ("stop", "ASMLa_EQ", -1.0, 570.0) in fake.posts
+
+
+async def test_take_without_plan_tracks_without_stop(fake, mine_holding):
+    res = await LiveBroker().take_from_user(TICKER)
+    assert res["success"] is True
+    pos, holding = await _take_state()
+    assert holding is None
+    assert pos.status == "OPEN" and pos.stop_loss_native is None
+    assert not [p for p in fake.posts if p[0] == "stop"]
+
+
+async def test_take_when_broker_no_longer_holds(fake, mine_holding):
+    fake.positions_answers = [[]]
+    res = await LiveBroker().take_from_user(TICKER)
+    assert res == {"success": False, "message": "Trading 212 no longer holds ASML.AS."}
+    assert await _take_state() == (None, None)
+
+
+async def test_take_when_t212_errors_changes_nothing(fake, mine_holding):
+    fake.positions = AsyncMock(side_effect=trading212.Trading212Error(503, "busy"))
+    res = await LiveBroker().take_from_user(TICKER)
+    assert res == {"success": False, "message": "Could not reach Trading 212. Nothing changed."}
+    pos, holding = await _take_state()
+    assert pos is None and holding is not None
+
+
+async def test_take_without_client_changes_nothing(fake, mine_holding, monkeypatch):
+    monkeypatch.setattr(trading212, "get_client", lambda: None)
+    res = await LiveBroker().take_from_user(TICKER)
+    assert res == {"success": False, "message": "Could not reach Trading 212. Nothing changed."}
+    pos, holding = await _take_state()
+    assert pos is None and holding is not None
+
+
+async def test_take_not_in_holdings(fake, monkeypatch):
+    _live(monkeypatch)
+    res = await LiveBroker().take_from_user("NOPOS.AS")
+    assert res == {"success": False, "message": "NOPOS.AS is not in your holdings."}
+
+
+async def test_take_refused_in_paper_mode():
+    res = await LiveBroker().take_from_user(TICKER)
+    assert res == {"success": False, "message": "Only for live Trading 212."}
