@@ -9,7 +9,7 @@ from config.settings import settings
 from src.db import session as db_session
 from src.db.models import CashFlow, PortfolioSnapshot, Position, UserHolding
 from src.trading.live import LiveBroker
-from tests.test_trading212_broker import _live, clean_snapshots  # noqa: F401
+from tests.test_trading212_broker import _cleanup, _held, _live, _with_stop, clean_snapshots, fake  # noqa: F401
 
 BOT = "MONEYBOT"
 MINE = "MONEYMINE"
@@ -114,3 +114,55 @@ async def test_sizing_ignores_mine_holdings(monkeypatch, clean_money):
     assert with_mine["usable_capital_eur"] == without["usable_capital_eur"]
     assert with_mine["available_cash_eur"] == without["available_cash_eur"]
     assert with_mine["user_holdings_eur"] == 5000.0 and with_mine["bot_equity_eur"] == 0.0
+
+
+async def test_leftover_holdings_ignored_after_switch_to_alpaca(monkeypatch, clean_money):
+    _live(monkeypatch)
+    monkeypatch.setattr(settings, "LIVE_BROKER", "alpaca")
+    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    broker = LiveBroker()
+    async with db_session.AsyncSessionLocal() as s:
+        s.add(PortfolioSnapshot(cash_eur=2000.0, equity_eur=0.0, total_value_eur=2000.0, is_live=True,
+                                broker="alpaca", timestamp=now - datetime.timedelta(days=1)))
+        s.add(PortfolioSnapshot(cash_eur=1900.0, equity_eur=0.0, total_value_eur=1900.0, is_live=True,
+                                broker="alpaca", timestamp=now))
+        s.add(_bot_position())
+        await s.commit()
+    loss_before = await broker.get_daily_loss_eur()
+    summary_before = await _summary(broker, RuntimeError("not called for alpaca"))
+    async with db_session.AsyncSessionLocal() as s:
+        s.add(_mine_row(150.0))  # left over from the Trading 212 days
+        await s.commit()
+    assert await broker.get_daily_loss_eur() == loss_before == 0.0  # €1,900 cash + €300 bot vs €2,000
+    summary = await _summary(broker, RuntimeError("not called for alpaca"))
+    assert summary["user_holdings_eur"] == 0.0
+    for key in ("total_value_eur", "equity_eur", "bot_equity_eur", "daily_loss_eur", "usable_capital_eur"):
+        assert summary[key] == summary_before[key], key
+
+
+async def test_sell_snapshot_holds_mine_and_daily_loss_stays_flat(fake, monkeypatch, clean_money):
+    _live(monkeypatch)
+    _with_stop(fake)
+    fake.positions_answers = [[_held("ASMLa_EQ", 3.0)]]
+    async with db_session.AsyncSessionLocal() as s:
+        s.add(Position(ticker="ASML.AS", name="ASML.AS", currency="EUR", shares=3.0, entry_price_native=100.0,
+                       current_price_native=100.0, highest_price_native=100.0, entry_price_eur=100.0,
+                       current_price_eur=100.0, cost_basis_eur=300.0, status="OPEN", is_live=True))
+        s.add(_bot_position())      # €300 stays open
+        s.add(_mine_row(150.0))     # €1,500
+        await s.commit()
+    try:
+        with patch("src.trading.live.market_data_provider.get_stock_data", return_value={"price": 105.0}), \
+             patch("src.telegram.bot.telegram_bot.notify_position_closed", AsyncMock()):
+            assert (await LiveBroker().execute_sell("ASML.AS"))["success"]
+        async with db_session.AsyncSessionLocal() as s:
+            snap = (await s.execute(select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True)
+                                    .order_by(PortfolioSnapshot.id.desc()))).scalars().first()
+            assert snap.equity_eur == 1800.0
+            assert snap.total_value_eur == round(snap.cash_eur + 300.0 + 1500.0, 2)
+            # The sell snapshot becomes yesterday's base: flat prices are no loss
+            snap.timestamp = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - datetime.timedelta(days=1)
+            await s.commit()
+        assert await LiveBroker().get_daily_loss_eur() == 0.0
+    finally:
+        await _cleanup("ASML.AS")

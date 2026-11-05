@@ -984,7 +984,8 @@ class LiveBroker(BaseBroker):
 
             # Update Portfolio Snapshot (cash decreases by cost + commission fee)
             new_cash_eur = round(cash_eur - actual_cost_eur - fee_eur, 2)
-            new_equity_eur = equity_eur + actual_cost_eur
+            # Snapshots hold the whole account, My holdings included (the daily loss base)
+            new_equity_eur = equity_eur + actual_cost_eur + await holdings_value_eur(session)
             new_snapshot = PortfolioSnapshot(
                 cash_eur=new_cash_eur,
                 equity_eur=new_equity_eur,
@@ -1117,7 +1118,8 @@ class LiveBroker(BaseBroker):
                     select(Position).where(Position.status == "OPEN", Position.is_live == True, Position.ticker != ticker.upper())
                 )
                 remaining = remaining_res.scalars().all()
-                new_equity_eur = sum(p.current_price_eur * p.shares for p in remaining)
+                # Snapshots hold the whole account, My holdings included (the daily loss base)
+                new_equity_eur = sum(p.current_price_eur * p.shares for p in remaining) + await holdings_value_eur(session)
 
                 new_snapshot = PortfolioSnapshot(
                     cash_eur=cash_eur,

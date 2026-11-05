@@ -32,7 +32,9 @@ def _value_eur(h: UserHolding) -> float:
 
 
 async def holdings_value_eur(session) -> float:
-    # No gate: rows only exist from live T212 sync.
+    """EUR value of My holdings; 0 when the feature is off, so leftover rows after a broker switch never count."""
+    if not holdings_enabled():
+        return 0.0
     res = await session.execute(select(UserHolding))
     return sum(_value_eur(h) for h in res.scalars().all())
 
