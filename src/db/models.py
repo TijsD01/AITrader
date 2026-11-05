@@ -52,6 +52,23 @@ class Position(Base):
     opened_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
+class UserHolding(Base):
+    """A Trading 212 stock the user owns and the bot must never trade."""
+    __tablename__ = "user_holdings"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), unique=True, nullable=False, index=True)
+    t212_ticker = Column(String(40), unique=True, nullable=False)
+    name = Column(String(100), nullable=True)
+    currency = Column(String(10), default="USD")
+    shares = Column(Float, nullable=False)
+    avg_price_native = Column(Float, nullable=False)
+    current_price_native = Column(Float, nullable=True)
+    current_price_eur = Column(Float, nullable=True)
+    cost_basis_eur = Column(Float, nullable=False)
+    added_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+
 class Trade(Base):
     __tablename__ = "trades"
 
