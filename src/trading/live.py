@@ -17,7 +17,7 @@ from src.data.market_hours import check_market_hours
 from src.trading.base import BaseBroker
 from src.trading.cash_flows import scan_live_cash_flows, net_cash_flows_eur, live_history_start
 from src.trading import trading212
-from src.trading.holdings import holdings_enabled, refresh_holding_prices, is_mine, mine_tickers
+from src.trading.holdings import holdings_enabled, refresh_holding_prices, is_mine, mine_tickers, holdings_value_eur
 
 logger = logging.getLogger(__name__)
 
@@ -509,10 +509,12 @@ class LiveBroker(BaseBroker):
             positions = (await session.execute(
                 select(Position).where(Position.status == "OPEN", Position.is_live == True)
             )).scalars().all()
+            mine_eur = await holdings_value_eur(session)
         if base is None or latest is None:
             return 0.0
-        # Cash from the latest snapshot (buys and sells write one), positions at their refreshed prices
-        current = (latest.cash_eur or 0.0) + sum((p.current_price_eur or 0.0) * p.shares for p in positions)
+        # Cash from the latest snapshot (buys and sells write one), positions at their refreshed prices.
+        # Snapshots hold the whole account, so My holdings must be on both sides of the comparison.
+        current = (latest.cash_eur or 0.0) + sum((p.current_price_eur or 0.0) * p.shares for p in positions) + mine_eur
         flows = await net_cash_flows_eur(is_live=True, since=base.timestamp)
         return max(0.0, round((base.total_value_eur or 0.0) + flows - current, 2))
 
@@ -574,7 +576,9 @@ class LiveBroker(BaseBroker):
             cash = snapshot.cash_eur if snapshot else 0.0
             usable_cash, protected_reserve = get_effective_deployable_cash(self._spendable_cash(cash), invested_eur=sum(p.cost_basis_eur or 0.0 for p in positions))
             available_cash = max(0.0, usable_cash - pending_alloc)
-            equity = sum(round(p.current_price_eur * p.shares, 2) for p in positions)
+            bot_equity = sum(round(p.current_price_eur * p.shares, 2) for p in positions)
+            mine_eur = await holdings_value_eur(session)
+            equity = bot_equity + mine_eur
             total_val = round(cash + equity, 2)
             # Portfolio value comes from the broker (Trading 212): fresh account summary, else the last synced snapshot, else local quotes
             value_source = "local"
@@ -626,6 +630,8 @@ class LiveBroker(BaseBroker):
                 "available_cash_eur": round(available_cash, 2),
                 "reserved_triggers_eur": round(pending_alloc, 2),
                 "equity_eur": round(equity, 2),
+                "bot_equity_eur": round(bot_equity, 2),
+                "user_holdings_eur": round(mine_eur, 2),
                 "total_value_eur": total_val,
                 "value_source": value_source,
                 "unrealized_pnl_eur": round(unrealized_pnl, 2),
