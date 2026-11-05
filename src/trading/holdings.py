@@ -2,6 +2,7 @@
 import asyncio
 import datetime
 import logging
+import math
 from typing import Optional
 
 from sqlalchemy import desc, select
@@ -100,23 +101,33 @@ def _reanchor(report: dict, base: float, label: str) -> Optional[tuple]:
     if not 0 < sl < entry or rr <= 0:
         return None
     stop = base * sl / entry
-    return score, round(stop, 2), round(base + (base - stop) * rr, 2), label
+    return score, stop, base + (base - stop) * rr, label
+
+
+def _price(p: float) -> float:
+    return round(p, 2 if p >= 1 else 4)  # same rule as LiveBroker._t212_price, so the broker stop matches
 
 
 def pick_bot_levels(candidates: list[tuple], current_price: float) -> tuple[float, float, str]:
-    """Highest-score (score, stop, target, label) set with stop < price < target; else the default % from the price."""
-    valid = [c for c in candidates if c[1] < current_price < c[2]]
+    """
+    Highest-score (score, stop, target, label) set with stop < price < target after rounding; else the default %.
+    A score of inf (a buy plan) wins whenever it is valid.
+    """
+    rounded = [(c[0], _price(c[1]), _price(c[2]), c[3]) for c in candidates if c[1] and c[2]]
+    valid = [c for c in rounded if c[1] < current_price < c[2]]
     if valid:
         score, stop, target, label = max(valid, key=lambda c: c[0])
-        return stop, target, f"{label}, score {score:g}"
-    return (round(current_price * (1 - settings.DEFAULT_STOP_LOSS_PCT), 2),
-            round(current_price * (1 + settings.DEFAULT_TAKE_PROFIT_PCT), 2), "default")
+        return stop, target, label if math.isinf(score) else f"{label}, score {score:g}"
+    return (_price(current_price * (1 - settings.DEFAULT_STOP_LOSS_PCT)),
+            _price(current_price * (1 + settings.DEFAULT_TAKE_PROFIT_PCT)), "default")
 
 
-async def committee_levels(ticker: str, avg_price: float, currency: str) -> tuple[list[tuple], Optional[float]]:
+async def committee_levels(ticker: str, avg_price: float, currency: str,
+                           run_committee: bool = True) -> tuple[list[tuple], Optional[float]]:
     """
     Committee stop/target sets for a holding the bot takes over: one anchored on the buy price, one on the market price.
-    Returns (candidates, market price). Never raises: on any failure the caller falls back to default levels.
+    Returns (candidates, market price); run_committee=False only fetches the price.
+    Never raises: on any failure the caller falls back to default levels.
     """
     from src.agents.committee import investment_committee
     try:
@@ -125,6 +136,8 @@ async def committee_levels(ticker: str, avg_price: float, currency: str) -> tupl
         if not data or not data.get("price") or trading212._ccy(data.get("currency")) != trading212._ccy(currency):
             return [], None
         market = float(data["price"])
+        if not run_committee:
+            return [], market
         bases = [(market, "committee, current price")]
         if avg_price and avg_price > 0:
             bases.append((float(avg_price), "committee, buy price"))
