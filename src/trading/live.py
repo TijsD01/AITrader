@@ -8,7 +8,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from sqlalchemy import select, desc, func
 
 from config.settings import settings
-from src.db.models import Position, Trade, PortfolioSnapshot, SystemConfig, OrderTrigger
+from src.db.models import Position, Trade, PortfolioSnapshot, SystemConfig, OrderTrigger, UserHolding
 from src.db.session import AsyncSessionLocal
 from src.data.currency import currency_service
 from src.data.market import market_data_provider
@@ -17,6 +17,7 @@ from src.data.market_hours import check_market_hours
 from src.trading.base import BaseBroker
 from src.trading.cash_flows import scan_live_cash_flows, net_cash_flows_eur, live_history_start
 from src.trading import trading212
+from src.trading.holdings import holdings_enabled, refresh_holding_prices
 
 logger = logging.getLogger(__name__)
 
@@ -1777,6 +1778,13 @@ class LiveBroker(BaseBroker):
                 return
 
             async with AsyncSessionLocal() as session:
+                # User holdings refresh even when the bot holds nothing; a failure here must not block bot stops
+                try:
+                    await refresh_holding_prices(session)
+                    await session.commit()
+                except Exception as e:
+                    await session.rollback()
+                    logger.warning(f"User holdings price refresh failed: {e}")
                 # Query dynamic breakeven trigger pct
                 be_cfg = await session.execute(
                     select(SystemConfig).where(SystemConfig.key == "BREAKEVEN_TRIGGER_PCT")
@@ -2003,26 +2011,52 @@ class LiveBroker(BaseBroker):
                 for t in (await session.execute(select(OrderTrigger).where(
                         OrderTrigger.status == "PENDING", OrderTrigger.is_live == True, OrderTrigger.broker_order_id.isnot(None)))).scalars().all():
                     resting.add(await client.resolve_ticker(t.ticker, t.currency))
+            mine = {h.t212_ticker: h for h in (await session.execute(select(UserHolding))).scalars().all()}
             adopted: List[str] = []
+            mine_added: List[str] = []
             stops_to_place: List[tuple] = []
             for t212_ticker, bp in held.items():
+                inst = bp["instrument"]
+                shares, cost_native, curr_code = float(bp["quantity"]), float(bp["averagePricePaid"]), inst.get("currency") or "USD"
+                price_native = float(bp.get("currentPrice") or cost_native)
+                if t212_ticker in mine:
+                    # The user's own stock: track it, never trade it
+                    h = mine[t212_ticker]
+                    h.shares, h.avg_price_native, h.current_price_native = shares, cost_native, price_native
+                    h.current_price_eur = currency_service.to_eur(price_native, curr_code)
+                    h.cost_basis_eur = currency_service.to_eur(cost_native, curr_code) * shares
+                    continue
                 if t212_ticker in resting:
                     logger.info(f"Trading 212 sync: {t212_ticker} has a resting entry order; its fill is booked by the order sync.")
                     continue
-                inst = bp["instrument"]
-                shares, cost_native, curr_code = float(bp["quantity"]), float(bp["averagePricePaid"]), inst.get("currency") or "USD"
                 if t212_ticker in local:
                     pos = local[t212_ticker]
                     await self._update_tracked_holding(session, pos, pos.ticker, shares, cost_native, curr_code)
+                    continue
+                yahoo = await client.yahoo_ticker(t212_ticker)
+                sl, _ = await self._planned_levels(session, yahoo)
+                if sl is None and holdings_enabled():
+                    # No bot buy plan: the user bought it by hand, so it is theirs
+                    session.add(UserHolding(
+                        ticker=yahoo, t212_ticker=t212_ticker, name=inst.get("name") or yahoo, currency=curr_code,
+                        shares=shares, avg_price_native=cost_native, current_price_native=price_native,
+                        current_price_eur=currency_service.to_eur(price_native, curr_code),
+                        cost_basis_eur=currency_service.to_eur(cost_native, curr_code) * shares,
+                    ))
+                    mine_added.append(f"{shares:g} {yahoo}")
                 else:
-                    yahoo = await client.yahoo_ticker(t212_ticker)
                     await self._adopt_holding(session, yahoo, inst.get("name") or yahoo, curr_code, shares, cost_native, 0.0, adopted, stops_to_place)
             gone = [t for t in local if t not in held]
-            if gone:
-                # Only a second, fresh positions answer may close a local position
+            gone_mine = [t for t in mine if t not in held]
+            if gone or gone_mine:
+                # Only a second, fresh positions answer may close a local position or drop a user holding
                 await asyncio.sleep(1.1)  # positions allows 1 req/s
                 still_held = {p["instrument"]["ticker"] for p in await client.positions() if float(p.get("quantity") or 0) > 0}
                 gone = [t for t in gone if t not in still_held]
+                gone_mine = [t for t in gone_mine if t not in still_held]
+            for t in gone_mine:
+                logger.info(f"Trading 212 sync: {mine[t].ticker} no longer held; removed from My holdings.")
+                await session.delete(mine[t])
             if t_cash is not None:
                 equity_val = t_equity if t_equity is not None else 0.0
                 session.add(PortfolioSnapshot(
@@ -2031,13 +2065,20 @@ class LiveBroker(BaseBroker):
                     total_value_eur=t_total if t_total is not None else (t_cash + equity_val),
                     daily_pnl_eur=0.0,
                     daily_pnl_pct=0.0,
-                    open_positions_count=len(held),
+                    open_positions_count=len(held.keys() & local.keys()) + len(adopted),  # bot positions only
                     is_live=True
                 ))
             await session.commit()
         await self._finish_sync(
             "Trading 212", [(local[t], await self._t212_last_sell_fill(client, t)) for t in gone], stops_to_place, adopted
         )
+        for m in mine_added:
+            try:
+                from src.telegram.bot import telegram_bot
+                await telegram_bot.send_message(
+                    f"New holding marked as yours: {m}. The bot will not trade it. Flip it to Bot on the Home tab if the bot should.")
+            except Exception as e:
+                logger.error(f"Failed to send new holding alert: {e}")
 
     async def sync_account_state(self) -> Dict[str, Any]:
         """
