@@ -364,7 +364,7 @@ function ownerNote(ticker, owner) {
 // ticker -> side it is moving to. Survives the list re-render, so a reload cannot hide a flip in flight.
 const flipping = new Map();
 function ownerBusyNote(ticker, target) {
-  return target === 'mine' ? 'Cancelling the stop at Trading 212…' : `Handing ${ticker} to the bot…`;
+  return target === 'mine' ? 'Cancelling the stop at Trading 212…' : 'Committee is setting stop and target…';
 }
 function ownerSwitchHtml(ticker, owner) {
   const t = esc(ticker);
@@ -392,7 +392,7 @@ async function setOwner(ticker, owner, sw) {
   if (!sw || flipping.has(ticker) || sw.dataset.owner === owner) return;
   const question = owner === 'mine'
     ? `${ticker} becomes yours. The bot cancels its stop at Trading 212 and never trades ${ticker} again. Continue?`
-    : `Let the bot trade ${ticker}? It may set a stop and sell it.`;
+    : `Let the bot trade ${ticker}? The committee sets a stop and a target, and the bot sells at either. This can take a minute or two.`;
   if (!confirm(question)) return;
   flipping.set(ticker, owner);
   // Re-render draws the busy slider from `flipping`; the same code serves any later reload

@@ -7,8 +7,11 @@ from sqlalchemy import delete, select
 
 from config.settings import settings
 from src.db.models import OrderTrigger, Position, Trade, UserHolding
+from src.agents.committee import investment_committee
+from src.data.market import market_data_provider
 from src.db.session import AsyncSessionLocal, init_db
 from src.trading import trading212
+from src.trading.holdings import pick_bot_levels
 from src.trading.live import LiveBroker
 from tests.test_trading212_broker import FakeT212, _held, _live, clean_snapshots, fake  # noqa: F401
 
@@ -192,8 +195,36 @@ async def test_exit_waits_for_flip_and_skips_released_position(fake, bot_positio
     assert pos.status == "RELEASED" and sells == []
 
 
+class FakeCommittee:
+    """Market data at 610 EUR; each report sets entry 2% under its price, stop 5% under entry, R:R 2."""
+
+    def __init__(self):
+        self.prices = []
+        self.scores = {600.0: 60, 610.0: 72}
+        self.error = None
+        self.lock = None
+
+    async def evaluate(self, data, equity):
+        assert self.lock is None or not self.lock.locked()  # the slow committee must not block the sync
+        self.prices.append(data["price"])
+        if self.error:
+            raise self.error
+        entry = data["price"] * 0.98
+        return {"consensus_score": self.scores[data["price"]],
+                "risk": {"entry_trigger_price": entry, "stop_loss_price": entry * 0.95, "risk_reward_ratio": 2.0}}
+
+
 @pytest.fixture
-async def mine_holding(fake, monkeypatch):
+def committee(monkeypatch):
+    c = FakeCommittee()
+    monkeypatch.setattr(investment_committee, "evaluate_ticker", c.evaluate)
+    monkeypatch.setattr(market_data_provider, "get_stock_data",
+                        lambda t: {"ticker": t, "price": 610.0, "currency": "EUR"})
+    return c
+
+
+@pytest.fixture
+async def mine_holding(fake, monkeypatch, committee):
     """Live T212 mode, ASML.AS in My holdings and held at T212 (1 share, avg 600)."""
     await init_db()
     _live(monkeypatch)
@@ -219,30 +250,136 @@ async def _take_state():
         return pos, holding
 
 
-async def test_take_adopts_with_plan_and_places_stop(fake, mine_holding):
+def test_pick_bot_levels_higher_score_wins():
+    sets = [(60, 570.0, 660.0, "committee, buy price"), (72, 579.5, 671.0, "committee, current price")]
+    assert pick_bot_levels(sets, 615.0) == (579.5, 671.0, "committee, current price, score 72")
+
+
+def test_pick_bot_levels_drops_set_that_would_sell_at_once():
+    sets = [(90, 570.0, 615.0, "target at price"), (80, 615.0, 700.0, "stop at price"), (50, 590.0, 640.0, "ok")]
+    assert pick_bot_levels(sets, 615.0) == (590.0, 640.0, "ok, score 50")
+
+
+def test_pick_bot_levels_default_when_none_valid(monkeypatch):
+    monkeypatch.setattr(settings, "DEFAULT_STOP_LOSS_PCT", 0.04)
+    monkeypatch.setattr(settings, "DEFAULT_TAKE_PROFIT_PCT", 0.08)
+    assert pick_bot_levels([(90, 620.0, 700.0, "x")], 615.0) == (590.4, 664.2, "default")
+    assert pick_bot_levels([], 615.0) == (590.4, 664.2, "default")
+
+
+async def test_take_adopts_with_plan_and_places_stop(fake, mine_holding, committee):
     async with AsyncSessionLocal() as s:
         s.add(OrderTrigger(ticker=TICKER, target_price=600.0, current_price_at_creation=610.0, stop_loss=570.0,
                            take_profit=700.0, allocation_eur=600.0, status="PENDING", is_live=True))
         await s.commit()
     res = await LiveBroker().take_from_user(TICKER.lower())
-    assert res == {"success": True, "message": "The bot now trades ASML.AS."}
+    assert res == {"success": True, "message": "The bot now trades ASML.AS. Stop 570.00, target 700.00 (buy plan)."}
     pos, holding = await _take_state()
     assert holding is None
-    assert (pos.status, pos.is_live, pos.shares, pos.stop_loss_native) == ("OPEN", True, 1.0, 570.0)
+    assert (pos.status, pos.is_live, pos.shares, pos.stop_loss_native, pos.take_profit_native) == ("OPEN", True, 1.0, 570.0, 700.0)
     assert ("stop", "ASMLa_EQ", -1.0, 570.0) in fake.posts
+    assert committee.prices == []
 
 
-async def test_take_without_plan_tracks_without_stop(fake, mine_holding):
-    res = await LiveBroker().take_from_user(TICKER)
-    assert res["success"] is True
+async def test_take_without_plan_gets_committee_levels(fake, mine_holding, committee):
+    fake.positions_answers = [[dict(_held("ASMLa_EQ", 1.0, avg=600.0), currentPrice=615.0)]]
+    broker = LiveBroker()
+    committee.lock = broker._t212_lock
+    res = await broker.take_from_user(TICKER)
+    assert res == {"success": True,
+                   "message": "The bot now trades ASML.AS. Stop 579.50, target 671.00 (committee, current price, score 72)."}
+    assert sorted(committee.prices) == [600.0, 610.0]
     pos, holding = await _take_state()
     assert holding is None
-    assert pos.status == "OPEN" and pos.stop_loss_native is None
+    assert (pos.status, pos.stop_loss_native, pos.take_profit_native) == ("OPEN", 579.5, 671.0)
+    assert ("stop", "ASMLa_EQ", -1.0, 579.5) in fake.posts
+
+
+async def test_take_uses_default_when_every_committee_set_would_sell_at_once(fake, mine_holding, committee):
+    """At 672 both committee targets (671, 660) are under the price, so the default levels apply."""
+    fake.positions_answers = [[dict(_held("ASMLa_EQ", 1.0, avg=600.0), currentPrice=672.0)]]
+    res = await LiveBroker().take_from_user(TICKER)
+    assert res["message"] == "The bot now trades ASML.AS. Stop 645.12, target 725.76 (default)."
+    pos, _ = await _take_state()
+    assert (pos.stop_loss_native, pos.take_profit_native) == (645.12, 725.76)
+
+
+async def test_take_when_committee_fails_uses_default_levels(fake, mine_holding, committee):
+    committee.error = RuntimeError("LLM down")
+    fake.positions_answers = [[dict(_held("ASMLa_EQ", 1.0, avg=600.0), currentPrice=615.0)]]
+    res = await LiveBroker().take_from_user(TICKER)
+    assert res == {"success": True, "message": "The bot now trades ASML.AS. Stop 590.40, target 664.20 (default)."}
+    pos, holding = await _take_state()
+    assert holding is None
+    assert (pos.stop_loss_native, pos.take_profit_native) == (590.4, 664.2)
+    assert ("stop", "ASMLa_EQ", -1.0, 590.4) in fake.posts
+
+
+async def test_take_without_t212_price_uses_market_price(fake, mine_holding, committee):
+    res = await LiveBroker().take_from_user(TICKER)
+    assert res["message"] == "The bot now trades ASML.AS. Stop 579.50, target 671.00 (committee, current price, score 72)."
+    pos, _ = await _take_state()
+    assert pos.stop_loss_native == 579.5
+
+
+async def test_take_without_any_price_refuses_and_keeps_row(fake, mine_holding, committee, monkeypatch):
+    monkeypatch.setattr(market_data_provider, "get_stock_data", lambda t: None)
+    res = await LiveBroker().take_from_user(TICKER)
+    assert res == {"success": False, "message": "No price for ASML.AS right now. Nothing changed. Try again."}
+    pos, holding = await _take_state()
+    assert pos is None and holding is not None
     assert not [p for p in fake.posts if p[0] == "stop"]
 
 
-async def test_take_with_only_old_triggered_trigger_places_no_stop(fake, mine_holding):
-    """A TRIGGERED trigger is an already-booked fill: its stale levels must not arm a stop."""
+async def test_take_books_current_price_not_buy_price(fake, mine_holding, committee):
+    """Levels anchor on the current price, so the position must not start at the lower buy price under its stop."""
+    fake.positions_answers = [[dict(_held("ASMLa_EQ", 1.0, avg=600.0), currentPrice=672.0)]]
+    await LiveBroker().take_from_user(TICKER)
+    pos, _ = await _take_state()
+    assert (pos.entry_price_native, pos.cost_basis_eur) == (600.0, 600.0)
+    assert (pos.current_price_native, pos.highest_price_native, pos.current_price_eur) == (672.0, 672.0, 672.0)
+    assert pos.stop_loss_native < pos.current_price_native
+
+
+async def test_take_with_plan_stop_above_price_uses_default(fake, mine_holding, committee):
+    """Plan stop 570 with the price at 560 would make Trading 212 sell at once."""
+    async with AsyncSessionLocal() as s:
+        s.add(OrderTrigger(ticker=TICKER, target_price=600.0, current_price_at_creation=610.0, stop_loss=570.0,
+                           take_profit=700.0, allocation_eur=600.0, status="PENDING", is_live=True))
+        await s.commit()
+    fake.positions_answers = [[dict(_held("ASMLa_EQ", 1.0, avg=600.0), currentPrice=560.0)]]
+    res = await LiveBroker().take_from_user(TICKER)
+    assert res["message"] == "The bot now trades ASML.AS. Stop 537.60, target 604.80 (default)."
+    pos, _ = await _take_state()
+    assert (pos.stop_loss_native, pos.take_profit_native) == (537.6, 604.8)
+
+
+async def test_take_buy_price_set_wins_on_higher_score(fake, mine_holding, committee):
+    committee.scores = {600.0: 80, 610.0: 72}
+    fake.positions_answers = [[dict(_held("ASMLa_EQ", 1.0, avg=600.0), currentPrice=615.0)]]
+    res = await LiveBroker().take_from_user(TICKER)
+    assert res["message"] == "The bot now trades ASML.AS. Stop 570.00, target 660.00 (committee, buy price, score 80)."
+    pos, _ = await _take_state()
+    assert (pos.stop_loss_native, pos.take_profit_native) == (570.0, 660.0)
+
+
+def test_pick_bot_levels_plan_label_and_penny_rounding():
+    assert pick_bot_levels([(float("inf"), 570.0, 700.0, "buy plan")], 615.0) == (570.0, 700.0, "buy plan")
+    # 0.12 * 0.96 rounds to 0.12 at 2 decimals, which is the price itself
+    assert pick_bot_levels([], 0.12) == (0.1152, 0.1296, "default")
+    assert pick_bot_levels([(50, 0.1149, 0.1301, "c")], 0.115) == (0.1149, 0.1301, "c, score 50")
+
+
+async def test_take_skips_committee_on_currency_mismatch(fake, mine_holding, committee, monkeypatch):
+    monkeypatch.setattr(market_data_provider, "get_stock_data", lambda t: {"ticker": t, "price": 6.1, "currency": "USD"})
+    fake.positions_answers = [[dict(_held("ASMLa_EQ", 1.0, avg=600.0), currentPrice=615.0)]]
+    res = await LiveBroker().take_from_user(TICKER)
+    assert res["message"] == "The bot now trades ASML.AS. Stop 590.40, target 664.20 (default)."
+    assert committee.prices == []
+
+
+async def test_take_with_only_old_triggered_trigger_ignores_its_levels(fake, mine_holding):
+    """A TRIGGERED trigger is an already-booked fill: its stale levels must not arm a stop; the committee's do."""
     async with AsyncSessionLocal() as s:
         s.add(OrderTrigger(ticker=TICKER, target_price=600.0, current_price_at_creation=610.0, stop_loss=570.0,
                            take_profit=700.0, allocation_eur=600.0, status="TRIGGERED", is_live=True))
@@ -251,8 +388,8 @@ async def test_take_with_only_old_triggered_trigger_places_no_stop(fake, mine_ho
     assert res["success"] is True
     pos, holding = await _take_state()
     assert holding is None
-    assert (pos.status, pos.stop_loss_native, pos.take_profit_native) == ("OPEN", None, None)
-    assert not [p for p in fake.posts if p[0] == "stop"]
+    assert (pos.status, pos.stop_loss_native, pos.take_profit_native) == ("OPEN", 579.5, 671.0)
+    assert [p for p in fake.posts if p[0] == "stop"] == [("stop", "ASMLa_EQ", -1.0, 579.5)]
 
 
 async def test_take_when_broker_no_longer_holds(fake, mine_holding):

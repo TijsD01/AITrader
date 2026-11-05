@@ -17,7 +17,7 @@ from src.data.market_hours import check_market_hours
 from src.trading.base import BaseBroker
 from src.trading.cash_flows import scan_live_cash_flows, net_cash_flows_eur, live_history_start
 from src.trading import trading212
-from src.trading.holdings import holdings_enabled, refresh_holding_prices, is_mine, mine_tickers, holdings_value_eur
+from src.trading.holdings import holdings_enabled, refresh_holding_prices, is_mine, mine_tickers, holdings_value_eur, committee_levels, pick_bot_levels
 
 logger = logging.getLogger(__name__)
 
@@ -1466,17 +1466,27 @@ class LiveBroker(BaseBroker):
     async def take_from_user(self, ticker: str) -> Dict[str, Any]:
         """
         Mine -> Bot: hands a My holdings row to the bot, adopted the way the sync adopts an untracked holding.
-        A broker stop is placed only if a live buy plan exists.
+        It always gets a broker stop and a target valid at the current price: a pending live buy plan's,
+        else the best committee set, else the default %. Without a price it refuses and changes nothing.
         """
         if not holdings_enabled():
             return {"success": False, "message": "Only for live Trading 212."}
         ticker = ticker.upper()
         unreachable = {"success": False, "message": "Could not reach Trading 212. Nothing changed."}
+        not_held = {"success": False, "message": f"{ticker} is not in your holdings."}
+        async with AsyncSessionLocal() as session:
+            row = (await session.execute(select(UserHolding).where(UserHolding.ticker == ticker))).scalars().first()
+            if not row:
+                return not_held
+            has_plan = (await self._planned_levels(session, ticker, pending_only=True))[0] is not None
+            avg_price, currency = row.avg_price_native, row.currency
+        # The committee takes minutes, so it runs before the lock and never blocks the sync.
+        candidates, market_price = await committee_levels(ticker, avg_price, currency, run_committee=not has_plan)
         async with self._t212_lock:
             async with AsyncSessionLocal() as session:
                 row = (await session.execute(select(UserHolding).where(UserHolding.ticker == ticker))).scalars().first()
                 if not row:
-                    return {"success": False, "message": f"{ticker} is not in your holdings."}
+                    return not_held
                 client = trading212.get_client()
                 if not client:
                     return unreachable
@@ -1486,17 +1496,28 @@ class LiveBroker(BaseBroker):
                 except Exception as e:
                     logger.error(f"Take of {ticker}: Trading 212 positions call failed: {e}")
                     return unreachable
-                await session.delete(row)
                 if not bp:
+                    await session.delete(row)
                     await session.commit()
                     return {"success": False, "message": f"Trading 212 no longer holds {ticker}."}
+                current = float(bp.get("currentPrice") or 0) or market_price
+                if not current:
+                    return {"success": False, "message": f"No price for {ticker} right now. Nothing changed. Try again."}
+                plan_sl, plan_tp = await self._planned_levels(session, row.ticker, pending_only=True)
+                if plan_sl:
+                    candidates = candidates + [(float("inf"), plan_sl, plan_tp, "buy plan")]
+                # A plan stop can be above a price that fell since; the pick drops it so T212 does not sell at once.
+                sl, tp, label = pick_bot_levels(candidates, current)
+                await session.delete(row)
                 adopted: List[str] = []
                 stops_to_place: List[tuple] = []
                 await self._adopt_holding(session, row.ticker, row.name, row.currency, float(bp["quantity"]),
-                                          float(bp["averagePricePaid"]), 0.0, adopted, stops_to_place, pending_only=True)
+                                          float(bp["averagePricePaid"]), 0.0, adopted, stops_to_place,
+                                          levels=(sl, tp), current_native=current)
                 await session.commit()
             await self._finish_sync("Trading 212", [], stops_to_place, adopted)
-        return {"success": True, "message": f"The bot now trades {ticker}."}
+        dp = 2 if current >= 1 else 4
+        return {"success": True, "message": f"The bot now trades {ticker}. Stop {sl:.{dp}f}, target {tp:.{dp}f} ({label})."}
 
     async def cancel_resting_entries(self, reason: str) -> List[Dict[str, Any]]:
         """
@@ -2063,22 +2084,28 @@ class LiveBroker(BaseBroker):
     async def _adopt_holding(
         self, session, ticker: str, name: str, curr_code: str, shares: float, cost_native: float, fees_eur: float,
         adopted: List[str], stops_to_place: List[tuple], pending_only: bool = False,
+        levels: Optional[Tuple[float, float]] = None, current_native: Optional[float] = None,
     ) -> None:
-        """Books a broker holding the bot never recorded; it gets a broker stop only when a bot buy plan exists."""
-        sl, tp = await self._planned_levels(session, ticker, pending_only=pending_only)
+        """
+        Books a broker holding the bot never recorded. Stop/target: levels when given, else the bot buy plan's;
+        it gets a broker stop only with a stop. current_native defaults to the buy price (the sync path).
+        """
+        sl, tp = levels or await self._planned_levels(session, ticker, pending_only=pending_only)
+        current_native = current_native or cost_native
         price_eur = currency_service.to_eur(cost_native, curr_code)
+        current_eur = currency_service.to_eur(current_native, curr_code)
         session.add(Position(
             ticker=ticker,
             name=name,
             currency=curr_code,
             shares=shares,
             entry_price_native=cost_native,
-            current_price_native=cost_native,
-            highest_price_native=cost_native,
+            current_price_native=current_native,
+            highest_price_native=current_native,
             stop_loss_native=sl,
             take_profit_native=tp,
             entry_price_eur=price_eur,
-            current_price_eur=price_eur,
+            current_price_eur=current_eur,
             cost_basis_eur=price_eur * shares,
             fees_eur=round(fees_eur, 2),
             status="OPEN",

@@ -2,15 +2,17 @@
 import asyncio
 import datetime
 import logging
+import math
+from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import desc, select
 
 from config.settings import settings
 from src.data.currency import currency_service
 from src.data.market import market_data_provider
 from src.data.market_hours import check_market_hours
 from src.db import session as db_session
-from src.db.models import Position, SystemConfig, Trade, UserHolding
+from src.db.models import PortfolioSnapshot, Position, SystemConfig, Trade, UserHolding
 from src.trading import trading212
 
 logger = logging.getLogger(__name__)
@@ -86,6 +88,74 @@ async def refresh_holding_prices(session) -> None:
         if price:
             h.current_price_native = float(price)
             h.current_price_eur = currency_service.to_eur(float(price), h.currency)
+
+
+def _reanchor(report: dict, base: float, label: str) -> Optional[tuple]:
+    """(score, stop, target, label) with the report's stop distance and R:R moved from its entry trigger to base."""
+    risk = report.get("risk") or {}
+    try:
+        entry, sl, rr = float(risk["entry_trigger_price"]), float(risk["stop_loss_price"]), float(risk["risk_reward_ratio"])
+        score = float(report["consensus_score"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not 0 < sl < entry or rr <= 0:
+        return None
+    stop = base * sl / entry
+    return score, stop, base + (base - stop) * rr, label
+
+
+def _price(p: float) -> float:
+    return round(p, 2 if p >= 1 else 4)  # same rule as LiveBroker._t212_price, so the broker stop matches
+
+
+def pick_bot_levels(candidates: list[tuple], current_price: float) -> tuple[float, float, str]:
+    """
+    Highest-score (score, stop, target, label) set with stop < price < target after rounding; else the default %.
+    A score of inf (a buy plan) wins whenever it is valid.
+    """
+    rounded = [(c[0], _price(c[1]), _price(c[2]), c[3]) for c in candidates if c[1] and c[2]]
+    valid = [c for c in rounded if c[1] < current_price < c[2]]
+    if valid:
+        score, stop, target, label = max(valid, key=lambda c: c[0])
+        return stop, target, label if math.isinf(score) else f"{label}, score {score:g}"
+    return (_price(current_price * (1 - settings.DEFAULT_STOP_LOSS_PCT)),
+            _price(current_price * (1 + settings.DEFAULT_TAKE_PROFIT_PCT)), "default")
+
+
+async def committee_levels(ticker: str, avg_price: float, currency: str,
+                           run_committee: bool = True) -> tuple[list[tuple], Optional[float]]:
+    """
+    Committee stop/target sets for a holding the bot takes over: one anchored on the buy price, one on the market price.
+    Returns (candidates, market price); run_committee=False only fetches the price.
+    Never raises: on any failure the caller falls back to default levels.
+    """
+    from src.agents.committee import investment_committee
+    try:
+        data = await asyncio.to_thread(market_data_provider.get_stock_data, ticker)
+        # Levels in another currency than the holding would put the broker stop at a wrong price.
+        if not data or not data.get("price") or trading212._ccy(data.get("currency")) != trading212._ccy(currency):
+            return [], None
+        market = float(data["price"])
+        if not run_committee:
+            return [], market
+        bases = [(market, "committee, current price")]
+        if avg_price and avg_price > 0:
+            bases.append((float(avg_price), "committee, buy price"))
+        async with db_session.AsyncSessionLocal() as session:
+            equity = (await session.execute(select(PortfolioSnapshot.total_value_eur).where(PortfolioSnapshot.is_live == True)
+                                            .order_by(desc(PortfolioSnapshot.timestamp)).limit(1))).scalar() or 10000.0
+        reports = await asyncio.gather(*(investment_committee.evaluate_ticker(dict(data, price=b), equity) for b, _ in bases),
+                                       return_exceptions=True)
+    except Exception as e:
+        logger.error(f"Committee levels for {ticker} failed: {e}")
+        return [], None
+    out = []
+    for (base, label), rep in zip(bases, reports):
+        if isinstance(rep, BaseException):
+            logger.error(f"Committee run for {ticker} ({label}) failed: {rep}")
+        elif isinstance(rep, dict) and (c := _reanchor(rep, base, label)):
+            out.append(c)
+    return out, market
 
 
 async def backfill_user_holdings() -> list[str]:
