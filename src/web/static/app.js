@@ -47,7 +47,7 @@ function signedEur(value, digits = 2) {
 }
 
 // Segmented bar: one slice per holding, cash last
-function renderAllocationBar(cashEur, positions) {
+function renderAllocationBar(cashEur, positions, mineEur = 0) {
   const bar = document.getElementById('allocationBar');
   const legend = document.getElementById('allocationLegend');
   if (!bar) return;
@@ -56,6 +56,8 @@ function renderAllocationBar(cashEur, positions) {
     value: Math.max(0, Number(p.current_value_eur) || 0),
     color: ALLOC_COLORS[i % ALLOC_COLORS.length]
   }));
+  // Your own holdings: hatched slice between the bot's slices and cash
+  parts.push({ label: 'Yours', value: Math.max(0, mineEur), cls: 'alloc-mine' });
   parts.push({ label: 'Cash', value: Math.max(0, cashEur), color: ALLOC_CASH_COLOR });
   const total = parts.reduce((s, p) => s + p.value, 0);
   if (total <= 0) {
@@ -64,11 +66,11 @@ function renderAllocationBar(cashEur, positions) {
     return;
   }
   const shown = parts.filter(p => p.value > 0);
-  bar.innerHTML = shown.map(p => `<span style="flex:${(p.value / total * 1000).toFixed(0)};background:${p.color}" title="${esc(p.label)}"></span>`).join('');
+  bar.innerHTML = shown.map(p => `<span${p.cls ? ` class="${p.cls}"` : ''} style="flex:${(p.value / total * 1000).toFixed(0)}${p.color ? `;background:${p.color}` : ''}" title="${esc(p.label)}"></span>`).join('');
   bar.setAttribute('aria-label', 'Capital allocation: ' + shown.map(p => `${p.label} ${(p.value / total * 100).toFixed(0)}%`).join(', '));
   if (legend) {
-    legend.innerHTML = positions.length === 0 ? '' : shown.map(p =>
-      `<span><i style="background:${p.color}"></i>${esc(p.label)} <span class="ui-num text-slate-300">${(p.value / total * 100).toFixed(0)}%</span></span>`
+    legend.innerHTML = positions.length === 0 && mineEur <= 0 ? '' : shown.map(p =>
+      `<span><i${p.cls ? ` class="${p.cls}"` : ''}${p.color ? ` style="background:${p.color}"` : ''}></i>${esc(p.label)} <span class="ui-num text-slate-300">${(p.value / total * 100).toFixed(0)}%</span></span>`
     ).join('');
   }
 }
@@ -143,15 +145,9 @@ document.addEventListener('click', (e) => {
   const ticker = el.dataset.ticker || '';
   switch (action) {
     case 'close-position': closePosition(ticker); break;
-    case 'toggle-position': {
-      const row = el.closest('.pos-row');
-      if (row) {
-        const open = row.classList.toggle('open');
-        el.setAttribute('aria-expanded', open ? 'true' : 'false');
-        if (open) openPositions.add(ticker); else openPositions.delete(ticker);
-      }
-      break;
-    }
+    case 'toggle-position': toggleHolding(el, ticker); break;
+    case 'set-owner': setOwner(ticker, el.dataset.owner); break;
+    case 'toggle-holding': toggleHolding(el, ticker); break;
     case 'buy': executePaperBuy(ticker); break;
     case 'arm-trigger': armAITrigger(ticker); break;
     case 'analyze': analyzeDirect(ticker); break;
@@ -360,8 +356,140 @@ function initChart() {
   });
 }
 
+// Bot | Mine slider. Sits in .pos-detail, never inside the .pos-head button.
+function ownerNote(ticker, owner) {
+  const t = esc(ticker);
+  return owner === 'mine' ? `The bot never buys or sells ${t}. Sell it in Trading 212.` : `The bot trades ${t}: stop, target and sell.`;
+}
+function ownerSwitchHtml(ticker, owner) {
+  const t = esc(ticker);
+  const seg = (side, icon, label) => `<button type="button" role="radio" data-set="${side}" data-action="set-owner" data-ticker="${t}" data-owner="${side}" aria-checked="${owner === side}" tabindex="${owner === side ? 0 : -1}"><i class="fa-solid fa-${icon}" aria-hidden="true"></i> ${label}</button>`;
+  return `
+    <div class="mt-3 space-y-1.5">
+      <div class="own-switch" data-owner="${owner}" role="radiogroup" aria-label="Who trades ${t}">${seg('bot', 'robot', 'Bot')}${seg('mine', 'user', 'Mine')}</div>
+      <p class="own-note">${ownerNote(ticker, owner)}</p>
+    </div>`;
+}
+
+// Open/close a row and remember it across reloads
+function toggleHolding(el, ticker) {
+  const row = el.closest('.pos-row');
+  if (!row) return;
+  const open = row.classList.toggle('open');
+  el.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) openPositions.add(ticker); else openPositions.delete(ticker);
+}
+
+function setSwitchSide(sw, owner) {
+  sw.dataset.owner = owner;
+  sw.querySelectorAll('[role="radio"]').forEach(b => {
+    const on = b.dataset.set === owner;
+    b.setAttribute('aria-checked', on ? 'true' : 'false');
+    b.tabIndex = on ? 0 : -1;
+  });
+}
+
+async function setOwner(ticker, owner) {
+  const sw = document.querySelector(`.own-switch[aria-label="Who trades ${ticker.replace(/["\\]/g, '')}"]`);
+  if (!sw || sw.classList.contains('busy') || sw.dataset.owner === owner) return;
+  const prev = sw.dataset.owner;
+  const question = owner === 'mine'
+    ? `${ticker} becomes yours. The bot cancels its stop at Trading 212 and never trades ${ticker} again. Continue?`
+    : `Let the bot trade ${ticker}? It may set a stop and sell it.`;
+  if (!confirm(question)) return;
+  const note = sw.parentElement.querySelector('.own-note');
+  const prevBtn = sw.querySelector(`[data-set="${prev}"] i`);
+  const prevIcon = prevBtn.className;
+  setSwitchSide(sw, owner);
+  sw.classList.add('busy');
+  sw.setAttribute('aria-busy', 'true');
+  prevBtn.className = 'fa-solid fa-circle-notch fa-spin';
+  note.textContent = owner === 'mine' ? 'Cancelling the stop at Trading 212…' : `Handing ${ticker} to the bot…`;
+  try {
+    const res = await fetch(`/api/holdings/${encodeURIComponent(ticker)}/owner`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ owner })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || `Could not move ${ticker}`);
+    showToast(data.message || 'Done');
+    loadPortfolio();
+  } catch (e) {
+    showToast(e.message, true);
+    setSwitchSide(sw, prev);
+    sw.classList.remove('busy');
+    sw.removeAttribute('aria-busy');
+    prevBtn.className = prevIcon;
+    note.textContent = ownerNote(ticker, prev);
+  }
+}
+
+// Arrow keys move between Bot and Mine
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+  const sw = e.target.closest && e.target.closest('.own-switch');
+  if (!sw) return;
+  e.preventDefault();
+  const other = sw.querySelector('[aria-checked="false"]');
+  if (other) { other.focus(); other.click(); }
+});
+
+// "My holdings": the user's own Trading 212 stocks, kept apart from the bot's
+async function renderHoldings(req, show) {
+  const section = document.getElementById('holdingsSection');
+  const box = document.getElementById('holdingsContainer');
+  if (!section || !box) return;
+  if (!show) { section.hidden = true; return; }
+  let list;
+  try {
+    list = await req;
+  } catch (e) {
+    section.hidden = false;
+    document.getElementById('holdingsCount').textContent = '';
+    box.innerHTML = '<div class="text-center px-6 py-6 text-slate-400 text-sm">Could not load your holdings. Pull to refresh.</div>';
+    return;
+  }
+  if (!Array.isArray(list) || list.length === 0) { section.hidden = true; return; }
+  section.hidden = false;
+  document.getElementById('holdingsCount').textContent = String(list.length);
+  box.innerHTML = list.map(h => {
+    const pnl = Number(h.unrealized_pnl_eur) || 0;
+    const pnlPct = Number(h.unrealized_pnl_pct);
+    const tone = pnl > 0 ? 'ui-gain' : pnl < 0 ? 'ui-loss' : 'ui-muted';
+    const arrow = pnl > 0 ? '▲' : pnl < 0 ? '▼' : '';
+    const pctText = Number.isFinite(pnlPct) ? `${arrow} ${Math.abs(pnlPct).toFixed(2)}%` : '';
+    const isOpen = openPositions.has(h.ticker);
+    const shares = `${esc(h.shares)} share${Number(h.shares) === 1 ? '' : 's'}`;
+    return `
+      <div class="pos-row${isOpen ? ' open' : ''}">
+        <button type="button" class="pos-head" data-action="toggle-holding" data-ticker="${esc(h.ticker)}" aria-expanded="${isOpen ? 'true' : 'false'}">
+          <span class="pos-mono mine" aria-hidden="true">${esc(String(h.ticker || '').split('.')[0].slice(0, 4))}</span>
+          <span class="flex-1 min-w-0">
+            <span class="block font-semibold text-base text-white truncate">${esc(h.ticker)}</span>
+            <span class="block text-xs text-slate-500 truncate">${shares}${h.name ? ` · ${esc(h.name)}` : ''}</span>
+          </span>
+          <span class="text-right shrink-0">
+            <span class="block ui-num font-semibold text-[15px] text-white">${eur(h.current_value_eur)}</span>
+            <span class="block ui-num text-xs font-semibold ${tone}"><span class="max-md:hidden">${signedEur(pnl)} · </span>${pctText}</span>
+          </span>
+          <i class="fa-solid fa-chevron-down pos-chevron" aria-hidden="true"></i>
+        </button>
+        <div class="pos-detail">
+          <div class="grid grid-cols-2 gap-x-4 gap-y-2 pt-2">
+            <div class="kv"><span>Avg price</span><span>${esc(h.avg_price_native)} ${esc(h.currency)}</span></div>
+            <div class="kv"><span>Now</span><span>${esc(h.current_price_native)} ${esc(h.currency)}</span></div>
+            <div class="kv col-span-2"><span>P&amp;L</span><span class="${tone}">${signedEur(pnl)}</span></div>
+          </div>
+          ${ownerSwitchHtml(h.ticker, 'mine')}
+        </div>
+      </div>`;
+  }).join('');
+}
+
 // 2. Load Portfolio & Positions
 async function loadPortfolio() {
+  // Separate promise: a holdings failure must not blank the bot list
+  const holdingsReq = fetch('/api/holdings').then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
+  holdingsReq.catch(() => {});
   try {
     const [summaryRes, posRes] = await Promise.all([
       fetch('/api/portfolio'),
@@ -374,7 +502,8 @@ async function loadPortfolio() {
     // Update KPI cards
     const pnlVal = positions.reduce((s, p) => s + (p.unrealized_pnl_eur || 0), 0);
     const equityVal = positions.reduce((s, p) => s + (p.current_value_eur || 0), 0);
-    const totalVal = (summary.cash_eur || 0) + equityVal;
+    const mineEur = Number(summary.user_holdings_eur) || 0;
+    const totalVal = (summary.cash_eur || 0) + equityVal + mineEur;
     // Measure against everything put in (start value plus deposits), so a deposit is not shown as gain
     const investedCap = Number(summary.invested_capital_eur ?? summary.initial_capital_eur) || 0;
     const rawReturn = investedCap > 0 ? (((totalVal / investedCap) - 1.0) * 100) : (summary.total_return_pct ?? 0);
@@ -470,7 +599,7 @@ async function loadPortfolio() {
     if (posCount) posCount.textContent = String(positions.length);
 
     // Allocation bar (all screens) + doughnut (desktop)
-    renderAllocationBar(Number(summary.cash_eur) || 0, positions);
+    renderAllocationBar(Number(summary.cash_eur) || 0, positions, mineEur);
 
     // Update Chart
     if (allocationChart) {
@@ -487,6 +616,9 @@ async function loadPortfolio() {
       }
       allocationChart.update();
     }
+
+    const ownerSlider = (summary.trading_mode || '').toUpperCase() === 'LIVE' && (summary.broker || '').toUpperCase() === 'TRADING212';
+    renderHoldings(holdingsReq, ownerSlider);
 
     // Render position rows (tap a row to see entry, stops and the sell button)
     const container = document.getElementById('positionsContainer');
@@ -532,6 +664,7 @@ async function loadPortfolio() {
               <div class="kv"><span>Target</span><span class="ui-gain">${pos.take_profit_native ? esc(pos.take_profit_native) : '–'}</span></div>
               <div class="kv col-span-2"><span>P&amp;L</span><span class="${tone}">${signedEur(pnl)}</span></div>
             </div>
+            ${ownerSlider ? ownerSwitchHtml(pos.ticker, 'bot') : ''}
             <button type="button" data-action="close-position" data-ticker="${esc(pos.ticker)}" class="ui-btn ui-btn-danger w-full mt-3" aria-label="Sell position ${esc(pos.ticker)}">
               <i class="fa-solid fa-arrow-right-from-bracket"></i> Sell position
             </button>

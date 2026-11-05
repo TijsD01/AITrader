@@ -271,7 +271,7 @@
           <!-- Positions -->
           <section class="space-y-2.5" aria-labelledby="positionsTitle">
             <div class="flex items-center justify-between px-0.5">
-              <h2 id="positionsTitle" class="ui-section-title">Positions <span id="positionsCount" class="ui-count">0</span></h2>
+              <h2 id="positionsTitle" class="ui-section-title">Bot positions <span id="positionsCount" class="ui-count">0</span></h2>
               <button type="button" onclick="loadPortfolio()" class="ui-btn ui-btn-quiet ui-btn-sm ui-icon-btn" aria-label="Reload positions"><i class="fa-solid fa-arrows-rotate" aria-hidden="true"></i></button>
             </div>
             <div id="positionsContainer" class="ui-list">
@@ -280,6 +280,14 @@
                 Loading positions...
               </div>
             </div>
+          </section>
+
+          <!-- My holdings (live Trading 212 only; hidden by app.js) -->
+          <section id="holdingsSection" class="space-y-2.5" aria-labelledby="holdingsTitle" hidden>
+            <div class="flex items-center justify-between px-0.5">
+              <h2 id="holdingsTitle" class="ui-section-title">My holdings <span id="holdingsCount" class="ui-count">0</span></h2>
+            </div>
+            <div id="holdingsContainer" class="ui-list"></div>
           </section>
         </div>
 

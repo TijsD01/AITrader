@@ -13,7 +13,7 @@ HOME_IDS = (
     "mobileMarketDot mobileMarketStatusText capitalLimitBadge metricCash metricCashSub "
     "metricUnrealizedPnl metricPosCount metricUnrealizedPnlSub pendingTriggersSummary "
     "pendingTriggersSummaryText pendingTriggersSummarySub positionsTitle positionsCount "
-    "positionsContainer allocationChart"
+    "positionsContainer allocationChart holdingsSection holdingsTitle holdingsCount holdingsContainer"
 ).split()
 
 APP_JS = Path(__file__).resolve().parent.parent / "src/web/static/app.js"
@@ -48,3 +48,9 @@ def test_app_js_position_actions():
     js = APP_JS.read_text(encoding="utf-8")
     for action in ("toggle-position", "close-position"):
         assert re.search(rf'<[^>]*\bdata-action="{action}"[^>]*\bdata-ticker=', js), action
+
+
+def test_app_js_owner_actions():
+    js = APP_JS.read_text(encoding="utf-8")
+    assert "set-owner" in js
+    assert "/api/holdings" in js
