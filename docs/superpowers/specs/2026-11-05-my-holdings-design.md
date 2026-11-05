@@ -78,7 +78,7 @@ The snapshot's `open_positions_count` counts bot positions only.
 - `LiveBroker.execute_buy`: refuse a Mine ticker, including `is_manual=True`. Message: "KO is marked as yours. Flip it to Bot on the Home tab first."
 - `LiveBroker.create_price_trigger`: refuse a Mine ticker with the same message.
 - `trigger_gate` manual precheck (`precheck_manual_trigger`): same refusal, so the Advice tab shows it before the committee runs.
-- `check_and_execute_triggers`: skip and cancel a pending trigger whose ticker became Mine (defence in depth; the flip already cancels them).
+- `check_and_execute_triggers`: skip a pending trigger whose ticker is Mine and log a warning (defence in depth; creation refuses Mine tickers and the flip cancels their triggers).
 
 Sell paths need no guard: they only read `positions`, and Mine holdings are not there.
 
