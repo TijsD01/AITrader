@@ -33,6 +33,13 @@ async def lifespan(app: FastAPI):
     # Startup actions
     logger.info("Initializing database...")
     await init_db()
+    try:
+        from src.trading.holdings import backfill_user_holdings
+        moved = await backfill_user_holdings()
+        if moved:
+            logger.info(f"Moved to My holdings: {moved}")
+    except Exception as e:
+        logger.error(f"My holdings backfill failed: {e}")
 
     logger.info("Initializing TencentDB Agent Memory storage...")
     await memory_store.init_db()
