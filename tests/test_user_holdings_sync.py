@@ -40,10 +40,10 @@ async def _add_mine(ticker="SAP.DE", t212="SAPd_EQ", shares=3.0, avg=120.0):
         await s.commit()
 
 
-async def _add_plan(ticker="ASML.AS"):
+async def _add_plan(ticker="ASML.AS", status="PENDING"):
     async with AsyncSessionLocal() as s:
         s.add(OrderTrigger(ticker=ticker, target_price=600.0, current_price_at_creation=610.0, stop_loss=570.0,
-                           take_profit=700.0, allocation_eur=600.0, status="TRIGGERED", is_live=True))
+                           take_profit=700.0, allocation_eur=600.0, status=status, is_live=True))
         await s.commit()
 
 
@@ -185,5 +185,65 @@ async def test_sync_rekeyed_instrument_updates_existing_row(fake, clean_snapshot
         async with AsyncSessionLocal() as s:
             after = len((await s.execute(select(PortfolioSnapshot.id).where(PortfolioSnapshot.is_live == True))).scalars().all())
         assert after == before + 1
+    finally:
+        await _cleanup()
+
+
+async def _live_snapshots():
+    async with AsyncSessionLocal() as s:
+        return len((await s.execute(select(PortfolioSnapshot.id).where(PortfolioSnapshot.is_live == True))).scalars().all())
+
+
+async def test_sync_two_new_instruments_one_yahoo_ticker_inserts_one_row(fake, clean_snapshots, monkeypatch):
+    _live(monkeypatch)
+    real = fake.yahoo_ticker
+
+    async def yahoo(t212_ticker):
+        return "SAP.DE" if t212_ticker == "SAPx_EQ" else await real(t212_ticker)
+    monkeypatch.setattr(fake, "yahoo_ticker", yahoo)
+    fake.positions_answers = [[_held("SAPd_EQ", 3.0, avg=120.0), _held("SAPx_EQ", 2.0, avg=120.0)]]
+    before = await _live_snapshots()
+    try:
+        await _sync(LiveBroker())
+        rows = await _rows(UserHolding, "SAP.DE")
+        assert [(r.t212_ticker, r.shares) for r in rows] == [("SAPd_EQ", 3.0)]
+        assert await _rows(Position, "SAP.DE") == []
+        assert await _live_snapshots() == before + 1
+    finally:
+        await _cleanup()
+
+
+async def test_sync_old_triggered_trigger_does_not_make_new_holding_bot(fake, clean_snapshots, monkeypatch):
+    """A TRIGGERED trigger is an already-booked fill, not a live buy plan."""
+    _live(monkeypatch)
+    await _add_plan(status="TRIGGERED")
+    fake.positions_answers = [[_held("ASMLa_EQ", 1.0, avg=600.0)]]
+    try:
+        await _sync(LiveBroker())
+        assert [r.t212_ticker for r in await _rows(UserHolding, "ASML.AS")] == ["ASMLa_EQ"]
+        assert await _rows(Position, "ASML.AS") == []
+        assert not [p for p in fake.posts if p[0] == "stop"]
+    finally:
+        await _cleanup()
+
+
+async def test_sync_no_mine_row_for_unreconciled_bot_position(fake, clean_snapshots, monkeypatch):
+    """A bot position with no unique T212 instrument must not be counted again as the user's."""
+    _live(monkeypatch)
+    async with AsyncSessionLocal() as s:
+        s.add(Position(ticker="SAP.DE", name="SAP", currency="EUR", shares=3.0, entry_price_native=120.0,
+                       current_price_native=120.0, highest_price_native=120.0, entry_price_eur=120.0,
+                       current_price_eur=120.0, cost_basis_eur=360.0, status="OPEN", is_live=True))
+        await s.commit()
+    real = fake.resolve_ticker
+
+    async def resolve(yahoo_ticker, currency):
+        return None if yahoo_ticker == "SAP.DE" else await real(yahoo_ticker, currency)
+    monkeypatch.setattr(fake, "resolve_ticker", resolve)
+    fake.positions_answers = [[_held("SAPd_EQ", 3.0, avg=120.0)]]
+    try:
+        await _sync(LiveBroker())
+        assert await _rows(UserHolding, "SAP.DE") == []
+        assert [(p.status, p.shares) for p in await _rows(Position, "SAP.DE")] == [("OPEN", 3.0)]
     finally:
         await _cleanup()

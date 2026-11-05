@@ -16,7 +16,7 @@ Out of scope: Alpaca (keeps today's behaviour), paper mode, holdings at other br
 
 ## Current behaviour
 
-`LiveBroker._sync_t212_locked` (`src/trading/live.py`) adopts every T212 holding the bot never booked through `_adopt_holding`. With a live buy plan for the ticker (`_planned_levels`: latest PENDING/TRIGGERED live `OrderTrigger`) it books a `Position` with that stop and target and places a broker stop. Without a plan it books a `Position` with no stop and no target ("tracked only, the bot never sells it"). Either way the holding sits in `positions`, so it counts in sizing, MAX_POSITIONS and `invested_eur`, and the scanner treats the ticker as held.
+`LiveBroker._sync_t212_locked` (`src/trading/live.py`) adopts every T212 holding the bot never booked through `_adopt_holding`. With a live buy plan for the ticker (`_planned_levels(pending_only=True)`: latest PENDING live `OrderTrigger`; a TRIGGERED trigger is an already-booked fill, so it never counts as a live buy plan) it books a `Position` with that stop and target and places a broker stop. Without a plan it books a `Position` with no stop and no target ("tracked only, the bot never sells it"). Either way the holding sits in `positions`, so it counts in sizing, MAX_POSITIONS and `invested_eur`, and the scanner treats the ticker as held.
 
 ## Decisions
 
@@ -25,7 +25,7 @@ Out of scope: Alpaca (keeps today's behaviour), paper mode, holdings at other br
 | Where are Tijs's stocks? | Same Trading 212 account as the bot. Found by the sync. |
 | What does Mine block? | Selling (stops, targets, monitor exits, manual Sell button), buying more (auto, trigger, manual Buy), and scanning/analysis. |
 | Money math | Mine holdings are left out of sizing, MAX_POSITIONS, MAX_POSITION_PCT and the deployable-capital cap. |
-| Default for a new untracked holding | Mine, unless a live buy plan exists for the ticker; then Bot (likely a lost bot fill), as today. |
+| Default for a new untracked holding | Mine, unless a live buy plan (a PENDING live trigger) exists for the ticker; then Bot (likely a lost bot fill), as today. A TRIGGERED trigger is an already-booked fill, so it never counts as a live buy plan. |
 | Shared cash | No new cash bookkeeping. `MAX_DEPLOYABLE_CAPITAL_EUR` is the bot budget; Mine holdings no longer count against it. |
 | Storage | Separate table `user_holdings`. The `positions` table stays bot-only, so the ~20 existing `positions` queries need no owner filter. |
 
@@ -65,8 +65,10 @@ For each T212 holding, in this order:
 1. Its `t212_ticker` is in `user_holdings`: update shares, average price and current price on that row. Nothing else.
 2. It matches an open bot `Position`: unchanged (`_update_tracked_holding`).
 3. It has a resting entry order: unchanged (skipped, booked by `sync_resting_entries`).
-4. New, and `_planned_levels` finds a live buy plan: unchanged (`_adopt_holding` as Bot, broker stop placed, Telegram alert).
+4. New, and `_planned_levels(pending_only=True)` finds a live buy plan (latest PENDING live trigger; a TRIGGERED trigger is an already-booked fill, so it never counts as a live buy plan): `_adopt_holding` as Bot, broker stop placed, Telegram alert.
 5. New, no plan: insert a `UserHolding` row. Telegram: "New holding marked as yours: 24 KO. The bot will not trade it. Flip it to Bot on the Home tab if the bot should."
+
+A new holding whose Yahoo ticker matches an open bot `Position` that T212 could not map back (not reconciled) is skipped with a warning, so its value is never counted twice. A second new instrument mapping to a Yahoo ticker inserted earlier in the same sync is skipped too (unique `ticker`).
 
 A `user_holdings` row whose `t212_ticker` is no longer held: confirm with the same second positions call the bot already uses for gone positions, then delete the row. No bot `Trade` is booked. Log it.
 
@@ -106,7 +108,7 @@ New `LiveBroker` methods, both under `self._t212_lock` so a sync cannot run half
 **`take_from_user(ticker)`: Mine → Bot**
 1. Load the `UserHolding`. None → error.
 2. Read the T212 holding. Not held anymore → delete the row and return error "Trading 212 no longer holds X."
-3. In one DB transaction: delete the row and call `_adopt_holding` with the T212 numbers (stop and target from a live buy plan if one exists, else tracked with no stop, as today's adoption).
+3. In one DB transaction: delete the row and call `_adopt_holding` with the T212 numbers (stop and target from a live buy plan, PENDING live triggers only, if one exists, else tracked with no stop, as today's adoption). A TRIGGERED trigger is an already-booked fill, so it never counts as a live buy plan.
 4. Place the broker stop if one was planned (`_finish_sync`'s stop step), then Telegram as today's adoption alert.
 
 ### 6. One-time move of existing positions

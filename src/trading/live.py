@@ -1493,7 +1493,7 @@ class LiveBroker(BaseBroker):
                 adopted: List[str] = []
                 stops_to_place: List[tuple] = []
                 await self._adopt_holding(session, row.ticker, row.name, row.currency, float(bp["quantity"]),
-                                          float(bp["averagePricePaid"]), 0.0, adopted, stops_to_place)
+                                          float(bp["averagePricePaid"]), 0.0, adopted, stops_to_place, pending_only=True)
                 await session.commit()
             await self._finish_sync("Trading 212", [], stops_to_place, adopted)
         return {"success": True, "message": f"The bot now trades {ticker}."}
@@ -2029,15 +2029,17 @@ class LiveBroker(BaseBroker):
         except Exception as e:
             logger.warning(f"{broker.upper()} cash balance sync note: {e}")
 
-    async def _planned_levels(self, session, sym: str) -> Tuple[Optional[float], Optional[float]]:
+    async def _planned_levels(self, session, sym: str, pending_only: bool = False) -> Tuple[Optional[float], Optional[float]]:
         """
         Stop/target for a broker holding from the latest buy-plan trigger for the symbol.
         (None, None) without one: the holding was bought by hand, so the bot tracks it but never sells it.
+        pending_only: for a holding the bot has not booked, only a PENDING trigger is a live plan;
+        a TRIGGERED one is an already-booked fill whose levels are stale.
         """
         res = await session.execute(
             select(OrderTrigger).where(
                 OrderTrigger.is_live == True,
-                OrderTrigger.status.in_(["PENDING", "TRIGGERED"]),
+                OrderTrigger.status.in_(["PENDING"] if pending_only else ["PENDING", "TRIGGERED"]),
                 (OrderTrigger.ticker == sym) | OrderTrigger.ticker.like(f"{sym}.%"),
             ).order_by(desc(OrderTrigger.created_at)).limit(1)
         )
@@ -2060,10 +2062,10 @@ class LiveBroker(BaseBroker):
 
     async def _adopt_holding(
         self, session, ticker: str, name: str, curr_code: str, shares: float, cost_native: float, fees_eur: float,
-        adopted: List[str], stops_to_place: List[tuple],
+        adopted: List[str], stops_to_place: List[tuple], pending_only: bool = False,
     ) -> None:
         """Books a broker holding the bot never recorded; it gets a broker stop only when a bot buy plan exists."""
-        sl, tp = await self._planned_levels(session, ticker)
+        sl, tp = await self._planned_levels(session, ticker, pending_only=pending_only)
         price_eur = currency_service.to_eur(cost_native, curr_code)
         session.add(Position(
             ticker=ticker,
@@ -2133,7 +2135,9 @@ class LiveBroker(BaseBroker):
             res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == True))
             # Local tickers are Yahoo tickers (ASML.AS); map each to its T212 ticker. Unmapped ones are never closed here.
             local: Dict[str, Position] = {}
-            for pos in res.scalars().all():
+            open_live = res.scalars().all()
+            bot_tickers = {p.ticker.upper() for p in open_live}
+            for pos in open_live:
                 t212_ticker = await client.resolve_ticker(pos.ticker, pos.currency)
                 if t212_ticker:
                     local[t212_ticker] = pos
@@ -2183,19 +2187,27 @@ class LiveBroker(BaseBroker):
                     pos = local[t212_ticker]
                     await self._update_tracked_holding(session, pos, pos.ticker, shares, cost_native, curr_code)
                     continue
-                sl, _ = await self._planned_levels(session, yahoo)
+                if yahoo.upper() in bot_tickers:
+                    # A bot position T212 could not map back: booking it again would count its value twice
+                    logger.warning(f"Trading 212 sync: {t212_ticker} maps to open bot position {yahoo}, which is not reconciled; skipped.")
+                    continue
+                sl, _ = await self._planned_levels(session, yahoo, pending_only=True)
                 if sl is None and holdings_enabled():
                     # No bot buy plan: the user bought it by hand, so it is theirs
                     price_native = live_price or cost_native
-                    session.add(UserHolding(
+                    row = UserHolding(
                         ticker=yahoo, t212_ticker=t212_ticker, name=inst.get("name") or yahoo, currency=curr_code,
                         shares=shares, avg_price_native=cost_native, current_price_native=price_native,
                         current_price_eur=currency_service.to_eur(price_native, curr_code),
                         cost_basis_eur=currency_service.to_eur(cost_native, curr_code) * shares,
-                    ))
+                    )
+                    session.add(row)
+                    # A second instrument mapping to the same Yahoo ticker then hits the "both map to" skip
+                    mine_by_yahoo[yahoo.upper()] = row
                     mine_added.append(f"{shares:g} {yahoo}")
                 else:
-                    await self._adopt_holding(session, yahoo, inst.get("name") or yahoo, curr_code, shares, cost_native, 0.0, adopted, stops_to_place)
+                    await self._adopt_holding(session, yahoo, inst.get("name") or yahoo, curr_code, shares, cost_native, 0.0,
+                                              adopted, stops_to_place, pending_only=True)
             gone = [t for t in local if t not in held]
             gone_mine = [t for t in mine if t not in held]
             if gone or gone_mine:

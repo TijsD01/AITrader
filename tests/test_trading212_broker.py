@@ -295,7 +295,7 @@ async def test_sync_adopts_untracked_and_closes_only_when_confirmed(fake, clean_
                            highest_price_native=100.0, entry_price_eur=100.0, current_price_eur=100.0, cost_basis_eur=200.0,
                            status="OPEN", is_live=True))
         s.add(OrderTrigger(ticker="ASML.AS", target_price=600.0, current_price_at_creation=610.0, stop_loss=570.0,
-                           take_profit=700.0, allocation_eur=600.0, status="TRIGGERED", is_live=True))
+                           take_profit=700.0, allocation_eur=600.0, status="PENDING", is_live=True))
         await s.commit()
     broker = LiveBroker()
     base = [_held("SAPd_EQ", 2.0), _held("ASMLa_EQ", 1.0, avg=600.0)]

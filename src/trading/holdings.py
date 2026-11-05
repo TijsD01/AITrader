@@ -74,6 +74,8 @@ async def list_holdings() -> list[dict]:
 
 async def refresh_holding_prices(session) -> None:
     """Update row prices in place; the caller commits."""
+    if not holdings_enabled():
+        return
     res = await session.execute(select(UserHolding))
     for h in res.scalars().all():
         is_open, _ = check_market_hours(h.ticker)

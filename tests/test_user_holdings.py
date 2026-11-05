@@ -56,7 +56,10 @@ async def test_mine_tickers_and_value_when_live_t212(monkeypatch):
         await _clean()
 
 
-async def _refresh(monkeypatch, is_open):
+async def _refresh(monkeypatch, is_open, live=True):
+    if live:  # refresh only runs for live Trading 212
+        _live(monkeypatch)
+        monkeypatch.setattr(settings, "LIVE_BROKER", "trading212")
     monkeypatch.setattr(holdings_mod, "check_market_hours", lambda t: (is_open, ""))
     monkeypatch.setattr(holdings_mod.market_data_provider, "get_stock_data", lambda t: {"price": 70.0})
     async with db_session.AsyncSessionLocal() as s:
@@ -81,6 +84,15 @@ async def test_refresh_holding_prices_updates_when_market_open(monkeypatch):
 async def test_refresh_holding_prices_skips_when_market_closed(monkeypatch):
     try:
         h = await _refresh(monkeypatch, False)
+        assert (h.current_price_native, h.current_price_eur) == (62.10, 62.10)
+    finally:
+        await _clean()
+
+
+async def test_refresh_holding_prices_skips_when_feature_off(monkeypatch):
+    """Leftover rows after a broker switch: no Yahoo calls, prices untouched."""
+    try:
+        h = await _refresh(monkeypatch, True, live=False)
         assert (h.current_price_native, h.current_price_eur) == (62.10, 62.10)
     finally:
         await _clean()

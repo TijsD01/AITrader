@@ -222,7 +222,7 @@ async def _take_state():
 async def test_take_adopts_with_plan_and_places_stop(fake, mine_holding):
     async with AsyncSessionLocal() as s:
         s.add(OrderTrigger(ticker=TICKER, target_price=600.0, current_price_at_creation=610.0, stop_loss=570.0,
-                           take_profit=700.0, allocation_eur=600.0, status="TRIGGERED", is_live=True))
+                           take_profit=700.0, allocation_eur=600.0, status="PENDING", is_live=True))
         await s.commit()
     res = await LiveBroker().take_from_user(TICKER.lower())
     assert res == {"success": True, "message": "The bot now trades ASML.AS."}
@@ -238,6 +238,20 @@ async def test_take_without_plan_tracks_without_stop(fake, mine_holding):
     pos, holding = await _take_state()
     assert holding is None
     assert pos.status == "OPEN" and pos.stop_loss_native is None
+    assert not [p for p in fake.posts if p[0] == "stop"]
+
+
+async def test_take_with_only_old_triggered_trigger_places_no_stop(fake, mine_holding):
+    """A TRIGGERED trigger is an already-booked fill: its stale levels must not arm a stop."""
+    async with AsyncSessionLocal() as s:
+        s.add(OrderTrigger(ticker=TICKER, target_price=600.0, current_price_at_creation=610.0, stop_loss=570.0,
+                           take_profit=700.0, allocation_eur=600.0, status="TRIGGERED", is_live=True))
+        await s.commit()
+    res = await LiveBroker().take_from_user(TICKER)
+    assert res["success"] is True
+    pos, holding = await _take_state()
+    assert holding is None
+    assert (pos.status, pos.stop_loss_native, pos.take_profit_native) == ("OPEN", None, None)
     assert not [p for p in fake.posts if p[0] == "stop"]
 
 
