@@ -1029,7 +1029,10 @@ class LiveBroker(BaseBroker):
             if not is_open:
                 return {"success": False, "message": open_msg}
 
-        async with AsyncSessionLocal() as session:
+        # A real exit holds the T212 lock from the OPEN check to the booking, so a flip to Mine cannot land in between.
+        # broker_flat callers (the sync) already hold it.
+        lock = self._t212_lock if not broker_flat and settings.LIVE_BROKER.lower() == "trading212" else contextlib.nullcontext()
+        async with lock, AsyncSessionLocal() as session:
             res = await session.execute(
                 select(Position).where(Position.ticker == ticker.upper(), Position.status == "OPEN", Position.is_live == True)
             )
@@ -1932,7 +1935,10 @@ class LiveBroker(BaseBroker):
                                     if new_stop is not None and new_stop != p.stop_loss_native:
                                         p.stop_loss_native = new_stop
                                         logger.info(f"Live trailing stop raised for {p.ticker} to {new_stop} (+{gain_pct*100:.1f}%)")
-                                        await self._move_broker_stop(p.ticker, p.currency, p.shares, new_stop)
+                                        # Re-check under the T212 lock: a flip to Mine may have landed during this refresh
+                                        async with self._t212_lock, AsyncSessionLocal() as check:
+                                            if getattr(await check.get(Position, p.id), "status", None) == "OPEN":
+                                                await self._move_broker_stop(p.ticker, p.currency, p.shares, new_stop)
                         curr_val_eur = p.current_price_eur * p.shares
                         p.unrealized_pnl_eur = round(curr_val_eur - p.cost_basis_eur, 2)
                         p.unrealized_pnl_pct = round(((p.current_price_eur / p.entry_price_eur) - 1.0) * 100, 2)

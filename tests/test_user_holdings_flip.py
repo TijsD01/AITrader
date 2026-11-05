@@ -10,7 +10,7 @@ from src.db.models import OrderTrigger, Position, Trade, UserHolding
 from src.db.session import AsyncSessionLocal, init_db
 from src.trading import trading212
 from src.trading.live import LiveBroker
-from tests.test_trading212_broker import FakeT212, _live, clean_snapshots, fake  # noqa: F401
+from tests.test_trading212_broker import FakeT212, _held, _live, clean_snapshots, fake  # noqa: F401
 
 TICKER = "ASML.AS"
 STOP = {"id": 88, "type": "STOP", "ticker": "ASMLa_EQ", "quantity": -1.0, "stopPrice": 570.0}
@@ -148,3 +148,45 @@ async def test_release_waits_for_sync_lock(fake, bot_position):
 async def test_release_refused_in_paper_mode():
     res = await LiveBroker().release_to_user(TICKER)
     assert res == {"success": False, "message": "Only for live Trading 212."}
+
+
+async def test_trailing_stop_skips_position_released_mid_refresh(fake, bot_position, monkeypatch):
+    """The flip lands while refresh_positions_pnl fetches a quote: no new stop may go on the user's shares."""
+    monkeypatch.setattr(settings, "TRAILING_STOP_ATR_MULT", 0.0)
+    broker = LiveBroker()
+    released = []
+
+    async def quote_then_release(fn, *args, **kwargs):
+        if not released:
+            released.append(await broker.release_to_user(TICKER))
+        return {"price": 700.0, "technicals": {}}
+    monkeypatch.setattr(asyncio, "to_thread", quote_then_release)
+    await broker.refresh_positions_pnl()
+    assert released[0]["success"] is True
+    assert 88 in fake.cancelled
+    assert [p for p in fake.posts if p[0] == "stop"] == []
+    pos, holding, _, _ = await _state()
+    assert pos.status == "RELEASED" and holding is not None
+
+
+async def test_exit_waits_for_flip_and_skips_released_position(fake, bot_position):
+    """A sell that starts while a flip holds the lock runs after it and finds no bot position to sell."""
+    fake.positions_answers = [[_held("ASMLa_EQ", 1.0)]]
+    broker = LiveBroker()
+    await broker._t212_lock.acquire()
+    try:
+        release = asyncio.create_task(broker.release_to_user(TICKER))
+        await asyncio.sleep(0)
+        sell = asyncio.create_task(broker.execute_sell(TICKER, reason="test exit"))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert not sell.done()
+        assert fake.posts == []
+    finally:
+        broker._t212_lock.release()
+    assert (await release)["success"] is True
+    res = await sell
+    assert res == {"success": False, "message": f"No open live position found for {TICKER}."}
+    assert fake.posts == []
+    pos, _, sells, _ = await _state()
+    assert pos.status == "RELEASED" and sells == []
