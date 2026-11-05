@@ -108,11 +108,8 @@ async def backfill_user_holdings() -> list[str]:
                 Trade.executed_at >= since).limit(1))
             if bought.first():
                 continue
-            try:
-                t212_ticker = await client.resolve_ticker(pos.ticker, pos.currency)
-            except Exception as e:
-                logger.error(f"Backfill of {pos.ticker}: Trading 212 instrument lookup failed: {e}")
-                continue
+            # A lookup error propagates before the commit, so nothing is written and the next start retries.
+            t212_ticker = await client.resolve_ticker(pos.ticker, pos.currency)
             if not t212_ticker:
                 logger.warning(f"Backfill skipped {pos.ticker}: no unique Trading 212 instrument.")
                 continue

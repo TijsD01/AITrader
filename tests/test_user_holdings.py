@@ -1,6 +1,7 @@
 """UserHolding model and holdings helpers."""
 import datetime
 
+import pytest
 from sqlalchemy import delete, select
 
 from config.settings import settings
@@ -155,6 +156,39 @@ async def test_backfill_runs_once(monkeypatch):
 
 
 async def test_backfill_skipped_in_paper_mode():
+    try:
+        await _bf_seed()
+        assert await backfill_user_holdings() == []
+        assert await _statuses() == {"SAP.DE": "OPEN", "MC.PA": "OPEN", "AAPL": "OPEN"}
+        async with db_session.AsyncSessionLocal() as s:
+            assert (await s.execute(select(SystemConfig).where(SystemConfig.key == BACKFILL_KEY))).first() is None
+    finally:
+        await _bf_clean()
+
+
+async def test_backfill_lookup_error_propagates_and_writes_nothing(monkeypatch):
+    _bf_live(monkeypatch)
+
+    class Boom(FakeT212):
+        async def resolve_ticker(self, yahoo_ticker, currency):
+            raise RuntimeError("T212 hiccup")
+
+    monkeypatch.setattr(trading212, "get_client", lambda: Boom())
+    try:
+        await _bf_seed()
+        with pytest.raises(RuntimeError):
+            await backfill_user_holdings()
+        assert await _statuses() == {"SAP.DE": "OPEN", "MC.PA": "OPEN", "AAPL": "OPEN"}
+        async with db_session.AsyncSessionLocal() as s:
+            assert (await s.execute(select(UserHolding).where(UserHolding.ticker.in_(BF)))).first() is None
+            assert (await s.execute(select(SystemConfig).where(SystemConfig.key == BACKFILL_KEY))).first() is None
+    finally:
+        await _bf_clean()
+
+
+async def test_backfill_without_client_returns_empty_and_leaves_key_unset(monkeypatch):
+    _bf_live(monkeypatch)
+    monkeypatch.setattr(trading212, "get_client", lambda: None)
     try:
         await _bf_seed()
         assert await backfill_user_holdings() == []
