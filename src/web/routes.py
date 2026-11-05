@@ -2,7 +2,7 @@ import asyncio
 import logging
 import time
 import uuid
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Literal, Optional, Tuple
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -12,6 +12,7 @@ from config.settings import settings, update_env_file
 from src.db.session import AsyncSessionLocal, set_kill_switch
 from src.db.models import Position, Trade, PortfolioSnapshot, AnalysisReport, WatchlistItem, SystemConfig, MarketDigest, TradeLesson
 from src.trading.broker import active_broker as paper_broker, get_active_broker, active_broker, live_broker, check_broker_status
+from src.trading.holdings import holdings_enabled, list_holdings
 from src.trading.risk import derive_trigger_levels, entry_allocation_from_summary
 from src.trading.trigger_gate import (
     TriggerGateResult, normalize_ticker, invalid_ticker_result, precheck_manual_trigger,
@@ -851,3 +852,26 @@ async def reset_shadow(strategy_key: str):
     if not await shadow_portfolios.reset(strategy_key.strip().lower()):
         raise HTTPException(status_code=404, detail=f"No shadow portfolio named '{strategy_key}'.")
     return {"success": True, "message": f"Shadow portfolio '{strategy_key}' was reset."}
+
+
+class OwnerRequest(BaseModel):
+    owner: Literal["mine", "bot"]
+
+@router.get("/api/holdings")
+async def get_holdings():
+    return await list_holdings()
+
+@router.post("/api/holdings/{ticker}/owner")
+async def set_holding_owner(ticker: str, body: OwnerRequest):
+    """Flips a stock between the user (bot never trades it) and the bot."""
+    if not holdings_enabled():
+        raise HTTPException(status_code=409, detail="Only for live Trading 212.")
+    method = live_broker.release_to_user if body.owner == "mine" else live_broker.take_from_user
+    try:
+        result = await method(ticker)
+    except Exception:
+        logger.exception("Holding owner flip failed for %s", ticker)
+        raise HTTPException(status_code=409, detail="Something went wrong. Nothing was confirmed; check the Home tab.")
+    if not result["success"]:
+        raise HTTPException(status_code=409, detail=result["message"])
+    return {"ok": True, "message": result["message"]}
