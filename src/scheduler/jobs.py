@@ -21,6 +21,7 @@ from src.db.models import AnalysisReport, MarketDigest, Position, OrderTrigger, 
 from src.data.review_tracker import review_tracker
 from src.trading.risk import check_market_regime
 from src.trading.trigger_gate import evaluate_trigger_verdict
+from src.trading.holdings import mine_tickers
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +250,9 @@ class TradingScheduler:
             trigger_min_score = settings.TRIGGER_MIN_SCORE
             async with AsyncSessionLocal() as db_session:
                 open_tickers, pending_tickers = await _tickers_in_use(db_session)
+                # The user's own holdings are never evaluated, shadowed or reported
+                mine = await mine_tickers(db_session)
+                candidates = [c for c in candidates if c["ticker"].upper() not in mine]
 
                 cfg_trig = await db_session.execute(
                     select(SystemConfig).where(SystemConfig.key == "TRIGGER_MIN_SCORE")
@@ -566,10 +570,13 @@ class TradingScheduler:
                         pass
 
                 open_tickers, pending_tickers = await _tickers_in_use(db_session)
+                mine = await mine_tickers(db_session)
 
             extra = await market_scanner.load_watchlist_tickers()
             for mkt in active_markets:
                 candidates = await asyncio.to_thread(market_scanner.scan_universe, market=mkt, limit=10, extra_tickers=extra)
+                # The user's own holdings are never evaluated, shadowed or reported
+                candidates = [c for c in candidates if c["ticker"].upper() not in mine]
                 actionable = [c for c in candidates if c["ticker"].upper() not in open_tickers and c["ticker"].upper() not in pending_tickers]
                 # No pre-committee affordability filter: _fits_whole_share checks it after the verdict, and the shadow still sees it.
                 for cand in actionable[:3]:

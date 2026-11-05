@@ -17,7 +17,7 @@ from src.data.market_hours import check_market_hours
 from src.trading.base import BaseBroker
 from src.trading.cash_flows import scan_live_cash_flows, net_cash_flows_eur, live_history_start
 from src.trading import trading212
-from src.trading.holdings import holdings_enabled, refresh_holding_prices
+from src.trading.holdings import holdings_enabled, refresh_holding_prices, is_mine, mine_tickers
 
 logger = logging.getLogger(__name__)
 
@@ -761,6 +761,11 @@ class LiveBroker(BaseBroker):
             logger.warning(f"Live BUY blocked for {ticker}: {arm_msg}")
             return {"success": False, "message": arm_msg}
 
+        # The user's own holdings are never bought by the bot, not even by hand
+        async with AsyncSessionLocal() as session:
+            if await is_mine(session, ticker):
+                return {"success": False, "message": f"{ticker.upper()} is marked as yours. Flip it to Bot on the Home tab first."}
+
         # 2. Check Daily Max Loss Limit
         loss_msg = await self.enforce_daily_loss_limit()
         if loss_msg:
@@ -1192,6 +1197,8 @@ class LiveBroker(BaseBroker):
             )
             if pos_res.scalars().first():
                 return {"success": False, "message": f"Active position already exists for {ticker.upper()}."}
+            if await is_mine(session, ticker):
+                return {"success": False, "message": f"{ticker.upper()} is marked as yours. Flip it to Bot on the Home tab first."}
 
             res = await session.execute(
                 select(OrderTrigger).where(OrderTrigger.ticker == ticker.upper(), OrderTrigger.status == "PENDING", OrderTrigger.is_live == True)
@@ -1514,6 +1521,7 @@ class LiveBroker(BaseBroker):
                 return []
 
             executed = []
+            mine = await mine_tickers(session)
             for t in pending:
                 if t.broker_order_id:
                     # Resting order left from flag-on mode: cancel it (booking any fill) before the bot buys itself
@@ -1537,6 +1545,11 @@ class LiveBroker(BaseBroker):
 
                 # Unfunded triggers (outranked for cash or slots) wait until funding frees up
                 if t.allocation_eur <= 0:
+                    continue
+
+                # Stale row only: creation refuses Mine tickers and the flip cancels their triggers
+                if t.ticker.upper() in mine:
+                    logger.warning(f"Trigger #{t.id} for {t.ticker} skipped: {t.ticker} is marked as yours.")
                     continue
 
                 is_open, open_msg = check_market_hours(t.ticker)

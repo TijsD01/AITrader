@@ -16,6 +16,7 @@ from config.settings import settings
 from src.db.session import AsyncSessionLocal
 from src.db.models import Position, OrderTrigger, SystemConfig
 from src.trading.risk import check_market_regime, plan_buy
+from src.trading.holdings import holdings_enabled, is_mine
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +201,8 @@ async def _ticker_in_use(ticker: str) -> Optional[TriggerGateResult]:
         OrderTrigger.ticker == ticker, OrderTrigger.status == "PENDING", OrderTrigger.is_live == live
     )
     async with AsyncSessionLocal() as db_session:
+        if live and holdings_enabled() and await is_mine(db_session, ticker):
+            return TriggerGateResult(False, "MINE", f"{ticker} is marked as yours. Flip it to Bot on the Home tab first.")
         has_position = (await db_session.execute(pos_query)).first() is not None
         has_trigger = (await db_session.execute(trig_query)).first() is not None
     if has_position:
