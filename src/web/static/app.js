@@ -146,7 +146,7 @@ document.addEventListener('click', (e) => {
   switch (action) {
     case 'close-position': closePosition(ticker); break;
     case 'toggle-position': toggleHolding(el, ticker); break;
-    case 'set-owner': setOwner(ticker, el.dataset.owner); break;
+    case 'set-owner': setOwner(ticker, el.dataset.owner, el.closest('.own-switch')); break;
     case 'toggle-holding': toggleHolding(el, ticker); break;
     case 'buy': executePaperBuy(ticker); break;
     case 'arm-trigger': armAITrigger(ticker); break;
@@ -361,13 +361,21 @@ function ownerNote(ticker, owner) {
   const t = esc(ticker);
   return owner === 'mine' ? `The bot never buys or sells ${t}. Sell it in Trading 212.` : `The bot trades ${t}: stop, target and sell.`;
 }
+// ticker -> side it is moving to. Survives the list re-render, so a reload cannot hide a flip in flight.
+const flipping = new Map();
+function ownerBusyNote(ticker, target) {
+  return target === 'mine' ? 'Cancelling the stop at Trading 212…' : `Handing ${ticker} to the bot…`;
+}
 function ownerSwitchHtml(ticker, owner) {
   const t = esc(ticker);
-  const seg = (side, icon, label) => `<button type="button" role="radio" data-set="${side}" data-action="set-owner" data-ticker="${t}" data-owner="${side}" aria-checked="${owner === side}" tabindex="${owner === side ? 0 : -1}"><i class="fa-solid fa-${icon}" aria-hidden="true"></i> ${label}</button>`;
+  const target = flipping.get(ticker);
+  const busy = target !== undefined;
+  if (busy) owner = target;
+  const seg = (side, icon, label) => `<button type="button" role="radio" data-set="${side}" data-action="set-owner" data-ticker="${t}" data-owner="${side}" aria-checked="${owner === side}" tabindex="${owner === side ? 0 : -1}"><i class="fa-solid ${busy && owner !== side ? 'fa-circle-notch fa-spin' : `fa-${icon}`}" aria-hidden="true"></i> ${label}</button>`;
   return `
     <div class="mt-3 space-y-1.5">
-      <div class="own-switch" data-owner="${owner}" role="radiogroup" aria-label="Who trades ${t}">${seg('bot', 'robot', 'Bot')}${seg('mine', 'user', 'Mine')}</div>
-      <p class="own-note">${ownerNote(ticker, owner)}</p>
+      <div class="own-switch${busy ? ' busy' : ''}" data-owner="${owner}" role="radiogroup" aria-label="Who trades ${t}"${busy ? ' aria-busy="true"' : ''}>${seg('bot', 'robot', 'Bot')}${seg('mine', 'user', 'Mine')}</div>
+      <p class="own-note">${busy ? esc(ownerBusyNote(ticker, target)) : ownerNote(ticker, owner)}</p>
     </div>`;
 }
 
@@ -380,31 +388,16 @@ function toggleHolding(el, ticker) {
   if (open) openPositions.add(ticker); else openPositions.delete(ticker);
 }
 
-function setSwitchSide(sw, owner) {
-  sw.dataset.owner = owner;
-  sw.querySelectorAll('[role="radio"]').forEach(b => {
-    const on = b.dataset.set === owner;
-    b.setAttribute('aria-checked', on ? 'true' : 'false');
-    b.tabIndex = on ? 0 : -1;
-  });
-}
-
-async function setOwner(ticker, owner) {
-  const sw = document.querySelector(`.own-switch[aria-label="Who trades ${ticker.replace(/["\\]/g, '')}"]`);
-  if (!sw || sw.classList.contains('busy') || sw.dataset.owner === owner) return;
-  const prev = sw.dataset.owner;
+async function setOwner(ticker, owner, sw) {
+  if (!sw || flipping.has(ticker) || sw.dataset.owner === owner) return;
   const question = owner === 'mine'
     ? `${ticker} becomes yours. The bot cancels its stop at Trading 212 and never trades ${ticker} again. Continue?`
     : `Let the bot trade ${ticker}? It may set a stop and sell it.`;
   if (!confirm(question)) return;
-  const note = sw.parentElement.querySelector('.own-note');
-  const prevBtn = sw.querySelector(`[data-set="${prev}"] i`);
-  const prevIcon = prevBtn.className;
-  setSwitchSide(sw, owner);
-  sw.classList.add('busy');
-  sw.setAttribute('aria-busy', 'true');
-  prevBtn.className = 'fa-solid fa-circle-notch fa-spin';
-  note.textContent = owner === 'mine' ? 'Cancelling the stop at Trading 212…' : `Handing ${ticker} to the bot…`;
+  flipping.set(ticker, owner);
+  // Re-render draws the busy slider from `flipping`; the same code serves any later reload
+  const holder = sw.parentElement;
+  holder.outerHTML = ownerSwitchHtml(ticker, owner);
   try {
     const res = await fetch(`/api/holdings/${encodeURIComponent(ticker)}/owner`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ owner })
@@ -412,15 +405,12 @@ async function setOwner(ticker, owner) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.detail || `Could not move ${ticker}`);
     showToast(data.message || 'Done');
-    loadPortfolio();
   } catch (e) {
     showToast(e.message, true);
-    setSwitchSide(sw, prev);
-    sw.classList.remove('busy');
-    sw.removeAttribute('aria-busy');
-    prevBtn.className = prevIcon;
-    note.textContent = ownerNote(ticker, prev);
+  } finally {
+    flipping.delete(ticker);
   }
+  await loadPortfolio(); // success: new side; error: old side. Never stuck busy.
 }
 
 // Arrow keys move between Bot and Mine
@@ -529,6 +519,11 @@ async function loadPortfolio() {
     document.getElementById('metricTotalVal').textContent = eur(totalVal);
     document.getElementById('metricCash').textContent = eur(deployableCash);
     document.getElementById('metricEquity').textContent = eur(equityVal);
+    const mineWrap = document.getElementById('metricMineWrap');
+    if (mineWrap) {
+      mineWrap.hidden = !(mineEur > 0);
+      document.getElementById('metricMine').textContent = eur(mineEur);
+    }
     const totalCashEl = document.getElementById('metricTotalCash');
     if (totalCashEl) totalCashEl.textContent = eur(Number(summary.cash_eur) || 0);
 

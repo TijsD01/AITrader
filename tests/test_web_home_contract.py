@@ -13,7 +13,7 @@ HOME_IDS = (
     "mobileMarketDot mobileMarketStatusText capitalLimitBadge metricCash metricCashSub "
     "metricUnrealizedPnl metricPosCount metricUnrealizedPnlSub pendingTriggersSummary "
     "pendingTriggersSummaryText pendingTriggersSummarySub positionsTitle positionsCount "
-    "positionsContainer allocationChart holdingsSection holdingsTitle holdingsCount holdingsContainer"
+    "positionsContainer allocationChart holdingsSection holdingsTitle holdingsCount holdingsContainer metricMine"
 ).split()
 
 APP_JS = Path(__file__).resolve().parent.parent / "src/web/static/app.js"
