@@ -2012,19 +2012,35 @@ class LiveBroker(BaseBroker):
                         OrderTrigger.status == "PENDING", OrderTrigger.is_live == True, OrderTrigger.broker_order_id.isnot(None)))).scalars().all():
                     resting.add(await client.resolve_ticker(t.ticker, t.currency))
             mine = {h.t212_ticker: h for h in (await session.execute(select(UserHolding))).scalars().all()}
+            mine_by_yahoo = {h.ticker.upper(): h for h in mine.values()}
             adopted: List[str] = []
             mine_added: List[str] = []
             stops_to_place: List[tuple] = []
             for t212_ticker, bp in held.items():
                 inst = bp["instrument"]
                 shares, cost_native, curr_code = float(bp["quantity"]), float(bp["averagePricePaid"]), inst.get("currency") or "USD"
-                price_native = float(bp.get("currentPrice") or cost_native)
-                if t212_ticker in mine:
+                live_price = float(bp.get("currentPrice") or 0)
+                h = mine.get(t212_ticker)
+                if not h and t212_ticker not in resting and t212_ticker not in local:
+                    yahoo = await client.yahoo_ticker(t212_ticker)
+                    h = mine_by_yahoo.get(yahoo.upper())
+                    if h and h.t212_ticker in held:
+                        # Two held instruments map to one user row: track neither twice, never insert a duplicate
+                        logger.warning(f"Trading 212 sync: {t212_ticker} and {h.t212_ticker} both map to {h.ticker}; {t212_ticker} skipped.")
+                        continue
+                    if h:
+                        # T212 re-keyed the user's instrument: move the row to the new key, so it is not seen as gone
+                        logger.info(f"Trading 212 sync: {h.ticker} moved from {h.t212_ticker} to {t212_ticker} in My holdings.")
+                        del mine[h.t212_ticker]
+                        h.t212_ticker = t212_ticker
+                        mine[t212_ticker] = h
+                if h:
                     # The user's own stock: track it, never trade it
-                    h = mine[t212_ticker]
-                    h.shares, h.avg_price_native, h.current_price_native = shares, cost_native, price_native
-                    h.current_price_eur = currency_service.to_eur(price_native, curr_code)
+                    h.shares, h.avg_price_native = shares, cost_native
                     h.cost_basis_eur = currency_service.to_eur(cost_native, curr_code) * shares
+                    if live_price:  # else refresh_holding_prices keeps the last known price
+                        h.current_price_native = live_price
+                        h.current_price_eur = currency_service.to_eur(live_price, curr_code)
                     continue
                 if t212_ticker in resting:
                     logger.info(f"Trading 212 sync: {t212_ticker} has a resting entry order; its fill is booked by the order sync.")
@@ -2033,10 +2049,10 @@ class LiveBroker(BaseBroker):
                     pos = local[t212_ticker]
                     await self._update_tracked_holding(session, pos, pos.ticker, shares, cost_native, curr_code)
                     continue
-                yahoo = await client.yahoo_ticker(t212_ticker)
                 sl, _ = await self._planned_levels(session, yahoo)
                 if sl is None and holdings_enabled():
                     # No bot buy plan: the user bought it by hand, so it is theirs
+                    price_native = live_price or cost_native
                     session.add(UserHolding(
                         ticker=yahoo, t212_ticker=t212_ticker, name=inst.get("name") or yahoo, currency=curr_code,
                         shares=shares, avg_price_native=cost_native, current_price_native=price_native,

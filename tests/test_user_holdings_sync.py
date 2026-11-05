@@ -148,3 +148,42 @@ async def test_refresh_positions_pnl_refreshes_holdings_without_bot_positions(fa
         assert (rows[0].current_price_native, rows[0].current_price_eur) == (130.0, 130.0)
     finally:
         await _cleanup()
+
+
+async def test_sync_keeps_last_price_when_t212_sends_none(fake, clean_snapshots, monkeypatch):
+    _live(monkeypatch)
+    await _add_mine(avg=120.0)
+    async with AsyncSessionLocal() as s:
+        row = (await s.execute(select(UserHolding).where(UserHolding.ticker == "SAP.DE"))).scalars().one()
+        row.current_price_native, row.current_price_eur = 130.0, 130.0
+        await s.commit()
+    fake.positions_answers = [[_held("SAPd_EQ", 3.0, avg=120.0)]]  # no currentPrice key
+    try:
+        await _sync(LiveBroker())
+        rows = await _rows(UserHolding, "SAP.DE")
+        assert (rows[0].current_price_native, rows[0].current_price_eur) == (130.0, 130.0)
+    finally:
+        await _cleanup()
+
+
+async def test_sync_rekeyed_instrument_updates_existing_row(fake, clean_snapshots, monkeypatch):
+    _live(monkeypatch)
+    await _add_mine()
+    real = fake.yahoo_ticker
+
+    async def yahoo(t212_ticker):
+        return "SAP.DE" if t212_ticker == "SAPx_EQ" else await real(t212_ticker)
+    monkeypatch.setattr(fake, "yahoo_ticker", yahoo)
+    fake.positions_answers = [[_held("SAPx_EQ", 2.0, avg=120.0)]]
+    async with AsyncSessionLocal() as s:
+        before = len((await s.execute(select(PortfolioSnapshot.id).where(PortfolioSnapshot.is_live == True))).scalars().all())
+    try:
+        await _sync(LiveBroker())
+        rows = await _rows(UserHolding, "SAP.DE")
+        assert [(r.t212_ticker, r.shares) for r in rows] == [("SAPx_EQ", 2.0)]
+        assert await _rows(Position, "SAP.DE") == []
+        async with AsyncSessionLocal() as s:
+            after = len((await s.execute(select(PortfolioSnapshot.id).where(PortfolioSnapshot.is_live == True))).scalars().all())
+        assert after == before + 1
+    finally:
+        await _cleanup()
