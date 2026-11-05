@@ -1375,18 +1375,90 @@ class LiveBroker(BaseBroker):
                 trigger = res.scalars().first()
                 if not trigger:
                     return {"success": False, "message": f"Trigger #{trigger_id} not found."}
-                if trigger.status != "PENDING":
-                    return {"success": False, "message": f"Trigger #{trigger_id} is already {trigger.status}."}
-                if trigger.broker_order_id and (client := trading212.get_client()):
-                    fills = await self._t212_cancel_entry(client, trigger)
-                    await session.commit()
-                    if fills:
-                        return {"success": False, "message": f"Trigger #{trigger_id} for {trigger.ticker} filled before the cancel; position booked."}
-                    if trigger.broker_order_id:
-                        return {"success": False, "message": f"Trigger #{trigger_id}: resting order could not be cancelled; still pending."}
-                trigger.status = "CANCELLED"
+                return await self._cancel_trigger_locked(session, trigger)
+
+    async def _cancel_trigger_locked(self, session: Any, trigger: OrderTrigger) -> Dict[str, Any]:
+        """Cancels a pending live trigger and its resting T212 entry order. The caller holds _t212_lock (Trading 212)."""
+        if trigger.status != "PENDING":
+            return {"success": False, "message": f"Trigger #{trigger.id} is already {trigger.status}."}
+        if trigger.broker_order_id and (client := trading212.get_client()):
+            fills = await self._t212_cancel_entry(client, trigger)
+            await session.commit()
+            if fills:
+                return {"success": False, "message": f"Trigger #{trigger.id} for {trigger.ticker} filled before the cancel; position booked."}
+            if trigger.broker_order_id:
+                return {"success": False, "message": f"Trigger #{trigger.id}: resting order could not be cancelled; still pending."}
+        trigger.status = "CANCELLED"
+        await session.commit()
+        return {"success": True, "message": f"Trigger #{trigger.id} for {trigger.ticker} cancelled."}
+
+    async def release_to_user(self, ticker: str) -> Dict[str, Any]:
+        """
+        Bot -> Mine: cancels the ticker's pending buys and its T212 SELL orders, then moves the position to My holdings.
+        Nothing in the DB changes until every broker cancel is confirmed. No SELL trade is booked.
+        """
+        if not holdings_enabled():
+            return {"success": False, "message": "Only for live Trading 212."}
+        ticker = ticker.upper()
+        async with self._t212_lock:
+            async with AsyncSessionLocal() as session:
+                pos = (await session.execute(select(Position).where(
+                    Position.ticker == ticker, Position.status == "OPEN", Position.is_live == True))).scalars().first()
+                if not pos:
+                    return {"success": False, "message": f"No bot position in {ticker}."}
+
+                no_instrument = {"success": False, "message": f"{ticker} has no unique Trading 212 instrument. Nothing changed."}
+                client = trading212.get_client()
+                if not client:
+                    return no_instrument
+                try:
+                    t212_ticker = await client.resolve_ticker(pos.ticker, pos.currency)
+                except Exception as e:
+                    logger.error(f"Release of {ticker}: Trading 212 instrument lookup failed: {e}")
+                    return no_instrument
+                if not t212_ticker:
+                    return no_instrument
+
+                buy_error = {"success": False, "message": f"A pending buy for {ticker} could not be cancelled. Nothing changed."}
+                triggers = (await session.execute(select(OrderTrigger).where(
+                    OrderTrigger.ticker == ticker, OrderTrigger.status == "PENDING", OrderTrigger.is_live == True))).scalars().all()
+                for trigger in triggers:
+                    try:
+                        res = await self._cancel_trigger_locked(session, trigger)
+                    except Exception as e:
+                        logger.error(f"Release of {ticker}: cancel of trigger #{trigger.id} failed: {e}")
+                        return buy_error
+                    if not res["success"]:
+                        logger.warning(f"Release of {ticker} stopped: {res['message']}")
+                        return buy_error
+
+                stop_error = {"success": False, "message": "The stop at Trading 212 could not be cancelled. Nothing changed. Try again."}
+                try:
+                    ids = [o["id"] for o in self._t212_sells(await client.pending_orders(), t212_ticker)]
+                    for oid in ids:
+                        await client.cancel_order(oid)
+                    gone = await self._t212_wait_gone(client, ids)
+                except Exception as e:
+                    logger.error(f"Release of {ticker}: Trading 212 SELL order cancel failed: {e}")
+                    return stop_error
+                if not gone:
+                    logger.warning(f"Release of {ticker}: a SELL order at Trading 212 is still pending.")
+                    return stop_error
+
+                session.add(UserHolding(
+                    ticker=pos.ticker, t212_ticker=t212_ticker, name=pos.name, currency=pos.currency, shares=pos.shares,
+                    avg_price_native=pos.entry_price_native, current_price_native=pos.current_price_native,
+                    current_price_eur=pos.current_price_eur, cost_basis_eur=pos.cost_basis_eur,
+                ))
+                pos.status = "RELEASED"
                 await session.commit()
-                return {"success": True, "message": f"Trigger #{trigger_id} for {trigger.ticker} cancelled."}
+
+        try:
+            from src.telegram.bot import telegram_bot
+            await telegram_bot.send_message(f"{ticker} is now yours. The bot cancelled its stop and will not trade it.")
+        except Exception as e:
+            logger.error(f"Failed to send release alert: {e}")
+        return {"success": True, "message": f"{ticker} is now yours."}
 
     async def cancel_resting_entries(self, reason: str) -> List[Dict[str, Any]]:
         """
