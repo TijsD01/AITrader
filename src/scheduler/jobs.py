@@ -145,6 +145,15 @@ class TradingScheduler:
             coalesce=True
         )
 
+        # 9. Learner idle decay (08:00, Mon-Fri): lowers raised score thresholds after calendar days without a buy
+        self.scheduler.add_job(
+            self.decay_idle_thresholds,
+            CronTrigger(day_of_week="mon-fri", hour=8, minute=0, timezone=settings.TIMEZONE),
+            id="learner_idle_decay",
+            misfire_grace_time=3600,
+            coalesce=True
+        )
+
         self.scheduler.start()
         logger.info("Background Trading Scheduler initiated successfully.")
 
@@ -472,6 +481,14 @@ class TradingScheduler:
             executed = await self._check_price_triggers()
             await shadow_portfolios.check_triggers()
             return executed
+
+    async def decay_idle_thresholds(self):
+        """Daily job: lets the learner lower raised score thresholds after a stretch without buys."""
+        try:
+            from src.trading.learner import trade_learner
+            await trade_learner.decay_idle_thresholds()
+        except Exception as e:
+            logger.error(f"Learner idle decay failed: {e}")
 
     async def _sync_account_balance(self) -> Dict[str, Any]:
         """Runs the full broker sync (cash and positions) for a manual refresh."""

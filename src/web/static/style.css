@@ -392,6 +392,7 @@ button.ui-chip { cursor: pointer; }
     border: 1px solid var(--line); border-radius: 16px;
     background: var(--surface);
   }
+  .fold .responsive-table tr { background: var(--surface-inset); }
   .responsive-table tbody { padding: 10px; }
   .responsive-table tbody.divide-y > :not([hidden]) ~ :not([hidden]) { border-top-width: 1px; }
   .responsive-table td {
@@ -447,6 +448,32 @@ button.ui-chip { cursor: pointer; }
 .set-toggle input:checked + .ui-switch::after { transform: translateX(16px); background: var(--bg); }
 .set-toggle input:focus-visible + .ui-switch { outline: 2px solid var(--accent); outline-offset: 2px; }
 
+/* Collapsible sections: <details class="ui-list adv-details fold" data-fold="id">.
+   The inner .ui-list drops its own frame and keeps only the divider under the summary;
+   cards inside .fold-body read as insets so a card never sits on a card. */
+.fold { interpolate-size: allow-keywords; }
+.fold.ui-list > summary { min-height: 64px; border-radius: calc(var(--radius-lg) - 1px); }
+.fold > summary { border-radius: var(--radius-sm); }
+.fold > summary:focus-visible { outline-offset: -2px; }
+/* A long title drops its count to the next line instead of squeezing into a column */
+.fold > summary .ui-section-title { flex-wrap: wrap; row-gap: 0; }
+.fold > .ui-list { border-width: 1px 0 0; border-radius: 0; }
+.fold-body { padding: 16px; }
+.fold-body .ui-card { background: var(--surface-inset); border-radius: var(--radius); }
+/* Height eases open in 200ms and closes faster; browsers without ::details-content open instantly */
+.fold::details-content {
+  block-size: 0; overflow: clip;
+  transition: block-size .16s ease-in, content-visibility .16s allow-discrete;
+}
+.fold[open]::details-content {
+  block-size: auto;
+  transition: block-size .2s ease-out, content-visibility .2s allow-discrete;
+}
+/* The global reduced-motion rule only covers * and ::before/::after */
+@media (prefers-reduced-motion: reduce) {
+  .fold::details-content { transition: none !important; }
+}
+
 .mem-recap { font: 13px/1.6 var(--font-mono); color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 22rem; overflow-y: auto; }
 .mem-list { max-height: 28rem; overflow-y: auto; overscroll-behavior: contain; }
 .mem-row { padding: 14px 16px; min-width: 0; }
@@ -462,6 +489,16 @@ button.ui-chip { cursor: pointer; }
 }
 .adv-seg > button:hover { color: var(--text); }
 .adv-seg > button.is-active { background: var(--accent-soft); color: var(--accent-strong); }
+/* Two-option variant: one pill slides between equal halves instead of each button filling */
+.adv-seg-slide { position: relative; isolation: isolate; display: grid; grid-template-columns: 1fr 1fr; width: 100%; max-width: 280px; }
+.adv-seg-slide::before {
+  content: ""; position: absolute; z-index: -1; top: 3px; bottom: 3px; left: 3px; width: calc(50% - 4px);
+  border-radius: 999px; background: var(--accent-soft);
+  transition: transform 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.adv-seg-slide:has(> button:last-child.is-active)::before { transform: translateX(calc(100% + 2px)); }
+.adv-seg-slide > button { transition: color 200ms ease-out; }
+.adv-seg-slide > button.is-active { background: transparent; }
 .adv-prose { font-size: 14px; line-height: 1.5; color: var(--text-2); }
 .adv-clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; line-clamp: 4; overflow: hidden; }
 .adv-wrap { white-space: normal; padding-top: 4px; padding-bottom: 4px; }
@@ -469,7 +506,7 @@ button.ui-chip { cursor: pointer; }
 .adv-details > summary { list-style: none; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 52px; }
 .adv-details > summary::-webkit-details-marker { display: none; }
 .adv-details .adv-chev { transition: transform .2s ease; }
-.adv-details[open] .adv-chev { transform: rotate(180deg); }
+.adv-details[open] > summary .adv-chev { transform: rotate(180deg); }
 
 @media (max-width: 767px) {
   .home-kpis .kpi, .home-kpis .trigger-link { padding: 10px; }

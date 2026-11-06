@@ -48,3 +48,12 @@ def test_app_js_position_actions():
     js = APP_JS.read_text(encoding="utf-8")
     for action in ("toggle-position", "close-position"):
         assert re.search(rf'<[^>]*\bdata-action="{action}"[^>]*\bdata-ticker=', js), action
+
+
+def test_settings_shortcuts_match_a_fold():
+    # openSettingsGroup('x') opens data-fold="settings-x"; a rename would silently do nothing
+    html = _html()
+    groups = re.findall(r"openSettingsGroup\('([a-z-]+)'\)", html)
+    assert groups
+    for g in groups:
+        assert f'data-fold="settings-{g}"' in html, g
