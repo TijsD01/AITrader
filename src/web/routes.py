@@ -62,6 +62,7 @@ class CreateTriggerFromAIRequest(BaseModel):
 
 class SettingsUpdateRequest(BaseModel):
     auto_buy_enabled: Optional[bool] = None
+    score_auto_tune: Optional[bool] = None
     min_consensus_score: Optional[int] = None
     trigger_min_score: Optional[int] = None
     position_size_pct: Optional[float] = None
@@ -500,6 +501,7 @@ async def get_settings():
 
         return {
             "auto_buy_enabled": configs.get("AUTO_BUY_ENABLED", str(settings.AUTO_BUY_ENABLED)).lower() == "true",
+            "score_auto_tune": configs.get("SCORE_AUTO_TUNE", str(settings.SCORE_AUTO_TUNE)).lower() == "true",
             "min_consensus_score": int(configs.get("MIN_CONSENSUS_SCORE", settings.MIN_CONSENSUS_SCORE)),
             "trigger_min_score": int(configs.get("TRIGGER_MIN_SCORE", settings.TRIGGER_MIN_SCORE)),
             "position_size_pct": float(configs.get("POSITION_SIZE_PCT", settings.POSITION_SIZE_PCT)),
@@ -535,6 +537,17 @@ async def update_settings(req: SettingsUpdateRequest):
                 session.add(SystemConfig(key="AUTO_BUY_ENABLED", value=val))
             settings.AUTO_BUY_ENABLED = bool(req.auto_buy_enabled)
             env_updates["AUTO_BUY_ENABLED"] = bool(req.auto_buy_enabled)
+
+        if req.score_auto_tune is not None:
+            res = await session.execute(select(SystemConfig).where(SystemConfig.key == "SCORE_AUTO_TUNE"))
+            cfg = res.scalars().first()
+            val = str(req.score_auto_tune).lower()
+            if cfg:
+                cfg.value = val
+            else:
+                session.add(SystemConfig(key="SCORE_AUTO_TUNE", value=val))
+            settings.SCORE_AUTO_TUNE = bool(req.score_auto_tune)
+            env_updates["SCORE_AUTO_TUNE"] = bool(req.score_auto_tune)
 
         if req.min_consensus_score is not None:
             res = await session.execute(select(SystemConfig).where(SystemConfig.key == "MIN_CONSENSUS_SCORE"))

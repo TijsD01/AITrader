@@ -5,7 +5,7 @@ from sqlalchemy import select, desc, func
 
 from config.settings import settings
 from src.db.session import AsyncSessionLocal
-from src.db.models import Trade, Position, AnalysisReport, TradeLesson, SystemConfig
+from src.db.models import Trade, Position, AnalysisReport, TradeLesson, SystemConfig, OrderTrigger
 from src.agents.base import llm_client
 
 logger = logging.getLogger(__name__)
@@ -306,6 +306,10 @@ class TradeLearner:
                 pnl_pct_val = target_trade.realized_pnl_pct or 0.0
                 pnl_eur_val = target_trade.realized_pnl_eur or 0.0
                 holding_h_val = latest_lesson.holding_period_hours or 0.0
+                fixed_scores_note = "" if settings.SCORE_AUTO_TUNE else (
+                    "MIN_CONSENSUS_SCORE and TRIGGER_MIN_SCORE are fixed by the user: return them unchanged "
+                    "and do not mention them in adjustment_reasons.\n\n"
+                )
                 user_prompt = f"""
 Latest Trade Post-Mortem:
 - Ticker: {target_trade.ticker}
@@ -329,7 +333,7 @@ Current Active Parameters:
 - BREAKEVEN_TRIGGER_PCT: {curr_be_pct} (Allowed range: 0.015 - 0.05)
 - Committee Weights: Technical={curr_w_tech}, Fundamental={curr_w_fund}, Sentiment={curr_w_sent}, Risk={curr_w_risk}
 
-Calibration Directives:
+{fixed_scores_note}Calibration Directives:
 1. If the trade suffered from gap down, slippage, or premature stop-out below technical support (e.g. BMW.DE), widen ATR_STOP_MULTIPLIER (e.g. 2.3x - 2.6x) to provide sufficient volatility buffer.
 2. If previous trades achieved unrealized gains before reversing into stop-outs (e.g. DTE.DE / MBG.DE / SU.PA), tighten BREAKEVEN_TRIGGER_PCT (e.g. 0.02 - 0.025 / 2.0% - 2.5%) so trailing stops ratchet to breakeven earlier.
 3. If under a losing streak or low win rate, increase MIN_CONSENSUS_SCORE (e.g. 80-82) and TRIGGER_MIN_SCORE (e.g. 82-85) to enforce higher selectivity.
@@ -408,11 +412,11 @@ Return valid JSON with exactly these keys:
                 w_tech, w_fund, w_sent, w_risk = curr_w_tech, curr_w_fund, curr_w_sent, curr_w_risk
 
                 # A. Conviction Threshold Adjustment
-                if consecutive_losses >= 2 or win_rate < 0.40:
+                if settings.SCORE_AUTO_TUNE and (consecutive_losses >= 2 or win_rate < 0.40):
                     new_min_score = min(82, max(78, curr_min_score + 1))
                     new_trig_score = min(84, max(80, curr_trig_score + 1))
                     adjustment_reasons.append(f"Losing streak ({consecutive_losses} consecutive): Raised min consensus score to {new_min_score} and trigger score to {new_trig_score} for higher selectivity.")
-                elif win_rate >= 0.70 and consecutive_losses == 0 and total_trades >= 5:
+                elif settings.SCORE_AUTO_TUNE and win_rate >= 0.70 and consecutive_losses == 0 and total_trades >= 5:
                     new_min_score = max(70, min(74, curr_min_score - 2))
                     new_trig_score = max(76, min(80, curr_trig_score - 2))
                     adjustment_reasons.append(f"High win rate ({win_rate*100:.1f}%): Normalized min consensus score to {new_min_score}.")
@@ -454,6 +458,13 @@ Return valid JSON with exactly these keys:
                     "WEIGHT_RISK": w_risk
                 }
 
+            if not settings.SCORE_AUTO_TUNE:
+                calibrated_params.update(
+                    min_consensus_score=curr_min_score, MIN_CONSENSUS_SCORE=curr_min_score,
+                    trigger_min_score=curr_trig_score, TRIGGER_MIN_SCORE=curr_trig_score,
+                )
+                adjustment_reasons.append(f"Score thresholds are fixed by the user (SCORE_AUTO_TUNE off); left at {curr_min_score} / {curr_trig_score}.")
+
             # 5. Persist Calibrated Parameters to SystemConfig
             updated_db_records = {
                 "MIN_CONSENSUS_SCORE": str(calibrated_params["MIN_CONSENSUS_SCORE"]),
@@ -470,6 +481,11 @@ Return valid JSON with exactly these keys:
                 "LEARNER_TOTAL_TRADES": str(total_trades)
             }
 
+            if not settings.SCORE_AUTO_TUNE:
+                # Never write the fixed scores back: the user may have moved the sliders since they were read above.
+                updated_db_records.pop("MIN_CONSENSUS_SCORE")
+                updated_db_records.pop("TRIGGER_MIN_SCORE")
+
             for k, v in updated_db_records.items():
                 cfg_item_res = await session.execute(select(SystemConfig).where(SystemConfig.key == k))
                 cfg_item = cfg_item_res.scalars().first()
@@ -481,8 +497,9 @@ Return valid JSON with exactly these keys:
             await session.commit()
 
             # Synchronize in-memory settings
-            settings.MIN_CONSENSUS_SCORE = calibrated_params["MIN_CONSENSUS_SCORE"]
-            settings.TRIGGER_MIN_SCORE = calibrated_params["TRIGGER_MIN_SCORE"]
+            if settings.SCORE_AUTO_TUNE:
+                settings.MIN_CONSENSUS_SCORE = calibrated_params["MIN_CONSENSUS_SCORE"]
+                settings.TRIGGER_MIN_SCORE = calibrated_params["TRIGGER_MIN_SCORE"]
 
             logger.info(f"Calibration completed: {calibrated_params}")
             return {
@@ -495,6 +512,93 @@ Return valid JSON with exactly these keys:
                 "calibrated_parameters": calibrated_params,
                 "adjustments": adjustment_reasons
             }
+
+    async def decay_idle_thresholds(self) -> Dict[str, Any]:
+        """
+        Lowers MIN_CONSENSUS_SCORE and TRIGGER_MIN_SCORE by 1 point toward their code defaults when the bot
+        has not bought or armed a trigger for LEARNER_IDLE_DECAY_DAYS calendar days. Calibration only lowers them after more closed trades,
+        and high thresholds block the buys that would produce those trades. Runs at most once per UTC day.
+        """
+        def skip(msg: str) -> Dict[str, Any]:
+            logger.info(f"Idle threshold decay skipped: {msg}")
+            return {"success": False, "skipped": True, "message": msg, "adjustments": []}
+
+        days = settings.LEARNER_IDLE_DECAY_DAYS
+        if days <= 0:
+            return skip("disabled (LEARNER_IDLE_DECAY_DAYS <= 0).")
+        if not settings.SCORE_AUTO_TUNE:
+            return skip("score thresholds are fixed by the user.")
+        # The bot cannot buy then, so a lack of buys says nothing about the thresholds
+        if not settings.AUTO_BUY_ENABLED or settings.KILL_SWITCH_ACTIVE:
+            return skip("auto-buy is off or the kill switch is active.")
+
+        live = settings.TRADING_MODE.upper() == "LIVE" and settings.LIVE_TRADING_ENABLED
+        now = datetime.datetime.utcnow()
+        today = now.date().isoformat()
+        async with AsyncSessionLocal() as session:
+            last_decay = (await session.execute(select(SystemConfig).where(SystemConfig.key == "LAST_IDLE_DECAY_DATE"))).scalars().first()
+            if last_decay and last_decay.value == today:
+                return skip("already ran today.")
+
+            # Full slots block buying regardless of thresholds
+            open_count = (await session.execute(
+                select(func.count()).select_from(Position).where(Position.status == "OPEN", Position.is_live == live)
+            )).scalar() or 0
+            if open_count >= settings.MAX_POSITIONS:
+                return skip("all position slots are full.")
+
+            anchors = []
+            last_buy = (await session.execute(
+                select(func.max(Trade.executed_at)).where(Trade.order_type == "BUY", Trade.is_live == live)
+            )).scalar()
+            if last_buy:
+                anchors.append(last_buy)
+            # A trigger exists only after a report cleared the bar, so thresholds were not what blocked buying
+            last_trigger = (await session.execute(
+                select(func.max(OrderTrigger.created_at)).where(OrderTrigger.is_live == live)
+            )).scalar()
+            if last_trigger:
+                anchors.append(last_trigger)
+            # A fresh calibration gets its full idle window before decay undoes it
+            last_cal = (await session.execute(select(SystemConfig).where(SystemConfig.key == "LAST_CALIBRATION_TIMESTAMP"))).scalars().first()
+            if last_cal and last_cal.value:
+                try:
+                    anchors.append(datetime.datetime.fromisoformat(last_cal.value))
+                except ValueError:
+                    pass
+            if not anchors:
+                return skip("no buy or calibration to measure idle time from.")
+            if now - max(anchors) < datetime.timedelta(days=days):
+                return skip(f"last buy or calibration is less than {days} days ago.")
+
+            fields = type(settings).model_fields
+            new_values = {}
+            adjustments = []
+            for key in ("MIN_CONSENSUS_SCORE", "TRIGGER_MIN_SCORE"):
+                current = getattr(settings, key)
+                default = fields[key].default
+                new_values[key] = current
+                # Never raise: a user who set a score below the default keeps it
+                if current > default:
+                    new_values[key] = current - 1
+                    adjustments.append(f"{key} {current} -> {current - 1} (default {default}) after {days}+ idle days")
+            if not adjustments:
+                return skip("scores already at or below their defaults.")
+
+            records = {k: str(v) for k, v in new_values.items()}
+            records["LAST_IDLE_DECAY_DATE"] = today
+            for k, v in records.items():
+                cfg_item = (await session.execute(select(SystemConfig).where(SystemConfig.key == k))).scalars().first()
+                if cfg_item:
+                    cfg_item.value = v
+                else:
+                    session.add(SystemConfig(key=k, value=v))
+            await session.commit()
+
+        for k, v in new_values.items():
+            setattr(settings, k, v)
+        logger.info(f"Idle threshold decay applied: {adjustments}")
+        return {"success": True, "skipped": False, "message": "Idle threshold decay applied.", "adjustments": adjustments}
 
     async def get_learning_context_for_agents(self) -> str:
         """

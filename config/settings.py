@@ -124,6 +124,8 @@ class Settings(BaseSettings):
     SENTIMENT_ANONYMIZE: bool = True        # Hide company name and ticker from the news-sentiment prompt
     SENTIMENT_VETO_SCORE: float = -0.4      # News sentiment at or below this blocks a buy; positive news adds nothing
     LEARNER_MIN_TRADES: int = 20            # Closed trades required between automatic learner recalibrations
+    LEARNER_IDLE_DECAY_DAYS: int = 7        # Calendar days without a buy (or armed trigger) before learner score thresholds decay 1 point/day toward defaults (0 = off)
+    SCORE_AUTO_TUNE: bool = True            # Learner may adjust MIN_CONSENSUS_SCORE / TRIGGER_MIN_SCORE (False = the dashboard values stay fixed)
     # Buy whole shares only. Unset: off for Trading 212 (fractional shares), on for other brokers.
     # Paper mirrors live.
     WHOLE_SHARES_ONLY: bool = True
