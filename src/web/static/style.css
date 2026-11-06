@@ -462,6 +462,16 @@ button.ui-chip { cursor: pointer; }
 }
 .adv-seg > button:hover { color: var(--text); }
 .adv-seg > button.is-active { background: var(--accent-soft); color: var(--accent-strong); }
+/* Two-option variant: one pill slides between equal halves instead of each button filling */
+.adv-seg-slide { position: relative; isolation: isolate; display: grid; grid-template-columns: 1fr 1fr; width: 100%; max-width: 280px; }
+.adv-seg-slide::before {
+  content: ""; position: absolute; z-index: -1; top: 3px; bottom: 3px; left: 3px; width: calc(50% - 4px);
+  border-radius: 999px; background: var(--accent-soft);
+  transition: transform 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.adv-seg-slide:has(> button:last-child.is-active)::before { transform: translateX(calc(100% + 2px)); }
+.adv-seg-slide > button { transition: color 200ms ease-out; }
+.adv-seg-slide > button.is-active { background: transparent; }
 .adv-prose { font-size: 14px; line-height: 1.5; color: var(--text-2); }
 .adv-clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; line-clamp: 4; overflow: hidden; }
 .adv-wrap { white-space: normal; padding-top: 4px; padding-bottom: 4px; }

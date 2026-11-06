@@ -248,6 +248,65 @@ async def test_idle_decay_lowers_scores_once_per_day(monkeypatch, idle_decay_db)
 
 
 @pytest.mark.asyncio
+async def test_calibration_keeps_scores_when_auto_tune_off(monkeypatch, idle_decay_db):
+    from sqlalchemy import delete
+    await init_db()
+    monkeypatch.setattr(settings, "LEARNER_MIN_TRADES", 3)
+    monkeypatch.setattr(settings, "SCORE_AUTO_TUNE", False)
+    monkeypatch.setattr(settings, "MIN_CONSENSUS_SCORE", 70)
+    monkeypatch.setattr(settings, "TRIGGER_MIN_SCORE", 76)
+    keys = ["MIN_CONSENSUS_SCORE", "TRIGGER_MIN_SCORE", "BREAKEVEN_TRIGGER_PCT"]
+    async with AsyncSessionLocal() as session:
+        saved = {r.key: r.value for r in (await session.execute(select(SystemConfig).where(SystemConfig.key.in_(keys)))).scalars().all()}
+        await session.execute(delete(SystemConfig).where(SystemConfig.key.in_(keys)))
+        session.add_all([SystemConfig(key="MIN_CONSENSUS_SCORE", value="70"), SystemConfig(key="TRIGGER_MIN_SCORE", value="76")])
+        for i in range(3):
+            session.add(Trade(
+                ticker=f"AUTOTUNE_LOSS_{i}", name="Loss", order_type="SELL", shares=5.0, currency="EUR",
+                price_native=95.0, price_eur=95.0, total_eur=475.0, realized_pnl_eur=-25.0, realized_pnl_pct=-5.0,
+                rationale="Stop-Loss triggered", executed_at=datetime.datetime.utcnow() + datetime.timedelta(minutes=i)))
+        await session.commit()
+    try:
+        def user_moves_sliders():
+            # Runs after calibration read the configs: simulates a slider change during a slow LLM call
+            import sqlite3
+            from src.db.session import engine
+            con = sqlite3.connect(engine.url.database)
+            con.execute("UPDATE system_configs SET value='73' WHERE key='MIN_CONSENSUS_SCORE'")
+            con.execute("UPDATE system_configs SET value='79' WHERE key='TRIGGER_MIN_SCORE'")
+            con.commit()
+            con.close()
+            return False
+
+        with patch("src.agents.base.llm_client.has_active_key", side_effect=user_moves_sliders):
+            res = await trade_learner.calibrate_internal_parameters()
+        assert res["success"] is True and res["consecutive_losses"] >= 3
+        assert (settings.MIN_CONSENSUS_SCORE, settings.TRIGGER_MIN_SCORE) == (70, 76)
+        assert res["calibrated_parameters"]["MIN_CONSENSUS_SCORE"] == 70
+        assert any("fixed by the user" in a for a in res["adjustments"])
+        assert not any("Losing streak" in a for a in res["adjustments"])
+        assert await _db_scores() == {"MIN_CONSENSUS_SCORE": "73", "TRIGGER_MIN_SCORE": "79"}
+        async with AsyncSessionLocal() as session:
+            assert (await session.execute(select(SystemConfig).where(SystemConfig.key == "BREAKEVEN_TRIGGER_PCT"))).scalars().first() is not None
+    finally:
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(Trade).where(Trade.ticker.like("AUTOTUNE_LOSS_%")))
+            await session.execute(delete(SystemConfig).where(SystemConfig.key == "BREAKEVEN_TRIGGER_PCT"))
+            if "BREAKEVEN_TRIGGER_PCT" in saved:
+                session.add(SystemConfig(key="BREAKEVEN_TRIGGER_PCT", value=saved["BREAKEVEN_TRIGGER_PCT"]))
+            await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_idle_decay_skips_when_auto_tune_off(monkeypatch, idle_decay_db):
+    await _arrange_idle_decay(monkeypatch, buy_days_ago=10)
+    monkeypatch.setattr(settings, "SCORE_AUTO_TUNE", False)
+    res = await trade_learner.decay_idle_thresholds()
+    assert res["skipped"] is True
+    assert (settings.MIN_CONSENSUS_SCORE, settings.TRIGGER_MIN_SCORE) == (78, 84)
+
+
+@pytest.mark.asyncio
 async def test_idle_decay_skips_after_recent_buy(monkeypatch, idle_decay_db):
     await _arrange_idle_decay(monkeypatch, buy_days_ago=1)
     res = await trade_learner.decay_idle_thresholds()

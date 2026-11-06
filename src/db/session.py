@@ -101,6 +101,7 @@ async def init_db():
         # Seed missing keys with settings defaults
         defaults_to_seed = {
             "AUTO_BUY_ENABLED": str(settings.AUTO_BUY_ENABLED).lower(),
+            "SCORE_AUTO_TUNE": str(settings.SCORE_AUTO_TUNE).lower(),
             "KILL_SWITCH_ACTIVE": str(settings.KILL_SWITCH_ACTIVE).lower(),
             "MIN_CONSENSUS_SCORE": str(settings.MIN_CONSENSUS_SCORE),
             "TRIGGER_MIN_SCORE": str(settings.TRIGGER_MIN_SCORE),
@@ -126,6 +127,8 @@ async def init_db():
         # Synchronize all persisted DB configurations into in-memory settings singleton
         if "AUTO_BUY_ENABLED" in db_configs:
             settings.AUTO_BUY_ENABLED = db_configs["AUTO_BUY_ENABLED"].strip().lower() == "true"
+        if "SCORE_AUTO_TUNE" in db_configs:
+            settings.SCORE_AUTO_TUNE = db_configs["SCORE_AUTO_TUNE"].strip().lower() == "true"
         if "KILL_SWITCH_ACTIVE" in db_configs:
             settings.KILL_SWITCH_ACTIVE = db_configs["KILL_SWITCH_ACTIVE"].strip().lower() == "true"
         if "MIN_CONSENSUS_SCORE" in db_configs:

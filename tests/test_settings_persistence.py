@@ -1,6 +1,6 @@
 import pytest
 from httpx import AsyncClient, ASGITransport
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from config.settings import settings
 from src.web.app import app
@@ -66,6 +66,29 @@ async def test_settings_persistence_cycle():
         }
         revert_res = await ac.post("/api/settings", json=revert_payload)
         assert revert_res.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_score_auto_tune_and_trigger_score_round_trip(monkeypatch):
+    monkeypatch.setattr(settings, "SCORE_AUTO_TUNE", True)
+    monkeypatch.setattr(settings, "TRIGGER_MIN_SCORE", settings.TRIGGER_MIN_SCORE)
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(select(SystemConfig).where(SystemConfig.key.in_(["SCORE_AUTO_TUNE", "TRIGGER_MIN_SCORE"])))).scalars().all()
+        saved = {r.key: r.value for r in rows}
+    transport = ASGITransport(app=app)
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            post_res = await ac.post("/api/settings", json={"score_auto_tune": False, "trigger_min_score": 75})
+            assert post_res.status_code == 200
+            assert settings.SCORE_AUTO_TUNE is False
+            data = (await ac.get("/api/settings")).json()
+            assert data["score_auto_tune"] is False
+            assert data["trigger_min_score"] == 75
+    finally:
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(SystemConfig).where(SystemConfig.key.in_(["SCORE_AUTO_TUNE", "TRIGGER_MIN_SCORE"])))
+            session.add_all([SystemConfig(key=k, value=v) for k, v in saved.items()])
+            await session.commit()
 
 
 def test_update_env_file_strips_newlines(tmp_path):

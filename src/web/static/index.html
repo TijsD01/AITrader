@@ -770,12 +770,31 @@
         <h3 class="ui-eyebrow px-1">Risk</h3>
         <div class="ui-list">
           <div class="set-row-stack">
+            <span id="scoreControlLabel" class="set-label">Score control</span>
+            <span id="scoreControlHelp" class="set-help" aria-live="polite">The bot adjusts both scores, starting from your values.</span>
+            <div class="adv-seg adv-seg-slide mt-2.5" role="group" aria-labelledby="scoreControlLabel">
+              <button type="button" onclick="setScoreAutoTune(true)" data-score-tune="true" class="is-active" aria-pressed="true">Bot</button>
+              <button type="button" onclick="setScoreAutoTune(false)" data-score-tune="false" aria-pressed="false">Fixed</button>
+            </div>
+          </div>
+
+          <div class="set-row-stack">
             <div class="set-head">
               <label for="settingMinScore" class="set-label">Minimum score to auto-buy</label>
               <span id="consensusScoreLabel" class="set-value ui-num">70 / 100</span>
             </div>
             <span class="set-help">Committee consensus needed before a buy is placed.</span>
             <input type="range" id="settingMinScore" min="50" max="95" value="70" oninput="document.getElementById('consensusScoreLabel').innerText = this.value + ' / 100'" onchange="saveSettings()" class="set-range">
+            <div class="set-ticks"><span>50</span><span>95</span></div>
+          </div>
+
+          <div class="set-row-stack">
+            <div class="set-head">
+              <label for="settingTriggerScore" class="set-label">Minimum score to arm a trigger</label>
+              <span id="triggerScoreLabel" class="set-value ui-num">80 / 100</span>
+            </div>
+            <span class="set-help">Score a setup needs before the bot arms a price trigger. Every buy also needs the auto-buy score.</span>
+            <input type="range" id="settingTriggerScore" min="50" max="95" value="80" oninput="document.getElementById('triggerScoreLabel').innerText = this.value + ' / 100'" onchange="saveSettings()" class="set-range">
             <div class="set-ticks"><span>50</span><span>95</span></div>
           </div>
 
