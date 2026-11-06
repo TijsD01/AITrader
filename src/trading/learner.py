@@ -5,7 +5,7 @@ from sqlalchemy import select, desc, func
 
 from config.settings import settings
 from src.db.session import AsyncSessionLocal
-from src.db.models import Trade, Position, AnalysisReport, TradeLesson, SystemConfig
+from src.db.models import Trade, Position, AnalysisReport, TradeLesson, SystemConfig, OrderTrigger
 from src.agents.base import llm_client
 
 logger = logging.getLogger(__name__)
@@ -495,6 +495,91 @@ Return valid JSON with exactly these keys:
                 "calibrated_parameters": calibrated_params,
                 "adjustments": adjustment_reasons
             }
+
+    async def decay_idle_thresholds(self) -> Dict[str, Any]:
+        """
+        Lowers MIN_CONSENSUS_SCORE and TRIGGER_MIN_SCORE by 1 point toward their code defaults when the bot
+        has not bought or armed a trigger for LEARNER_IDLE_DECAY_DAYS calendar days. Calibration only lowers them after more closed trades,
+        and high thresholds block the buys that would produce those trades. Runs at most once per UTC day.
+        """
+        def skip(msg: str) -> Dict[str, Any]:
+            logger.info(f"Idle threshold decay skipped: {msg}")
+            return {"success": False, "skipped": True, "message": msg, "adjustments": []}
+
+        days = settings.LEARNER_IDLE_DECAY_DAYS
+        if days <= 0:
+            return skip("disabled (LEARNER_IDLE_DECAY_DAYS <= 0).")
+        # The bot cannot buy then, so a lack of buys says nothing about the thresholds
+        if not settings.AUTO_BUY_ENABLED or settings.KILL_SWITCH_ACTIVE:
+            return skip("auto-buy is off or the kill switch is active.")
+
+        live = settings.TRADING_MODE.upper() == "LIVE" and settings.LIVE_TRADING_ENABLED
+        now = datetime.datetime.utcnow()
+        today = now.date().isoformat()
+        async with AsyncSessionLocal() as session:
+            last_decay = (await session.execute(select(SystemConfig).where(SystemConfig.key == "LAST_IDLE_DECAY_DATE"))).scalars().first()
+            if last_decay and last_decay.value == today:
+                return skip("already ran today.")
+
+            # Full slots block buying regardless of thresholds
+            open_count = (await session.execute(
+                select(func.count()).select_from(Position).where(Position.status == "OPEN", Position.is_live == live)
+            )).scalar() or 0
+            if open_count >= settings.MAX_POSITIONS:
+                return skip("all position slots are full.")
+
+            anchors = []
+            last_buy = (await session.execute(
+                select(func.max(Trade.executed_at)).where(Trade.order_type == "BUY", Trade.is_live == live)
+            )).scalar()
+            if last_buy:
+                anchors.append(last_buy)
+            # A trigger exists only after a report cleared the bar, so thresholds were not what blocked buying
+            last_trigger = (await session.execute(
+                select(func.max(OrderTrigger.created_at)).where(OrderTrigger.is_live == live)
+            )).scalar()
+            if last_trigger:
+                anchors.append(last_trigger)
+            # A fresh calibration gets its full idle window before decay undoes it
+            last_cal = (await session.execute(select(SystemConfig).where(SystemConfig.key == "LAST_CALIBRATION_TIMESTAMP"))).scalars().first()
+            if last_cal and last_cal.value:
+                try:
+                    anchors.append(datetime.datetime.fromisoformat(last_cal.value))
+                except ValueError:
+                    pass
+            if not anchors:
+                return skip("no buy or calibration to measure idle time from.")
+            if now - max(anchors) < datetime.timedelta(days=days):
+                return skip(f"last buy or calibration is less than {days} days ago.")
+
+            fields = type(settings).model_fields
+            new_values = {}
+            adjustments = []
+            for key in ("MIN_CONSENSUS_SCORE", "TRIGGER_MIN_SCORE"):
+                current = getattr(settings, key)
+                default = fields[key].default
+                new_values[key] = current
+                # Never raise: a user who set a score below the default keeps it
+                if current > default:
+                    new_values[key] = current - 1
+                    adjustments.append(f"{key} {current} -> {current - 1} (default {default}) after {days}+ idle days")
+            if not adjustments:
+                return skip("scores already at or below their defaults.")
+
+            records = {k: str(v) for k, v in new_values.items()}
+            records["LAST_IDLE_DECAY_DATE"] = today
+            for k, v in records.items():
+                cfg_item = (await session.execute(select(SystemConfig).where(SystemConfig.key == k))).scalars().first()
+                if cfg_item:
+                    cfg_item.value = v
+                else:
+                    session.add(SystemConfig(key=k, value=v))
+            await session.commit()
+
+        for k, v in new_values.items():
+            setattr(settings, k, v)
+        logger.info(f"Idle threshold decay applied: {adjustments}")
+        return {"success": True, "skipped": False, "message": "Idle threshold decay applied.", "adjustments": adjustments}
 
     async def get_learning_context_for_agents(self) -> str:
         """
