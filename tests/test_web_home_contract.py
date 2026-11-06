@@ -54,3 +54,12 @@ def test_app_js_owner_actions():
     js = APP_JS.read_text(encoding="utf-8")
     assert "set-owner" in js
     assert "/api/holdings" in js
+
+
+def test_settings_shortcuts_match_a_fold():
+    # openSettingsGroup('x') opens data-fold="settings-x"; a rename would silently do nothing
+    html = _html()
+    groups = re.findall(r"openSettingsGroup\('([a-z-]+)'\)", html)
+    assert groups
+    for g in groups:
+        assert f'data-fold="settings-{g}"' in html, g
