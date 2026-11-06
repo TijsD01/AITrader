@@ -723,6 +723,8 @@ async function loadRecommendations() {
     const res = await fetch('/api/recommendations');
     const reports = await res.json();
     adviceReportsCache = Array.isArray(reports) ? reports : [];
+    // Highest conviction first; cards read reports back by index, so sort the cache itself.
+    adviceReportsCache.sort((a, b) => (Number(b.consensus_score) || 0) - (Number(a.consensus_score) || 0));
     const container = document.getElementById('adviceContainer');
     const countEl = document.getElementById('adviceCount');
     if (countEl) countEl.textContent = adviceReportsCache.length ? String(adviceReportsCache.length) : '';
