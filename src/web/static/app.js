@@ -175,13 +175,11 @@ function showToast(message, kind = false) {
     icon.className = 'fa-solid fa-circle-check ui-gain';
   }
 
-  toast.classList.remove('translate-y-[-100px]', 'opacity-0');
-  toast.classList.add('translate-y-0', 'opacity-100');
+  toast.classList.add('is-open');
 
   if (toastTimer) clearTimeout(toastTimer);
   toastTimer = setTimeout(() => {
-    toast.classList.remove('translate-y-0', 'opacity-100');
-    toast.classList.add('translate-y-[-100px]', 'opacity-0');
+    toast.classList.remove('is-open');
   }, isError ? 6000 : 3500);
 }
 
@@ -205,10 +203,10 @@ function toggleMobileDropdown() {
   const chevron = document.getElementById('mobileDropdownChevron');
   if (!menu) return;
   const moreBtn = document.getElementById('mobileMenuDropdownBtn');
-  const isHidden = menu.classList.contains('hidden');
+  const isHidden = menu.classList.contains('hidden') || menu.classList.contains('is-closing');
   if (isHidden) {
-    menu.classList.remove('hidden');
-    if (backdrop) backdrop.classList.remove('hidden');
+    clearTimeout(dropdownCloseTimer);
+    [menu, backdrop].forEach(el => el && el.classList.remove('hidden', 'is-closing'));
     if (chevron) chevron.classList.add('rotate-180');
     if (moreBtn) moreBtn.setAttribute('aria-expanded', 'true');
   } else {
@@ -216,14 +214,19 @@ function toggleMobileDropdown() {
   }
 }
 
-// Close Mobile Dropdown Menu
+// Close Mobile Dropdown Menu: play the exit, then hide
+let dropdownCloseTimer = null;
 function closeMobileDropdown() {
   const menu = document.getElementById('mobileDropdownMenu');
   const backdrop = document.getElementById('mobileDropdownBackdrop');
   const chevron = document.getElementById('mobileDropdownChevron');
   const moreBtn = document.getElementById('mobileMenuDropdownBtn');
-  if (menu) menu.classList.add('hidden');
-  if (backdrop) backdrop.classList.add('hidden');
+  if (!menu || menu.classList.contains('hidden') || menu.classList.contains('is-closing')) return;
+  const els = [menu, backdrop].filter(Boolean);
+  els.forEach(el => el.classList.add('is-closing'));
+  clearTimeout(dropdownCloseTimer);
+  // Matches --dur-out in style.css
+  dropdownCloseTimer = setTimeout(() => els.forEach(el => el.classList.replace('is-closing', 'hidden')), 160);
   if (chevron) chevron.classList.remove('rotate-180');
   if (moreBtn) moreBtn.setAttribute('aria-expanded', 'false');
 }
@@ -384,6 +387,7 @@ function toggleHolding(el, ticker) {
   const row = el.closest('.pos-row');
   if (!row) return;
   const open = row.classList.toggle('open');
+  row.classList.toggle('just-opened', open);
   el.setAttribute('aria-expanded', open ? 'true' : 'false');
   if (open) openPositions.add(ticker); else openPositions.delete(ticker);
 }
