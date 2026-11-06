@@ -414,6 +414,21 @@ def risk_capped_allocation(
         return allocation_eur
     return round(allocation_eur * normal_stop / stop_distance, 2)
 
+def _risk_cap_note(allocation_eur: float, budget_eur: float, price_native: Optional[float], stop_loss_native: Optional[float]) -> Optional[str]:
+    """Plain-language reason why the risk cap bought less than the reserved allocation."""
+    if not price_native or price_native <= 0 or not stop_loss_native or stop_loss_native >= price_native:
+        return None
+    dist = (price_native - stop_loss_native) / price_native
+    sized_for = ""
+    if (settings.RISK_BUDGET_BASE or "slot").strip().lower() == "slot" and settings.DEFAULT_STOP_LOSS_PCT:
+        sized_for = f" (the budget is sized for a {settings.DEFAULT_STOP_LOSS_PCT * 100:.1f}% stop)"
+    return (
+        f"Stop loss is {dist * 100:.1f}% below the limit{sized_for}. "
+        f"Buying the full €{allocation_eur:.2f} would lose €{allocation_eur * dist:.2f} at the stop. "
+        f"The risk cap allows €{budget_eur * dist:.2f}, so the bot buys €{budget_eur:.2f}. "
+        f"The full €{allocation_eur:.2f} stays reserved until the order fills."
+    )
+
 def plan_buy(
     allocation_eur: float,
     price_native: float,
@@ -437,9 +452,11 @@ def plan_buy(
         shares = float(affordable_share_count(budget, price_eur, max_eur if max_eur is not None else allocation_eur, portfolio_value_eur))
     else:
         shares = round(budget / price_eur, 4)
+    risk_capped = budget < allocation_eur - 0.005
     return {
         "budget_eur": round(budget, 2),
-        "risk_capped": budget < allocation_eur - 0.005,
+        "risk_capped": risk_capped,
+        "risk_note": _risk_cap_note(allocation_eur, budget, price_native, stop_loss_native) if risk_capped else None,
         "shares": shares,
         "price_eur": round(price_eur, 4),
         "cost_eur": round(shares * price_eur, 2),

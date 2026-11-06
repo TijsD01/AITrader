@@ -140,6 +140,7 @@ async def test_alert_dashboard_and_buy_agree_and_leftover_cash_moves_on(two_slot
             assert shown[second]["allocation_eur"] == res_b["allocation_eur"]
             assert shown[first]["planned_shares"] == 2.0      # 3 x €90 would eat into the other slot
             assert shown[second]["planned_shares"] == 1.0
+            assert shown[first]["risk_note"] is None          # 4% stop: no risk cap, nothing to explain
 
             # The first stock fills at its limit: 2 shares for €180
             prices[first] = 90.0

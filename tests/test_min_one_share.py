@@ -105,3 +105,20 @@ def test_a_share_above_max_position_pct_leaves_the_trigger_unfunded(monkeypatch)
     monkeypatch.setattr(settings, "MAX_POSITIONS", 5)
     allocs = allocate_pending_triggers(500.0, 0, [_trigger(1, 90, 350.0)], portfolio_value_eur=500.0)
     assert allocs == {1: 0.0}
+
+
+def test_risk_capped_plan_explains_the_cut(monkeypatch):
+    # AMZN case: EUR 392.91 slot, limit 254.17, stop 236.38 (7.0% away) vs a 4% default stop
+    monkeypatch.setattr(settings, "WHOLE_SHARES_ONLY", False)
+    monkeypatch.setattr(settings, "DEFAULT_STOP_LOSS_PCT", 0.04)
+    plan = plan_buy(392.91, 254.17, "EUR", 236.38, 5000.0, max_eur=1000.0)
+    assert plan["budget_eur"] == 224.54
+    note = plan["risk_note"]
+    for part in ("7.0%", "4.0%", "€392.91", "€27.50", "€15.72", "€224.54"):
+        assert part in note
+
+
+def test_uncapped_plan_has_no_risk_note():
+    plan = plan_buy(100.0, 120.0, "EUR", 115.2, 500.0, max_eur=500.0)
+    assert plan["risk_capped"] is False
+    assert plan["risk_note"] is None
