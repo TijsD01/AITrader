@@ -207,7 +207,8 @@ button.ui-chip { cursor: pointer; }
 .mode-tag.is-live { color: var(--loss); }
 
 /* Desktop tab bar */
-.tab-btn { color: var(--text-2); border-radius: 10px; }
+.tab-btn { color: var(--text-2); border-radius: 10px;
+  transition: background-color .15s var(--ease-out), color .15s var(--ease-out), transform var(--dur-press) var(--ease-out); }
 .tab-btn:hover { color: var(--text); background: var(--surface); }
 .tab-btn.active-tab { background: var(--accent-soft); color: var(--accent-strong); }
 
@@ -273,6 +274,9 @@ button.ui-chip { cursor: pointer; }
 #mobileDropdownMenu.is-closing { animation: sheetOut var(--dur-out) var(--ease-in) forwards; pointer-events: none; }
 #mobileDropdownBackdrop:not(.hidden) { animation: fadeIn var(--dur-in) var(--ease-out); }
 #mobileDropdownBackdrop.is-closing { animation: fadeOut var(--dur-out) var(--ease-in) forwards; }
+
+/* First real content replacing a "Loading..." placeholder fades in (see app.js) */
+.just-loaded { animation: fadeIn var(--dur-in) var(--ease-out); }
 
 /* Tab change: short crossfade so the new view never pops in */
 .tab-content:not(.hidden) { animation: fadeIn 180ms var(--ease-out); }
@@ -482,6 +486,7 @@ button.ui-chip { cursor: pointer; }
   min-height: 38px; padding: 0 16px; border: 0; border-radius: 999px;
   background: transparent; color: var(--text-2);
   font: 600 13px/1 var(--font-sans); cursor: pointer; white-space: nowrap;
+  transition: background-color .15s var(--ease-out), color .15s var(--ease-out), transform var(--dur-press) var(--ease-out);
 }
 .adv-seg > button:hover { color: var(--text); }
 .adv-seg > button.is-active { background: var(--accent-soft); color: var(--accent-strong); }

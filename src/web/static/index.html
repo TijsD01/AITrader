@@ -275,7 +275,7 @@
               <h2 id="positionsTitle" class="ui-section-title">Bot positions <span id="positionsCount" class="ui-count">0</span></h2>
               <button type="button" onclick="loadPortfolio()" class="ui-btn ui-btn-quiet ui-btn-sm ui-icon-btn" aria-label="Reload positions"><i class="fa-solid fa-arrows-rotate" aria-hidden="true"></i></button>
             </div>
-            <div id="positionsContainer" class="ui-list">
+            <div id="positionsContainer" class="ui-list" data-loading>
               <div class="text-center py-10 text-slate-400 text-sm">
                 <i class="fa-solid fa-circle-notch fa-spin text-xl mb-2 text-accent block" aria-hidden="true"></i>
                 Loading positions...
@@ -332,7 +332,7 @@
           </div>
           <span id="nextSessionBadge" class="ui-chip adv-wrap"><i class="fa-regular fa-clock"></i> Next: calculating...</span>
         </div>
-        <div id="digestContent" class="adv-prose">Loading the latest market review...</div>
+        <div id="digestContent" class="adv-prose" data-loading>Loading the latest market review...</div>
         <div id="reviewTextContainer" class="hidden ui-inset adv-prose p-3.5 whitespace-pre-wrap"></div>
         <div class="flex flex-wrap gap-2 pt-1">
           <button type="button" onclick="triggerMarketReview('EU')" class="ui-btn ui-btn-sm">
@@ -663,7 +663,7 @@
           <i class="fa-solid fa-arrows-rotate"></i>
         </button>
       </div>
-      <div id="shadowContainer" class="space-y-6">
+      <div id="shadowContainer" class="space-y-6" data-loading>
         <div class="ui-card ui-card-pad text-[13px] ui-muted">Loading shadow portfolios...</div>
       </div>
     </section>
@@ -691,7 +691,7 @@
           <h3 class="ui-section-title">Recap</h3>
           <span class="text-xs ui-faint">Loaded when agents start</span>
         </div>
-        <div id="memoryColdStartText" class="ui-card ui-card-pad mem-recap">Loading recap...</div>
+        <div id="memoryColdStartText" class="ui-card ui-card-pad mem-recap" data-loading>Loading recap...</div>
       </div>
 
       <!-- Memory assets -->
@@ -719,7 +719,7 @@
 
         <div class="space-y-3 min-w-0">
           <h3 class="ui-section-title px-1">Profile &amp; code <span id="codegraphCountBadge" class="ui-count ui-num"></span></h3>
-          <div id="coreAndGraphContainer" class="ui-list mem-list">
+          <div id="coreAndGraphContainer" class="ui-list mem-list" data-loading>
             <div class="mem-empty">Loading profile...</div>
           </div>
         </div>

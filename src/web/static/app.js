@@ -158,6 +158,18 @@ document.addEventListener('click', (e) => {
   }
 });
 
+// Fade in the first content that replaces a "Loading..." placeholder.
+// Only once: later data refreshes must not flicker.
+document.querySelectorAll('[data-loading]').forEach(el => {
+  const obs = new MutationObserver(() => {
+    obs.disconnect();
+    el.removeAttribute('data-loading');
+    el.classList.add('just-loaded');
+    el.addEventListener('animationend', () => el.classList.remove('just-loaded'), { once: true });
+  });
+  obs.observe(el, { childList: true, characterData: true, subtree: true });
+});
+
 let toastTimer = null;
 function showToast(message, kind = false) {
   // kind: true | 'error' => error styling; false | 'info' | 'success' => normal
