@@ -869,6 +869,7 @@ class PaperBroker(BaseBroker):
                     "planned_shares": plans[t.id]["shares"] if t.id in plans else None,
                     "planned_cost_eur": plans[t.id]["cost_eur"] if t.id in plans else None,
                     "risk_capped": plans[t.id]["risk_capped"] if t.id in plans else False,
+                    "risk_note": plans[t.id]["risk_note"] if t.id in plans else None,
                     "consensus_score": t.consensus_score,
                     "ai_rationale": t.ai_rationale,
                     "status": t.status,

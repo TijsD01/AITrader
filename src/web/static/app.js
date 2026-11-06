@@ -1933,6 +1933,7 @@ async function loadTriggers() {
                   Cancel
                 </button>
               </div>
+              ${allocEur > 0 && t.risk_capped && t.risk_note ? `<p class="text-[13px] ui-muted leading-snug"><i class="fa-solid fa-circle-info"></i> ${esc(t.risk_note)}</p>` : ''}
             </div>
           `;
         }).join('');

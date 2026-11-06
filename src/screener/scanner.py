@@ -13,6 +13,8 @@ _scan_cache: Dict[str, tuple[float, List[Dict[str, Any]]]] = {}
 _SCAN_TTL: float = 300.0
 # Parallel Yahoo fetches; kept small so a ~100-ticker scan stays under Yahoo's rate limit
 _SCAN_WORKERS: int = 6
+# Neutral score; all bonuses add up to +70, so a perfect setup lands at exactly 100
+_BASE_SCORE: int = 30
 
 class MarketScanner:
     @staticmethod
@@ -63,7 +65,7 @@ class MarketScanner:
                 continue
 
             score, setup_type, notes = MarketScanner._evaluate_technical_setup(data)
-            if score >= 50:  # Only pass promising setups
+            if score >= _BASE_SCORE:  # Only pass setups with no net penalty
                 candidate = {
                     "ticker": ticker,
                     "name": data["name"],
@@ -91,7 +93,7 @@ class MarketScanner:
         t = data["technicals"]
         f = data["fundamentals"]
 
-        score = 50
+        score = _BASE_SCORE
         setups = []
         notes = []
 

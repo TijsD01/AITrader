@@ -268,3 +268,18 @@ async def test_learner_recalibrates_only_after_enough_closed_trades(monkeypatch)
             res = await session.execute(select(SystemConfig).where(SystemConfig.key == "LAST_CALIBRATION_TIMESTAMP"))
             res.scalars().first().value = previous
             await session.commit()
+
+
+def test_scanner_score_does_not_saturate_at_100():
+    # Two strong setups that differ by one signal must not both clip to 100.
+    technicals = {
+        "price": 100.0, "above_ema20": True, "above_ema50": True, "above_sma200": True, "rsi14": 55.0,
+        "macd": 1.0, "macd_signal": 0.5, "macd_hist": 0.5, "volume_surge_ratio": 1.5,
+        "pct_below_52w_high": 2.0,
+    }
+    best = {"technicals": technicals, "fundamentals": {"revenue_growth": 0.2, "target_mean_price": 130.0}}
+    less = {"technicals": technicals, "fundamentals": {}}
+    best_score = MarketScanner._evaluate_technical_setup(best)[0]
+    less_score = MarketScanner._evaluate_technical_setup(less)[0]
+    assert best_score == 100
+    assert less_score < best_score
