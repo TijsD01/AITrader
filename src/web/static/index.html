@@ -181,7 +181,7 @@
             <p id="brokerDisconnectDetail" class="mt-1 text-xs text-slate-300">Broker gateway is currently unreachable. Live order routing and account synchronization cannot proceed until reconnected.</p>
             <div class="mt-3 flex flex-wrap gap-2">
               <button type="button" onclick="reconnectBroker()" class="ui-btn ui-btn-sm" style="background:#C2334A;border-color:#C2334A;color:#fff"><i class="fa-solid fa-bolt" aria-hidden="true"></i> Reconnect</button>
-              <button type="button" onclick="switchTab('settings')" class="ui-btn ui-btn-sm"><i class="fa-solid fa-sliders" aria-hidden="true"></i> Diagnostics</button>
+              <button type="button" onclick="openSettingsGroup('broker')" class="ui-btn ui-btn-sm"><i class="fa-solid fa-sliders" aria-hidden="true"></i> Diagnostics</button>
             </div>
           </div>
         </div>
@@ -214,7 +214,7 @@
 
             <!-- Controls: auto-buy and kill switch -->
             <div class="grid grid-cols-2 gap-2.5">
-              <button type="button" onclick="switchTab('settings')" id="mobileAutoBuyPill" class="control-tile" title="Open settings to change auto-buy">
+              <button type="button" onclick="openSettingsGroup('trading')" id="mobileAutoBuyPill" class="control-tile" title="Open settings to change auto-buy">
                 <span class="min-w-0">
                   <span class="tile-label">Auto-buy</span>
                   <span class="tile-value" id="mobileAutoBuyText">On</span>
@@ -727,8 +727,14 @@
       </div>
 
       <!-- Trading -->
-      <div class="space-y-2">
-        <h3 class="ui-eyebrow px-1">Trading</h3>
+      <details class="ui-list adv-details set-group" data-settings-group="trading" open>
+        <summary class="px-4 py-3">
+          <span class="min-w-0">
+            <h3 class="ui-section-title">Trading</h3>
+            <span class="set-help">Mode, automated buying, market hours</span>
+          </span>
+          <i class="fa-solid fa-chevron-down text-[12px] ui-faint adv-chev" aria-hidden="true"></i>
+        </summary>
         <div class="ui-list">
           <div class="set-row">
             <div class="min-w-0">
@@ -763,11 +769,17 @@
             </span>
           </div>
         </div>
-      </div>
+      </details>
 
       <!-- Risk -->
-      <div class="space-y-2">
-        <h3 class="ui-eyebrow px-1">Risk</h3>
+      <details class="ui-list adv-details set-group" data-settings-group="risk">
+        <summary class="px-4 py-3">
+          <span class="min-w-0">
+            <h3 class="ui-section-title">Risk</h3>
+            <span class="set-help">Buy and trigger scores, position limits</span>
+          </span>
+          <i class="fa-solid fa-chevron-down text-[12px] ui-faint adv-chev" aria-hidden="true"></i>
+        </summary>
         <div class="ui-list">
           <div class="set-row-stack">
             <span id="scoreControlLabel" class="set-label">Score control</span>
@@ -818,11 +830,17 @@
             <div class="set-ticks"><span>1</span><span>25</span></div>
           </div>
         </div>
-      </div>
+      </details>
 
       <!-- Capital -->
-      <div class="space-y-2">
-        <h3 class="ui-eyebrow px-1">Capital</h3>
+      <details class="ui-list adv-details set-group" data-settings-group="capital">
+        <summary class="px-4 py-3">
+          <span class="min-w-0">
+            <h3 class="ui-section-title">Capital</h3>
+            <span class="set-help">How much cash the bot may use</span>
+          </span>
+          <i class="fa-solid fa-chevron-down text-[12px] ui-faint adv-chev" aria-hidden="true"></i>
+        </summary>
         <div class="ui-list">
           <div class="set-row-stack">
             <div class="set-head">
@@ -853,7 +871,7 @@
             <div class="kv"><span>Protected reserve</span><span id="previewProtectedReserve">€--</span></div>
           </div>
         </div>
-      </div>
+      </details>
 
       <div class="sm:flex sm:justify-end">
         <button onclick="saveSettings()" id="saveSettingsBtn" class="ui-btn ui-btn-primary w-full sm:w-auto">
@@ -863,8 +881,14 @@
       </div>
 
       <!-- Broker -->
-      <div class="space-y-2">
-        <h3 class="ui-eyebrow px-1">Broker</h3>
+      <details class="ui-list adv-details set-group" data-settings-group="broker">
+        <summary class="px-4 py-3">
+          <span class="min-w-0">
+            <h3 class="ui-section-title">Broker</h3>
+            <span class="set-help">Connection status, ping and reconnect</span>
+          </span>
+          <i class="fa-solid fa-chevron-down text-[12px] ui-faint adv-chev" aria-hidden="true"></i>
+        </summary>
         <div class="ui-list">
           <div class="set-row">
             <span class="set-label">Broker</span>
@@ -900,11 +924,17 @@
             </button>
           </div>
         </div>
-      </div>
+      </details>
 
       <!-- Integrations -->
-      <div class="space-y-2">
-        <h3 class="ui-eyebrow px-1">Integrations</h3>
+      <details class="ui-list adv-details set-group" data-settings-group="integrations">
+        <summary class="px-4 py-3">
+          <span class="min-w-0">
+            <h3 class="ui-section-title">Integrations</h3>
+            <span class="set-help">Telegram and AI engine status</span>
+          </span>
+          <i class="fa-solid fa-chevron-down text-[12px] ui-faint adv-chev" aria-hidden="true"></i>
+        </summary>
         <div class="ui-list">
           <div class="set-row">
             <div class="min-w-0">
@@ -921,8 +951,8 @@
             <span id="aiEngineStatusBadge" class="ui-badge shrink-0">Checking...</span>
           </div>
         </div>
-        <p class="text-xs ui-faint px-1">Telegram tokens and API keys live in the <code>.env</code> file and are picked up on restart.</p>
-      </div>
+        <p class="text-xs ui-faint px-4 py-3">Telegram tokens and API keys live in the <code>.env</code> file and are picked up on restart.</p>
+      </details>
     </section>
 
 

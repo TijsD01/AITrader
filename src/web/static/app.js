@@ -117,6 +117,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initChart();
   loadAllData();
   switchTabUi('portfolio');
+  initSettingsGroups();
   resumePendingJob();
 
   // Enter key submits the ticker inputs (on-screen keyboard "Go")
@@ -312,6 +313,31 @@ function switchTab(tabId) {
   if (tabId === 'shadow') loadShadow();
   if (tabId === 'memory') loadMemoryHub();
   if (tabId === 'settings') { loadSettings(); loadBrokerStatus(); }
+}
+
+// Settings groups: each viewer's open groups are remembered in localStorage
+const SETTINGS_GROUPS_KEY = 'settingsOpenGroups';
+function initSettingsGroups() {
+  const groups = [...document.querySelectorAll('details[data-settings-group]')];
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(SETTINGS_GROUPS_KEY)); } catch (e) { /* storage blocked */ }
+  groups.forEach(g => {
+    if (Array.isArray(saved)) g.open = saved.includes(g.dataset.settingsGroup);
+    g.addEventListener('toggle', () => {
+      const open = groups.filter(d => d.open).map(d => d.dataset.settingsGroup);
+      try { localStorage.setItem(SETTINGS_GROUPS_KEY, JSON.stringify(open)); } catch (e) { /* storage blocked */ }
+    });
+  });
+}
+
+// Shortcuts from Home land on Settings with their group already open
+function openSettingsGroup(group) {
+  switchTab('settings');
+  const el = document.querySelector(`details[data-settings-group="${group}"]`);
+  if (!el) return;
+  el.open = true;
+  // switchTab scrolls to the top; a lower group would stay below the fold on a phone
+  el.scrollIntoView({ block: 'start' });
 }
 
 function loadAllData() {
