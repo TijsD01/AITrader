@@ -373,12 +373,11 @@ async function loadPortfolio() {
 
     // Update KPI cards
     const pnlVal = positions.reduce((s, p) => s + (p.unrealized_pnl_eur || 0), 0);
-    const equityVal = positions.reduce((s, p) => s + (p.current_value_eur || 0), 0);
-    const totalVal = (summary.cash_eur || 0) + equityVal;
-    // Measure against everything put in (start value plus deposits), so a deposit is not shown as gain
+    // Use the server's value and return (broker account total when live), so Web and Telegram match
+    const equityVal = Number(summary.equity_eur) || 0;
+    const totalVal = Number(summary.total_value_eur) || 0;
     const investedCap = Number(summary.invested_capital_eur ?? summary.initial_capital_eur) || 0;
-    const rawReturn = investedCap > 0 ? (((totalVal / investedCap) - 1.0) * 100) : (summary.total_return_pct ?? 0);
-    const totalReturnPct = Number.isFinite(rawReturn) ? rawReturn : 0;
+    const totalReturnPct = Number(summary.total_return_pct) || 0;
 
     const isLive = (summary.trading_mode || '').toUpperCase() === 'LIVE';
     const modeBadge = document.getElementById('tradingModeBadge');
@@ -454,7 +453,7 @@ async function loadPortfolio() {
     pnlElem.className = `kpi-value ${pnlVal > 0 ? 'ui-gain' : pnlVal < 0 ? 'ui-loss' : ''}`;
 
     const up = totalReturnPct >= 0;
-    const absReturn = investedCap ? totalVal - investedCap : null;
+    const absReturn = investedCap > 0 && summary.total_gain_eur != null ? Number(summary.total_gain_eur) : null;
     const netDeposits = Number(summary.net_deposits_eur) || 0;
     returnElem.innerHTML = `<i class="fa-solid fa-arrow-${up ? 'up' : 'down'}-long text-xs" aria-hidden="true"></i>`
       + (absReturn !== null ? `<span class="ui-num">${signedEur(absReturn)}</span>` : '')
