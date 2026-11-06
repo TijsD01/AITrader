@@ -261,6 +261,38 @@ async def test_snapshots_set_the_main_baseline_and_throttle(shadows):
 
 
 @pytest.mark.asyncio
+async def test_shadow_only_badge_clears_when_main_arms_the_ticker_later(shadows):
+    """A manual or later main trigger on the same ticker turns a shadow-only trigger into a followed one."""
+    from sqlalchemy import delete
+    enable, reset_all = shadows
+    enable(["aggressive"])
+    await reset_all()
+
+    await shadow_portfolios.follow_report(_report("SHK.AS", score=85), _data("SHK.AS"))
+    comparison = await shadow_portfolios.get_comparison({"total_value_eur": 10000.0}, False)
+    assert comparison["strategies"][0]["pending_triggers"][0]["followed_main"] is False
+
+    try:
+        async with AsyncSessionLocal() as session:
+            session.add(OrderTrigger(ticker="SHK.AS", target_price=95.0, current_price_at_creation=100.0,
+                                     allocation_eur=500.0, status="PENDING", is_live=True))  # live trigger: other book
+            await session.commit()
+        comparison = await shadow_portfolios.get_comparison({"total_value_eur": 10000.0}, False)
+        assert comparison["strategies"][0]["pending_triggers"][0]["followed_main"] is False
+
+        async with AsyncSessionLocal() as session:
+            session.add(OrderTrigger(ticker="SHK.AS", target_price=95.0, current_price_at_creation=100.0,
+                                     allocation_eur=500.0, status="PENDING", is_live=False))
+            await session.commit()
+        comparison = await shadow_portfolios.get_comparison({"total_value_eur": 10000.0}, False)
+        assert comparison["strategies"][0]["pending_triggers"][0]["followed_main"] is True
+    finally:
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(OrderTrigger).where(OrderTrigger.ticker == "SHK.AS"))
+            await session.commit()
+
+
+@pytest.mark.asyncio
 async def test_learner_changes_to_the_main_bot_do_not_move_a_running_shadow(shadows):
     """The shadow keeps the main threshold and breakeven % it started with; a reset picks up the new ones."""
     enable, reset_all = shadows

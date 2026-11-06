@@ -21,13 +21,13 @@ import math
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-from sqlalchemy import delete, desc, func, select
+from sqlalchemy import delete, desc, func, select, update
 
 from config.settings import settings
 from src.data.currency import currency_service
 from src.data.market import market_data_provider
 from src.data.market_hours import check_market_hours
-from src.db.models import ShadowAccount, ShadowPosition, ShadowSnapshot, ShadowTrigger, SystemConfig, Trade
+from src.db.models import OrderTrigger, Position, ShadowAccount, ShadowPosition, ShadowSnapshot, ShadowTrigger, SystemConfig, Trade
 from src.db.session import AsyncSessionLocal
 from src.trading.cash_flows import list_cash_flow_points
 from src.trading.risk import (
@@ -704,6 +704,18 @@ class ShadowPortfolios:
             "avg_trade_eur": round(sum(pnls) / len(pnls), 2) if pnls else None,
         }
 
+    @staticmethod
+    async def _mark_followed_by_main(session, main_is_live: bool) -> None:
+        """Clears 'Shadow only' once the main bot holds or arms the same ticker later (manual triggers included)."""
+        main_tickers = select(OrderTrigger.ticker).where(
+            OrderTrigger.status == "PENDING", OrderTrigger.is_live == main_is_live
+        ).union(select(Position.ticker).where(Position.status == "OPEN", Position.is_live == main_is_live))
+        for model, status in ((ShadowTrigger, "PENDING"), (ShadowPosition, "OPEN")):
+            await session.execute(update(model).where(
+                model.status == status, model.followed_main.isnot(True), model.ticker.in_(main_tickers)
+            ).values(followed_main=True))
+        await session.commit()
+
     async def get_comparison(self, main_summary: Dict[str, Any], main_is_live: bool) -> Dict[str, Any]:
         """Side-by-side numbers for the main portfolio and every enabled shadow, each over the shadow's own period."""
         strategies = get_strategies()
@@ -728,6 +740,7 @@ class ShadowPortfolios:
             # Locked: booking a deposit into cash must not race a shadow buy on the same account
             async with self._lock:
                 accounts = await self._ensure_accounts(session, strategies)
+                await self._mark_followed_by_main(session, main_is_live)
             current_main = await self._main_params(session)
             for s in strategies:
                 acc = accounts[s.key]
