@@ -117,7 +117,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initChart();
   loadAllData();
   switchTabUi('portfolio');
-  initSettingsGroups();
+  initFolds();
   resumePendingJob();
 
   // Enter key submits the ticker inputs (on-screen keyboard "Go")
@@ -315,17 +315,20 @@ function switchTab(tabId) {
   if (tabId === 'settings') { loadSettings(); loadBrokerStatus(); }
 }
 
-// Settings groups: each viewer's open groups are remembered in localStorage
-const SETTINGS_GROUPS_KEY = 'settingsOpenGroups';
-function initSettingsGroups() {
-  const groups = [...document.querySelectorAll('details[data-settings-group]')];
-  let saved = null;
-  try { saved = JSON.parse(localStorage.getItem(SETTINGS_GROUPS_KEY)); } catch (e) { /* storage blocked */ }
-  groups.forEach(g => {
-    if (Array.isArray(saved)) g.open = saved.includes(g.dataset.settingsGroup);
-    g.addEventListener('toggle', () => {
-      const open = groups.filter(d => d.open).map(d => d.dataset.settingsGroup);
-      try { localStorage.setItem(SETTINGS_GROUPS_KEY, JSON.stringify(open)); } catch (e) { /* storage blocked */ }
+// Collapsible sections (<details data-fold>): localStorage keeps only the sections a viewer
+// set away from their HTML default, so a new default still reaches everyone else.
+const FOLD_KEY = 'foldState';
+function initFolds() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(FOLD_KEY)) || {}; } catch (e) { /* storage blocked */ }
+  if (typeof saved !== 'object' || Array.isArray(saved)) saved = {};
+  document.querySelectorAll('details[data-fold]').forEach(d => {
+    const id = d.dataset.fold;
+    const byDefault = d.open;
+    if (typeof saved[id] === 'boolean') d.open = saved[id];
+    d.addEventListener('toggle', () => {
+      if (d.open === byDefault) delete saved[id]; else saved[id] = d.open;
+      try { localStorage.setItem(FOLD_KEY, JSON.stringify(saved)); } catch (e) { /* storage blocked */ }
     });
   });
 }
@@ -333,7 +336,7 @@ function initSettingsGroups() {
 // Shortcuts from Home land on Settings with their group already open
 function openSettingsGroup(group) {
   switchTab('settings');
-  const el = document.querySelector(`details[data-settings-group="${group}"]`);
+  const el = document.querySelector(`details[data-fold="settings-${group}"]`);
   if (!el) return;
   el.open = true;
   // switchTab scrolls to the top; a lower group would stay below the fold on a phone
@@ -2342,22 +2345,6 @@ async function loadWeeklyReviewComparison() {
     renderWeeklyArchive();
   } catch (e) {
     console.debug('Error loading weekly review comparison:', e);
-  }
-}
-
-function toggleWeeklyArchive() {
-  const container = document.getElementById('weeklyArchiveContainer');
-  const icon = document.getElementById('weeklyArchiveIcon');
-  if (!container) return;
-
-  const isHidden = container.classList.contains('hidden');
-  if (isHidden) {
-    container.classList.remove('hidden');
-    if (icon) icon.className = 'fa-solid fa-chevron-down text-[12px]';
-    renderWeeklyArchive();
-  } else {
-    container.classList.add('hidden');
-    if (icon) icon.className = 'fa-solid fa-chevron-right text-[12px]';
   }
 }
 

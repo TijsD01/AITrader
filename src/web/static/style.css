@@ -392,6 +392,7 @@ button.ui-chip { cursor: pointer; }
     border: 1px solid var(--line); border-radius: 16px;
     background: var(--surface);
   }
+  .fold .responsive-table tr { background: var(--surface-inset); }
   .responsive-table tbody { padding: 10px; }
   .responsive-table tbody.divide-y > :not([hidden]) ~ :not([hidden]) { border-top-width: 1px; }
   .responsive-table td {
@@ -447,24 +448,30 @@ button.ui-chip { cursor: pointer; }
 .set-toggle input:checked + .ui-switch::after { transform: translateX(16px); background: var(--bg); }
 .set-toggle input:focus-visible + .ui-switch { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-/* Collapsible settings groups: <details class="ui-list adv-details set-group">.
-   The inner .ui-list drops its own frame and keeps only the divider under the summary. */
-.set-group { interpolate-size: allow-keywords; }
-.set-group > summary { min-height: 64px; border-radius: calc(var(--radius-lg) - 1px); }
-.set-group > summary:focus-visible { outline-offset: -2px; }
-.set-group > .ui-list { border-width: 1px 0 0; border-radius: 0; }
+/* Collapsible sections: <details class="ui-list adv-details fold" data-fold="id">.
+   The inner .ui-list drops its own frame and keeps only the divider under the summary;
+   cards inside .fold-body read as insets so a card never sits on a card. */
+.fold { interpolate-size: allow-keywords; }
+.fold.ui-list > summary { min-height: 64px; border-radius: calc(var(--radius-lg) - 1px); }
+.fold > summary { border-radius: var(--radius-sm); }
+.fold > summary:focus-visible { outline-offset: -2px; }
+/* A long title drops its count to the next line instead of squeezing into a column */
+.fold > summary .ui-section-title { flex-wrap: wrap; row-gap: 0; }
+.fold > .ui-list { border-width: 1px 0 0; border-radius: 0; }
+.fold-body { padding: 16px; }
+.fold-body .ui-card { background: var(--surface-inset); border-radius: var(--radius); }
 /* Height eases open in 200ms and closes faster; browsers without ::details-content open instantly */
-.set-group::details-content {
+.fold::details-content {
   block-size: 0; overflow: clip;
   transition: block-size .16s ease-in, content-visibility .16s allow-discrete;
 }
-.set-group[open]::details-content {
+.fold[open]::details-content {
   block-size: auto;
   transition: block-size .2s ease-out, content-visibility .2s allow-discrete;
 }
 /* The global reduced-motion rule only covers * and ::before/::after */
 @media (prefers-reduced-motion: reduce) {
-  .set-group::details-content { transition: none !important; }
+  .fold::details-content { transition: none !important; }
 }
 
 .mem-recap { font: 13px/1.6 var(--font-mono); color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 22rem; overflow-y: auto; }
@@ -499,7 +506,7 @@ button.ui-chip { cursor: pointer; }
 .adv-details > summary { list-style: none; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 52px; }
 .adv-details > summary::-webkit-details-marker { display: none; }
 .adv-details .adv-chev { transition: transform .2s ease; }
-.adv-details[open] .adv-chev { transform: rotate(180deg); }
+.adv-details[open] > summary .adv-chev { transform: rotate(180deg); }
 
 @media (max-width: 767px) {
   .home-kpis .kpi, .home-kpis .trigger-link { padding: 10px; }
