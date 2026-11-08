@@ -55,37 +55,37 @@ async def test_next_session_schedule_cycle():
     s5 = ReviewTracker.get_next_session_info(t5)
     assert s5["market"] == "EU"
     assert s5["session"] == "OPEN"
-    assert "tomorrow" in s5["formatted"]
+    assert "morgen" in s5["formatted"]
 
     # 6. Friday night after US Close (22:30 CET on Friday 2026-09-11) -> Next is Monday European Open!
     t_fri = datetime.datetime(2026, 9, 11, 22, 30, tzinfo=tz)
     s_fri = ReviewTracker.get_next_session_info(t_fri)
     assert s_fri["market"] == "EU"
     assert s_fri["session"] == "OPEN"
-    assert "Monday" in s_fri["formatted"]
+    assert "maandag" in s_fri["formatted"]
 
     # 7. Saturday afternoon (14:00 CET on Saturday 2026-09-12) -> Next is Monday European Open!
     t_sat = datetime.datetime(2026, 9, 12, 14, 0, tzinfo=tz)
     s_sat = ReviewTracker.get_next_session_info(t_sat)
     assert s_sat["market"] == "EU"
     assert s_sat["session"] == "OPEN"
-    assert "Monday" in s_sat["formatted"]
+    assert "maandag" in s_sat["formatted"]
 
     # 8. Sunday evening (20:00 CET on Sunday 2026-09-13) -> Next is Monday European Open!
     t_sun = datetime.datetime(2026, 9, 13, 20, 0, tzinfo=tz)
     s_sun = ReviewTracker.get_next_session_info(t_sun)
     assert s_sun["market"] == "EU"
     assert s_sun["session"] == "OPEN"
-    assert "Monday" in s_sun["formatted"]
+    assert "maandag" in s_sun["formatted"]
 
     # 9. Reviews sent at their own trigger time must point to the following session
     s_eu_close = ReviewTracker.get_next_session_info(datetime.datetime(2026, 9, 7, 17, 30, 20, tzinfo=tz))
     assert (s_eu_close["market"], s_eu_close["session"]) == ("US", "CLOSE")
     s_us_close = ReviewTracker.get_next_session_info(datetime.datetime(2026, 9, 7, 22, 0, 20, tzinfo=tz))
     assert (s_us_close["market"], s_us_close["session"]) == ("EU", "OPEN")
-    assert "tomorrow" in s_us_close["formatted"]
+    assert "morgen" in s_us_close["formatted"]
     s_fri_close = ReviewTracker.get_next_session_info(datetime.datetime(2026, 9, 11, 22, 0, 20, tzinfo=tz))
-    assert "Monday" in s_fri_close["formatted"]
+    assert "maandag" in s_fri_close["formatted"]
 
 @pytest.mark.asyncio
 async def test_save_and_retrieve_weekly_reviews():
@@ -176,17 +176,19 @@ async def test_compare_past_week_reviews_evaluation():
         assert comp["total_picks_tracked"] >= 2
         assert comp["positive_picks_count"] >= 1
         assert "text_summary" in comp
-        assert "PAST-WEEK REVIEWS" in comp["text_summary"]
+        assert "Hoe deden eerdere adviezen het?" in comp["text_summary"]
 
         win_pick = next((p for p in comp["tracked_picks"] if p["ticker"] == "WIN_STOCK"), None)
         assert win_pick is not None
         assert win_pick["pnl_pct"] == 10.0
-        assert "PROFIT" in win_pick["status_badge"]
+        assert win_pick["status"] == "UP"
+        assert "In de plus" in win_pick["status_badge"]
 
         loss_pick = next((p for p in comp["tracked_picks"] if p["ticker"] == "LOSS_STOCK"), None)
         assert loss_pick is not None
         assert loss_pick["pnl_pct"] == -4.0
-        assert "PULLING BACK" in loss_pick["status_badge"]
+        assert loss_pick["status"] == "DOWN"
+        assert "In de min" in loss_pick["status_badge"]
 
 @pytest.mark.asyncio
 async def test_telegram_notifications_dynamic_next_session():
@@ -214,7 +216,7 @@ async def test_telegram_notifications_dynamic_next_session():
         )
 
         assert "🇺🇸 US Market Open at 15:30 CET" in text
-        assert "Next update: <b>🇺🇸 US Market Open at 15:30 CET</b>" in text
+        assert "Volgende update: <b>🇺🇸 US Market Open at 15:30 CET</b>" in text
         assert "PAST-WEEK REVIEWS: 75% Win Rate" in text
 
 @pytest.mark.asyncio
@@ -307,16 +309,17 @@ async def test_market_open_advice_card_statuses():
             positions=positions
         )
 
-        assert "CURRENT STOCK HOLDINGS:" in text
+        assert "<b>Bezit</b> (1 van max" in text
         assert "HELD_TICKER" in text
-        assert "+€125.00 (+2.6%)" in text
-        assert "AUTO-BOUGHT:" in text
+        assert "+€125,00 (+2,6%)" in text
+        assert "Gekocht: 10 st. voor €1.000,00" in text
         assert "BOUGHT_TICKER" in text
-        assert "TRIGGER ARMED:" in text
+        assert "Koopopdracht klaar: koopt als de koers 48,50 EUR raakt" in text
         assert "ARMED_TICKER" in text
-        assert "CURRENT HOLDING:" in text
-        assert "TRIGGER PENDING:" in text
+        assert "Zit al in de portefeuille" in text
+        assert "Er stond al een koopopdracht klaar" in text
         assert "PENDING_TICKER" in text
+        assert "Gedaan: 1 gekocht (BOUGHT_TICKER) en 1 koopopdracht klaargezet (ARMED_TICKER)." in text
 
 @pytest.mark.asyncio
 async def test_run_market_session_candidate_selection_anti_overlap():
@@ -409,15 +412,15 @@ async def test_run_market_session_candidate_selection_anti_overlap():
 
             # Verify that send_message was called for notify_market_open
             assert mock_send.call_count >= 1
-            open_report_call = next((call[0][0] for call in mock_send.call_args_list if "EUROPEAN MARKET OPEN" in call[0][0]), None)
+            open_report_call = next((call[0][0] for call in mock_send.call_args_list if "EU-beurs open" in call[0][0]), None)
             assert open_report_call is not None
             
-            # Verify that HELD_STK appears in CURRENT STOCK HOLDINGS
-            assert "CURRENT STOCK HOLDINGS:" in open_report_call
+            # Verify that HELD_STK appears under holdings
+            assert "<b>Bezit</b>" in open_report_call
             assert "HELD_STK" in open_report_call
             
             # Verify that under recommendations, fresh candidates were selected
-            rec_section = open_report_call.split("TOP COMMITTEE STOCK RECOMMENDATIONS:")[1]
+            rec_section = open_report_call.split("<b>Kansen vandaag</b>")[1]
             assert "FRESH1" in rec_section
             assert "FRESH2" in rec_section
             assert "FRESH3" in rec_section

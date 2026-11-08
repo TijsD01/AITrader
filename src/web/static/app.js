@@ -2394,6 +2394,30 @@ async function triggerLearningCalibration() {
 }
 
 // 8. Market Review & Next Scheduled Session Loader
+// Plain Dutch labels; keep in sync with ACTION_NL / _pick_status_nl in src/telegram/bot.py
+const REVIEW_SESSION_NL = { OPEN: 'opening', CLOSE: 'slot', REVIEW: 'review', MANUAL_SCAN: 'scan' };
+const REVIEW_ACTION_NL = { STRONG_BUY: 'Sterk koopadvies', BUY: 'Koopadvies', HOLD: 'Afwachten', SELL: 'Verkoopadvies', STRONG_SELL: 'Sterk verkoopadvies' };
+
+function reviewActionNl(action) {
+  const key = String(action || '').toUpperCase();
+  return REVIEW_ACTION_NL[key] || key.replace(/_/g, ' ').toLowerCase();
+}
+
+function reviewPickStatusNl(p, minScore) {
+  switch (p.status_type) {
+    case 'BOUGHT': return '🚀 Gekocht';
+    case 'TRIGGER_ARMED':
+      return p.entry_trigger_price
+        ? `🎯 Koopopdracht klaar: koopt als de koers ${p.entry_trigger_price} ${p.currency || ''} raakt`
+        : '🎯 Koopopdracht klaar: koopt zodra de instapkoers geraakt wordt';
+    case 'ALREADY_HELD': return '💼 Zit al in de portefeuille, niet bijgekocht';
+    case 'TRIGGER_PENDING': return '⏳ Er stond al een koopopdracht klaar, die wacht nog';
+    case 'INSUFFICIENT_CASH': return '⏸️ Goed genoeg, maar geen vrij geld of vrije plek';
+    case 'SHARE_TOO_EXPENSIVE': return '💶 Goed genoeg, maar 1 aandeel kost meer dan het budget per positie';
+    case 'REGIME_FILTER': return '🌧️ Goed genoeg, maar de hele markt daalt (index onder 200-daags gemiddelde)';
+    default: return `👀 Alleen volgen: score onder ${minScore}, dus nog niet kopen`;
+  }
+}
 let currentMarketFilter = null;
 
 async function loadMarketReview(market = null) {
@@ -2417,49 +2441,71 @@ async function loadMarketReview(market = null) {
     const textContainer = document.getElementById('reviewTextContainer');
 
     if (data.next_session && nextBadgeEl) {
-      nextBadgeEl.innerHTML = `<i class="fa-regular fa-clock"></i> Next: <span class="ui-num text-slate-50">${esc(data.next_session.formatted)}</span>`;
+      nextBadgeEl.innerHTML = `<i class="fa-regular fa-clock"></i> Volgende: <span class="ui-num text-slate-50">${esc(data.next_session.formatted)}</span>`;
     }
+    const textDetails = document.getElementById('reviewTextDetails');
 
     if (!data.found) {
-      const marketLabel = currentMarketFilter ? `${currentMarketFilter} ` : '';
-      if (headlineEl) headlineEl.innerText = `No ${marketLabel}review yet today`;
-      if (contentEl) contentEl.innerHTML = `Tap <strong class="text-slate-50">Run ${esc(currentMarketFilter || 'US')} review</strong> below to score today's candidates and generate advice.`;
-      if (timestampEl) timestampEl.innerText = 'Pending';
-      if (textContainer) textContainer.classList.add('hidden');
+      const marketLabel = currentMarketFilter ? `${currentMarketFilter}-` : '';
+      if (headlineEl) headlineEl.innerText = `Nog geen ${marketLabel}review vandaag`;
+      if (contentEl) contentEl.innerHTML = `<div class="adv-prose">Tik hieronder op <strong class="text-slate-50">${esc(currentMarketFilter || 'US')}-review starten</strong>. De bot beoordeelt dan de kansen van vandaag.</div>`;
+      if (timestampEl) timestampEl.innerText = 'Nog niet gedraaid';
+      if (textDetails) textDetails.classList.add('hidden');
       return;
     }
 
-    if (timestampEl) timestampEl.innerText = `${data.market || ''} ${data.session || ''} · ${data.timestamp || 'Today'}`.trim();
-    if (headlineEl) headlineEl.innerText = data.headline || 'Market Session Review';
+    if (timestampEl) timestampEl.innerText = `${data.market || ''} ${REVIEW_SESSION_NL[data.session] || data.session || ''} · ${data.timestamp || 'Vandaag'}`.trim();
+    if (headlineEl) headlineEl.innerText = data.headline || 'Review';
 
-    let picksHtml = '';
-    if (data.top_picks && data.top_picks.length > 0) {
-      picksHtml = '<div class="mt-3 flex flex-wrap gap-2">' + data.top_picks.slice(0, 4).map(p =>
-        `<span class="ui-chip"><span class="ui-num text-slate-50 font-semibold">${esc(p.ticker)}</span> ${esc(String(p.action || '').replace('_', ' '))} <span class="ui-num">${esc(p.consensus_score)}</span></span>`
-      ).join('') + '</div>';
-    }
+    const minScore = data.trigger_min_score || 80;
+    const block = (title, body) => `<div><div class="ui-eyebrow mb-1.5">${title}</div>${body}</div>`;
 
-    let holdingsHtml = '';
+    const summaryHtml = block('In het kort', `<div class="adv-prose">${safeRichText(data.content || '')}</div>`);
+
     const positions = (data.portfolio_state && data.portfolio_state.positions) || [];
-    if (positions.length > 0) {
-      holdingsHtml = '<div class="mt-3"><div class="ui-eyebrow mb-1.5">Holdings</div><div class="ui-inset px-3.5 py-2.5 space-y-1.5">' +
-        positions.map(pos => {
-          const up = pos.unrealized_pnl_eur >= 0;
-          const sign = up ? '+' : '';
-          return `<div class="kv"><span><span class="ui-num text-slate-50">${esc(pos.ticker)}</span> <span class="ui-num">${esc(pos.shares)} @ ${esc(pos.entry_price_native)} ${esc(pos.currency)}</span></span>
-            <span class="${up ? 'ui-gain' : 'ui-loss'}">${up ? '▲' : '▼'} ${esc(signedEur(pos.unrealized_pnl_eur))} (${sign}${num(pos.unrealized_pnl_pct, 1)}%)</span></div>`;
-        }).join('') + '</div></div>';
-    }
+    const holdingsHtml = block(`Bezit (${positions.length})`, positions.length === 0
+      ? '<div class="adv-prose ui-faint">Geen aandelen. Alles staat in cash.</div>'
+      : '<div class="ui-inset px-3.5 py-2.5 space-y-2.5">' + positions.map(pos => {
+          const up = Number(pos.unrealized_pnl_eur) >= 0;
+          const levels = [
+            pos.stop_loss_native ? `verkoopt onder ${esc(pos.stop_loss_native)}` : '',
+            pos.take_profit_native ? `winst nemen bij ${esc(pos.take_profit_native)}` : ''
+          ].filter(Boolean).join(' · ');
+          return `<div>
+            <div class="kv"><span class="ui-num text-slate-50 font-semibold">${esc(pos.ticker)}</span>
+              <span class="ui-num ${up ? 'ui-gain' : 'ui-loss'}">${up ? '▲' : '▼'} ${esc(signedEur(pos.unrealized_pnl_eur))} (${up ? '+' : ''}${num(pos.unrealized_pnl_pct, 1)}%)</span></div>
+            <div class="ui-faint text-[13px] ui-num">${esc(pos.shares)} st. · gekocht ${esc(pos.entry_price_native)} · nu ${esc(pos.current_price_native)} ${esc(pos.currency)}</div>
+            ${levels ? `<div class="ui-faint text-[13px] ui-num">${levels}</div>` : ''}
+          </div>`;
+        }).join('') + '</div>');
+
+    const picks = (data.top_picks || []).slice(0, 4);
+    const picksHtml = block('Kansen', picks.length === 0
+      ? '<div class="adv-prose ui-faint">Geen aandelen door de filters gekomen.</div>'
+      : `<div class="set-help mb-2">Score = hoe zeker de AI-commissie is (0-100). Vanaf ${esc(minScore)} zet de bot een koopopdracht klaar.</div>
+         <div class="ui-list">` + picks.map(p => {
+          const risk = p.risk || {};
+          return `<div class="p-3.5 space-y-1">
+            <div class="flex items-baseline justify-between gap-3">
+              <span class="min-w-0 truncate"><span class="text-[15px] font-bold text-slate-50">${esc(p.ticker)}</span> <span class="ui-faint text-[13px]">${esc(p.name || '')}</span></span>
+              <span class="ui-num shrink-0"><span class="text-slate-50 font-semibold">${esc(p.consensus_score)}</span><span class="ui-faint">/100</span></span>
+            </div>
+            <div class="adv-prose">${esc(reviewActionNl(p.action))} · koers ${advicePrice(p.price, p.currency)}</div>
+            <div class="adv-prose text-slate-50">${esc(reviewPickStatusNl(p, minScore))}</div>
+            ${String(p.action || '').includes('BUY') && risk.stop_loss_price && risk.take_profit_price ? `<div class="ui-faint text-[13px] ui-num">Na kopen: verkoopt onder ${esc(risk.stop_loss_price)} · winst nemen bij ${esc(risk.take_profit_price)}</div>` : ''}
+          </div>`;
+        }).join('') + '</div>');
 
     if (contentEl) {
-      contentEl.innerHTML = `<span>${safeRichText(data.content || '')}</span>${picksHtml}${holdingsHtml}`;
+      contentEl.removeAttribute('data-loading');
+      contentEl.innerHTML = summaryHtml + holdingsHtml + picksHtml;
     }
 
-    if (textContainer && data.review_text) {
+    if (textContainer && textDetails && data.review_text) {
       textContainer.innerHTML = safeRichText(data.review_text);
-      textContainer.classList.remove('hidden');
-    } else if (textContainer) {
-      textContainer.classList.add('hidden');
+      textDetails.classList.remove('hidden');
+    } else if (textDetails) {
+      textDetails.classList.add('hidden');
     }
   } catch (e) {
     console.debug('Error loading market review:', e);
@@ -2467,7 +2513,7 @@ async function loadMarketReview(market = null) {
 }
 
 async function triggerMarketReview(market) {
-  showToast(`Starting the ${market} review in the background...`);
+  showToast(`${market}-review gestart...`);
   try {
     // Record current latest digest id before running
     const prevRes = await fetch(`/api/market-digest/latest?market=${encodeURIComponent(market)}`);
@@ -2481,7 +2527,7 @@ async function triggerMarketReview(market) {
     });
     const data = await res.json();
     if (res.ok && data.success) {
-      showToast(`${market} review is analyzing candidates. Results will appear shortly.`);
+      showToast(`${market}-review beoordeelt aandelen. Resultaat volgt zo.`);
       currentMarketFilter = market;
 
       // Poll every 5s for up to 90s for the review to appear or update
@@ -2493,7 +2539,7 @@ async function triggerMarketReview(market) {
           const checkData = await checkRes.json();
           if (checkData.found && checkData.id !== prevId) {
             clearInterval(poll);
-            showToast(`${market} review is ready.`);
+            showToast(`${market}-review is klaar.`);
             loadMarketReview(market);
             loadWeeklyReviewComparison();
             loadRecommendations();
@@ -2551,22 +2597,22 @@ async function loadWeeklyReviewComparison() {
 
     if (!comp.has_history || !comp.tracked_picks || comp.tracked_picks.length === 0) {
       if (winRateEl) { winRateEl.innerText = '--%'; winRateEl.className = `${STAT} ui-faint`; }
-      if (winCountsEl) winCountsEl.innerText = '0 picks evaluated';
+      if (winCountsEl) winCountsEl.innerText = 'Nog geen adviezen';
       if (deltaEl) { deltaEl.innerText = '€0.00 (+0.0%)'; deltaEl.className = `${STAT} text-slate-50`; }
       if (bestPickEl) bestPickEl.innerText = '--';
       if (picksContainer) {
-        picksContainer.innerHTML = `<div class="p-3.5 adv-prose">No picks recorded in the past 7 days yet. Run a market review to start tracking.</div>`;
+        picksContainer.innerHTML = `<div class="p-3.5 adv-prose">Nog geen adviezen in de afgelopen 7 dagen. Start een review om te beginnen.</div>`;
       }
       renderWeeklyArchive();
       return;
     }
 
     if (winRateEl) {
-      winRateEl.innerText = `${comp.win_rate_pct}%`;
+      winRateEl.innerText = `${comp.positive_picks_count} van ${comp.total_picks_tracked}`;
       winRateEl.className = `${STAT} ${comp.win_rate_pct >= 50 ? 'ui-gain' : 'ui-loss'}`;
     }
     if (winCountsEl) {
-      winCountsEl.innerText = `${comp.positive_picks_count}/${comp.total_picks_tracked} picks in profit`;
+      winCountsEl.innerText = `${num(comp.win_rate_pct, 0)}% van totaal`;
     }
 
     if (deltaEl) {
@@ -2595,8 +2641,8 @@ async function loadWeeklyReviewComparison() {
 
         const badgeText = String(p.status_badge || '');
         let badgeClass = 'ui-badge';
-        if (badgeText.includes('TARGET')) badgeClass = 'ui-badge ui-badge-gain';
-        else if (badgeText.includes('STOP')) badgeClass = 'ui-badge ui-badge-loss';
+        if (p.status === 'TARGET') badgeClass = 'ui-badge ui-badge-gain';
+        else if (p.status === 'STOP') badgeClass = 'ui-badge ui-badge-loss';
 
         return `
           <div class="p-3.5 space-y-2">
@@ -2611,11 +2657,11 @@ async function loadWeeklyReviewComparison() {
               <div class="ui-num text-[15px] font-semibold shrink-0 ${isPos ? 'ui-gain' : 'ui-loss'}">${isPos ? '▲' : '▼'} ${sign}${esc(p.pnl_pct)}%</div>
             </div>
             <div class="space-y-1">
-              <div class="kv"><span>Advised</span><span>${esc(p.rec_session)}</span></div>
-              <div class="kv"><span>At advice</span><span>${advicePrice(p.rec_price, p.currency)}</span></div>
-              <div class="kv"><span>Now</span><span>${advicePrice(p.current_price, p.currency)}</span></div>
-              ${p.target_price ? `<div class="kv"><span>Target</span><span class="ui-gain">▲ ${esc(p.target_price)}</span></div>` : ''}
-              ${p.stop_loss ? `<div class="kv"><span>Stop loss</span><span class="ui-loss">▼ ${esc(p.stop_loss)}</span></div>` : ''}
+              <div class="kv"><span>Advies gegeven</span><span>${esc(p.rec_session)}</span></div>
+              <div class="kv"><span>Koers bij advies</span><span>${advicePrice(p.rec_price, p.currency)}</span></div>
+              <div class="kv"><span>Koers nu</span><span>${advicePrice(p.current_price, p.currency)}</span></div>
+              ${p.target_price ? `<div class="kv"><span>Winst nemen bij</span><span class="ui-gain">▲ ${esc(p.target_price)}</span></div>` : ''}
+              ${p.stop_loss ? `<div class="kv"><span>Verkoopt onder</span><span class="ui-loss">▼ ${esc(p.stop_loss)}</span></div>` : ''}
             </div>
           </div>
         `;
@@ -2633,20 +2679,20 @@ function renderWeeklyArchive() {
   if (!container || !weeklyReviewsCache) return;
 
   if (!Array.isArray(weeklyReviewsCache) || weeklyReviewsCache.length === 0) {
-    container.innerHTML = `<div class="adv-prose ui-faint px-1">No past reviews archived yet.</div>`;
+    container.innerHTML = `<div class="adv-prose ui-faint px-1">Nog geen eerdere reviews.</div>`;
     return;
   }
 
   container.innerHTML = weeklyReviewsCache.map(r => {
-    const picks = (r.top_picks || []).map(p => p.ticker).join(', ') || 'None'; // escaped below
+    const picks = (r.top_picks || []).map(p => p.ticker).join(', ') || 'Geen'; // escaped below
     return `
       <div class="ui-inset p-3.5 space-y-1.5">
         <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
-          <span class="text-[14px] font-semibold text-slate-50">${esc(r.market)} ${esc(r.session)} · ${esc(r.headline)}</span>
+          <span class="text-[14px] font-semibold text-slate-50">${esc(r.headline)}</span>
           <span class="ui-num ui-faint text-[12px]">${esc(r.timestamp)}</span>
         </div>
         <div class="adv-prose adv-clamp">${safeRichText(r.content)}</div>
-        <div class="ui-faint text-[13px]">Picks: <span class="ui-num text-slate-50">${esc(picks)}</span></div>
+        <div class="ui-faint text-[13px]">Bekeken: <span class="ui-num text-slate-50">${esc(picks)}</span></div>
       </div>
     `;
   }).join('');

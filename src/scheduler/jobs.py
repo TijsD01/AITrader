@@ -368,6 +368,7 @@ class TradingScheduler:
                                 if trig_res.get("success"):
                                     pending_tickers.add(ticker)
                                     report["status_type"] = "TRIGGER_ARMED"
+                                    report["entry_trigger_price"] = trigger_price
                                     armed_triggers.append(trig_res)
                                     await telegram_bot.notify_trigger_armed(trig_res)
                                 else:
@@ -416,8 +417,13 @@ class TradingScheduler:
                 )
 
             # 6. Archive Market Digest with portfolio state and generated review text
-            headline = f"{market.upper()} Market {session.capitalize()} Wrap"
-            content = f"Evaluated {len(selected_cands)} candidates. Top opportunities: {', '.join([r['ticker'] for r in reports])}"
+            flag = "🇪🇺" if market.upper() == "EU" else "🇺🇸"
+            is_close = session.upper() not in ("OPEN", "MANUAL_SCAN", "REVIEW")
+            headline = f"{flag} {market.upper()}-beurs {'dicht' if is_close else 'open'}"
+            armed = [t.get("ticker") for t in armed_triggers]
+            content = f"{len(reports)} aandelen bekeken. " + (
+                f"Koopopdracht klaargezet voor {', '.join(armed)}." if armed else "Geen nieuwe koopopdrachten."
+            )
             await review_tracker.save_session_review(
                 market=market.upper(),
                 session_type=session.upper(),

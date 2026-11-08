@@ -752,7 +752,8 @@ async def get_latest_market_digest(market: Optional[str] = None):
             "portfolio_state": digest.portfolio_state or {},
             "review_text": digest.review_text or "",
             "timestamp": digest.timestamp.strftime("%Y-%m-%d %H:%M CET") if digest.timestamp else "",
-            "next_session": next_info
+            "next_session": next_info,
+            "trigger_min_score": await get_trigger_min_score()
         }
 
 @router.get("/api/reviews/weekly")
