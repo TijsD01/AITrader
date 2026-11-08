@@ -63,3 +63,11 @@ def test_features_js_unit_tests():
         cwd=root, capture_output=True, text=True, timeout=60,
     )
     assert res.returncode == 0, res.stdout + res.stderr
+
+
+def test_theme_follows_system():
+    html = _html()
+    css = _client().get("/static/style.css").text
+    assert '<meta name="color-scheme" content="light dark">' in html
+    assert "@media (prefers-color-scheme: dark)" in css
+    assert "rgb(var(--rgb-" in html  # Tailwind colors read CSS vars

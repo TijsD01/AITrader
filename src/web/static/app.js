@@ -101,7 +101,7 @@ function adviceScoreBlock(score, label, sourceHtml = '') {
   const shown = Number.isFinite(n) ? esc(Math.round(n)) : '--';
   return `
     <div class="adv-score" title="${esc(label)}">
-      <div class="ui-num text-[22px] font-semibold text-white leading-none">${shown}<span class="ui-faint text-[12px] font-normal">/100</span></div>
+      <div class="ui-num text-[22px] font-semibold text-slate-50 leading-none">${shown}<span class="ui-faint text-[12px] font-normal">/100</span></div>
       <div class="ui-track mt-2" aria-hidden="true"><span style="width:${pct}%"></span></div>
       <div class="ui-faint text-[12px] mt-1">${esc(label)}</div>
       ${sourceHtml}
@@ -117,6 +117,7 @@ function advicePrice(value, suffix = '') {
 // Initialize on DOM Load
 document.addEventListener('DOMContentLoaded', () => {
   initChart();
+  applyTheme();
   loadAllData();
   switchTabUi('portfolio');
   updateMoreButton('portfolio');
@@ -331,10 +332,10 @@ function switchTab(tabId) {
   // Update desktop nav
   document.querySelectorAll('.tab-btn').forEach(btn => {
     if (btn.dataset.tab === tabId) {
-      btn.classList.add('active-tab', 'text-emerald-400');
+      btn.classList.add('active-tab', 'text-gain');
       btn.classList.remove('text-slate-400');
     } else {
-      btn.classList.remove('active-tab', 'text-emerald-400');
+      btn.classList.remove('active-tab', 'text-gain');
       btn.classList.add('text-slate-400');
     }
   });
@@ -404,9 +405,49 @@ function loadAllData() {
   loadWeeklyReviewComparison();
 }
 
-// Allocation colours: one per holding, cash is a neutral grey
-const ALLOC_COLORS = ['#8EA2FF', '#6ED3E8', '#F5B454', '#C4A6FF', '#4ADE9B', '#FF9F7A', '#7FB2FF', '#E9D86E'];
-const ALLOC_CASH_COLOR = '#3A4459';
+// Theme: colour tokens switch by media query in style.css. JS reads them only
+// for canvas charts and the browser chrome, and re-reads them when the system theme flips.
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+// Allocation colours: one per holding, cash is a neutral grey (style.css --chart-*)
+let ALLOC_COLORS = [];
+let ALLOC_CASH_COLOR = '';
+function readAllocColors() {
+  ALLOC_COLORS = [1, 2, 3, 4, 5, 6, 7, 8].map(i => cssVar(`--chart-${i}`));
+  ALLOC_CASH_COLOR = cssVar('--chart-cash');
+}
+readAllocColors();
+
+function styleShadowChart(chart) {
+  const [shadow, main] = chart.data.datasets;
+  shadow.borderColor = shadow.backgroundColor = cssVar('--accent');
+  main.borderColor = main.backgroundColor = cssVar('--text-2');
+  chart.options.plugins.legend.labels.color = cssVar('--text-2');
+  chart.options.scales.x.ticks.color = cssVar('--text-3');
+  chart.options.scales.y.ticks.color = cssVar('--text-3');
+  chart.options.scales.y.grid.color = cssVar('--line-soft');
+}
+
+function applyTheme() {
+  const dark = window.matchMedia ? matchMedia('(prefers-color-scheme: dark)').matches : true;
+  document.documentElement.classList.toggle('dark', dark); // Tailwind `dark:` variants only
+  document.querySelectorAll('meta[name="theme-color"]').forEach(m => m.setAttribute('content', cssVar('--bg')));
+  readAllocColors();
+  if (allocationChart) {
+    const ds = allocationChart.data.datasets[0];
+    ds.borderColor = cssVar('--surface');
+    ds.backgroundColor = [ALLOC_CASH_COLOR, ...ds.data.slice(1).map((_, i) => ALLOC_COLORS[i % ALLOC_COLORS.length])];
+    allocationChart.options.plugins.legend.labels.color = cssVar('--text-2');
+    allocationChart.update('none');
+  }
+  Object.values(shadowCharts).forEach(c => { styleShadowChart(c); c.update('none'); });
+}
+if (window.matchMedia) {
+  const themeQuery = matchMedia('(prefers-color-scheme: dark)');
+  if (themeQuery.addEventListener) themeQuery.addEventListener('change', () => { applyTheme(); loadPortfolio(); });
+}
 // Position rows the user expanded survive the 30 s refresh
 const openPositions = new Set();
 
@@ -423,7 +464,7 @@ function initChart() {
         data: [10000, 0],
         backgroundColor: [ALLOC_CASH_COLOR, ALLOC_COLORS[0]],
         borderWidth: 2,
-        borderColor: '#121722'
+        borderColor: cssVar('--surface')
       }]
     },
     options: {
@@ -432,7 +473,7 @@ function initChart() {
       plugins: {
         legend: {
           position: 'bottom',
-          labels: { color: '#A3ADBD', font: { size: 12, family: "'IBM Plex Sans', system-ui, sans-serif" }, boxWidth: 12 }
+          labels: { color: cssVar('--text-2'), font: { size: 12, family: cssVar('--font-sans') }, boxWidth: 12 }
         }
       },
       cutout: '72%'
@@ -539,11 +580,11 @@ async function renderHoldings(req, show) {
         <button type="button" class="pos-head" data-action="toggle-holding" data-ticker="${esc(h.ticker)}" aria-expanded="${isOpen ? 'true' : 'false'}">
           <span class="pos-mono mine" aria-hidden="true">${esc(String(h.ticker || '').split('.')[0].slice(0, 4))}</span>
           <span class="flex-1 min-w-0">
-            <span class="block font-semibold text-base text-white truncate">${esc(h.ticker)}</span>
+            <span class="block font-semibold text-base text-slate-50 truncate">${esc(h.ticker)}</span>
             <span class="block text-xs text-slate-500 truncate">${shares}${h.name ? ` · ${esc(h.name)}` : ''}</span>
           </span>
           <span class="text-right shrink-0">
-            <span class="block ui-num font-semibold text-[15px] text-white">${eur(h.current_value_eur)}</span>
+            <span class="block ui-num font-semibold text-[15px] text-slate-50">${eur(h.current_value_eur)}</span>
             <span class="block ui-num text-xs font-semibold ${tone}"><span class="max-md:hidden">${signedEur(pnl)} · </span>${pctText}</span>
           </span>
           <i class="fa-solid fa-chevron-down pos-chevron" aria-hidden="true"></i>
@@ -626,7 +667,7 @@ async function loadPortfolio() {
     if (limitBadge) {
       if (maxUsagePct < 100 || (maxCapEur && maxCapEur > 0)) {
         limitBadge.textContent = `${maxUsagePct}%${maxCapEur ? ` · cap ${eur(maxCapEur, 0)}` : ''}`;
-        limitBadge.className = 'ui-num text-amber-300';
+        limitBadge.className = 'ui-num text-warn';
       } else {
         limitBadge.textContent = '100%';
         limitBadge.className = 'ui-num text-slate-200';
@@ -643,7 +684,7 @@ async function loadPortfolio() {
         subParts.push(`<span title="Capital earmarked for pending order triggers">${eur(reservedTriggers)} held for ${triggersCount} trigger${triggersCount > 1 ? 's' : ''}</span>`);
       }
       if (protectedReserve > 0) {
-        subParts.push(`<span class="text-amber-300">${eur(protectedReserve)} protected</span>`);
+        subParts.push(`<span class="text-warn">${eur(protectedReserve)} protected</span>`);
       }
 
       if (subParts.length > 0) {
@@ -726,11 +767,11 @@ async function loadPortfolio() {
           <button type="button" class="pos-head" data-action="toggle-position" data-ticker="${esc(pos.ticker)}" aria-expanded="${isOpen ? 'true' : 'false'}">
             <span class="pos-mono" style="color:${color}" aria-hidden="true">${esc(mono)}</span>
             <span class="flex-1 min-w-0">
-              <span class="block font-semibold text-base text-white truncate">${esc(pos.ticker)}</span>
+              <span class="block font-semibold text-base text-slate-50 truncate">${esc(pos.ticker)}</span>
               <span class="block text-xs text-slate-500 truncate">${weight}${shares}${pos.name ? ` · ${esc(pos.name)}` : ''}</span>
             </span>
             <span class="text-right shrink-0">
-              <span class="block ui-num font-semibold text-[15px] text-white">${eur(pos.current_value_eur)}</span>
+              <span class="block ui-num font-semibold text-[15px] text-slate-50">${eur(pos.current_value_eur)}</span>
               <span class="block ui-num text-xs font-semibold ${tone}"><span class="max-md:hidden">${signedEur(pnl)} · </span>${pctText}</span>
             </span>
             <i class="fa-solid fa-chevron-down pos-chevron" aria-hidden="true"></i>
@@ -772,7 +813,7 @@ async function loadRecommendations() {
     if (adviceReportsCache.length === 0) {
       container.innerHTML = `
         <div class="col-span-full ui-card ui-card-pad adv-prose">
-          No advice yet today. Tap <strong class="text-white">Run Scan</strong> in the top bar to find candidates and run the committee.
+          No advice yet today. Tap <strong class="text-slate-50">Run Scan</strong> in the top bar to find candidates and run the committee.
         </div>`;
       return;
     }
@@ -786,7 +827,7 @@ async function loadRecommendations() {
           <div class="flex items-start justify-between gap-3">
             <div class="min-w-0 space-y-1">
               <div class="flex flex-wrap items-center gap-2">
-                <span class="text-[17px] font-bold text-white">${esc(r.ticker)}</span>
+                <span class="text-[17px] font-bold text-slate-50">${esc(r.ticker)}</span>
                 ${adviceVerdictBadge(r.action)}
               </div>
               ${sub ? `<div class="ui-faint text-[13px] truncate ${r.name ? '' : 'ui-num'}">${esc(sub)}</div>` : ''}
@@ -850,14 +891,14 @@ async function loadScreener() {
       <article class="stock-card ui-card ui-card-pad flex flex-col gap-3">
         <div class="flex items-start justify-between gap-3">
           <div class="min-w-0 space-y-1">
-            <div class="text-[17px] font-bold text-white">${esc(c.ticker)}</div>
+            <div class="text-[17px] font-bold text-slate-50">${esc(c.ticker)}</div>
             <div class="ui-faint text-[13px] truncate">${esc(c.name)}</div>
           </div>
           ${adviceScoreBlock(c.pre_score, 'Scanner')}
         </div>
 
         <div>
-          ${c.setup_type ? `<div class="text-[14px] font-semibold text-white">${esc(c.setup_type)}</div>` : ''}
+          ${c.setup_type ? `<div class="text-[14px] font-semibold text-slate-50">${esc(c.setup_type)}</div>` : ''}
           ${c.notes ? `<p class="adv-prose adv-clamp mt-0.5">${esc(c.notes)}</p>` : ''}
         </div>
 
@@ -997,7 +1038,7 @@ function renderDebateReport(report) {
     <div class="flex items-start justify-between gap-3">
       <div class="min-w-0 space-y-1">
         <div class="flex flex-wrap items-center gap-2">
-          <span class="text-[22px] font-bold text-white leading-tight">${esc(report.ticker)}</span>
+          <span class="text-[22px] font-bold text-slate-50 leading-tight">${esc(report.ticker)}</span>
           ${adviceVerdictBadge(report.action)}
         </div>
         ${report.name ? `<div class="ui-faint text-[13px] truncate">${esc(report.name)}</div>` : ''}
@@ -1274,9 +1315,9 @@ async function loadBrokerStatus(force = false) {
   const pingIcon = document.getElementById('settingsPingIcon');
 
   if (force) {
-    if (dot) dot.className = 'ui-dot bg-amber-400 animate-pulse';
+    if (dot) dot.className = 'ui-dot bg-warn animate-pulse';
     if (text) text.textContent = 'Broker: Probing...';
-    if (mobDot) mobDot.className = 'ui-dot bg-amber-400 animate-pulse';
+    if (mobDot) mobDot.className = 'ui-dot bg-warn animate-pulse';
     if (mobText) mobText.textContent = 'Checking broker...';
     if (pingIcon) pingIcon.classList.add('fa-spin');
     if (pingBtn) pingBtn.disabled = true;
@@ -1311,22 +1352,22 @@ async function loadBrokerStatus(force = false) {
     // 1. Update Header Badge & Mobile Pill
     if (mobDot && mobText) {
       if (isConnected) {
-        mobDot.className = 'ui-dot bg-emerald-400';
+        mobDot.className = 'ui-dot bg-gain';
         mobText.textContent = brokerName === 'PAPER' ? 'Simulated broker' : `${brokerName} online`;
       } else {
-        mobDot.className = 'ui-dot bg-rose-400';
+        mobDot.className = 'ui-dot bg-loss';
         mobText.textContent = `${brokerName} offline`;
       }
     }
 
     if (badge && dot && text) {
       if (isConnected) {
-        dot.className = 'ui-dot bg-emerald-400';
+        dot.className = 'ui-dot bg-gain';
         text.textContent = isLive ? `${brokerName}: Online` : `${brokerName}: Active`;
         badge.className = 'hidden';
         badge.title = `${brokerName} Connected (${data.latency_ms !== null && data.latency_ms !== undefined ? data.latency_ms + 'ms' : 'Ready'})\nClick to test connection`;
       } else {
-        dot.className = 'ui-dot bg-rose-400';
+        dot.className = 'ui-dot bg-loss';
         text.textContent = `${brokerName}: Offline`;
         badge.className = 'hidden';
         badge.title = `${brokerName} Disconnected: ${data.message || 'Unreachable'}\nClick to retest`;
@@ -1380,13 +1421,13 @@ async function loadBrokerStatus(force = false) {
     }
     if (diagDot && diagText) {
       if (isConnected) {
-        diagDot.className = 'ui-dot bg-emerald-400';
+        diagDot.className = 'ui-dot bg-gain';
         diagText.textContent = 'Connected (Online)';
-        diagText.className = 'text-emerald-400 font-bold';
+        diagText.className = 'text-gain font-bold';
       } else {
-        diagDot.className = 'ui-dot bg-rose-400';
+        diagDot.className = 'ui-dot bg-loss';
         diagText.textContent = 'Disconnected (Offline)';
-        diagText.className = 'text-rose-400 font-bold';
+        diagText.className = 'text-loss font-bold';
       }
     }
     if (diagEndpoint) {
@@ -1397,7 +1438,7 @@ async function loadBrokerStatus(force = false) {
     }
     if (diagMsg) {
       diagMsg.textContent = data.message || (isConnected ? 'Connection verified.' : 'Broker offline.');
-      diagMsg.className = isConnected ? 'text-emerald-300 font-mono text-[11px] leading-relaxed break-words' : 'text-rose-300 font-mono text-[11px] leading-relaxed break-words';
+      diagMsg.className = isConnected ? 'text-gain font-mono text-[11px] leading-relaxed break-words' : 'text-loss font-mono text-[11px] leading-relaxed break-words';
     }
 
     if (force) {
@@ -1411,10 +1452,10 @@ async function loadBrokerStatus(force = false) {
     console.error('Failed to load broker status:', err);
     const mobErrDot = document.getElementById('mobileBrokerStatusDot');
     const mobErrText = document.getElementById('mobileBrokerStatusText');
-    if (mobErrDot) mobErrDot.className = 'ui-dot bg-rose-400';
+    if (mobErrDot) mobErrDot.className = 'ui-dot bg-loss';
     if (mobErrText) mobErrText.textContent = 'Broker error';
     if (badge && dot && text) {
-      dot.className = 'ui-dot bg-rose-400';
+      dot.className = 'ui-dot bg-loss';
       text.textContent = 'Broker: Error';
       badge.className = 'hidden';
     }
@@ -1438,14 +1479,14 @@ async function loadMarketStatus() {
     const mobMarketDot = document.getElementById('mobileMarketDot');
     const euOpen = !!msData.eu_market?.is_open;
     const usOpen = !!msData.us_market?.is_open;
-    if (mobMarketDot) mobMarketDot.className = (euOpen || usOpen) ? 'ui-dot bg-emerald-400' : 'ui-dot';
+    if (mobMarketDot) mobMarketDot.className = (euOpen || usOpen) ? 'ui-dot bg-gain' : 'ui-dot';
     if (msData.is_weekend) {
       textEl.textContent = 'Weekend (Markets Closed)';
-      badge.className = 'hidden xl:flex ui-chip text-amber-300';
+      badge.className = 'hidden xl:flex ui-chip text-warn';
       if (mobMarketText) mobMarketText.textContent = 'Weekend · markets closed';
     } else if (msData.eu_market.is_open || msData.us_market.is_open) {
       textEl.textContent = `🇪🇺 EU: ${msData.eu_market.status} | 🇺🇸 US: ${msData.us_market.status}`;
-      badge.className = 'hidden xl:flex ui-chip text-emerald-300';
+      badge.className = 'hidden xl:flex ui-chip text-gain';
       if (mobMarketText) mobMarketText.textContent = `EU ${euOpen ? 'open' : 'closed'} · US ${usOpen ? 'open' : 'closed'}`;
     } else {
       textEl.textContent = '🇪🇺 EU: CLOSED | 🇺🇸 US: CLOSED';
@@ -1712,9 +1753,9 @@ function renderAutoBuyStatus(enabled) {
   const mobTxt = document.getElementById('mobileAutoBuyText');
   if (mobTxt) mobTxt.textContent = on ? 'On' : 'Off';
   const badge = document.getElementById('autoBuyBadge');
-  if (badge) badge.className = on ? 'hidden xl:flex ui-chip text-emerald-300' : 'hidden xl:flex ui-chip';
+  if (badge) badge.className = on ? 'hidden xl:flex ui-chip text-gain' : 'hidden xl:flex ui-chip';
   const dot = document.getElementById('autoBuyDot');
-  if (dot) dot.className = on ? 'ui-dot bg-emerald-400' : 'ui-dot';
+  if (dot) dot.className = on ? 'ui-dot bg-gain' : 'ui-dot';
   const sw = document.getElementById('mobileAutoBuyDot');
   if (sw) sw.classList.toggle('on', on);
 }
@@ -2324,13 +2365,13 @@ async function loadMarketReview(market = null) {
     const textContainer = document.getElementById('reviewTextContainer');
 
     if (data.next_session && nextBadgeEl) {
-      nextBadgeEl.innerHTML = `<i class="fa-regular fa-clock"></i> Next: <span class="ui-num text-white">${esc(data.next_session.formatted)}</span>`;
+      nextBadgeEl.innerHTML = `<i class="fa-regular fa-clock"></i> Next: <span class="ui-num text-slate-50">${esc(data.next_session.formatted)}</span>`;
     }
 
     if (!data.found) {
       const marketLabel = currentMarketFilter ? `${currentMarketFilter} ` : '';
       if (headlineEl) headlineEl.innerText = `No ${marketLabel}review yet today`;
-      if (contentEl) contentEl.innerHTML = `Tap <strong class="text-white">Run ${esc(currentMarketFilter || 'US')} review</strong> below to score today's candidates and generate advice.`;
+      if (contentEl) contentEl.innerHTML = `Tap <strong class="text-slate-50">Run ${esc(currentMarketFilter || 'US')} review</strong> below to score today's candidates and generate advice.`;
       if (timestampEl) timestampEl.innerText = 'Pending';
       if (textContainer) textContainer.classList.add('hidden');
       return;
@@ -2342,7 +2383,7 @@ async function loadMarketReview(market = null) {
     let picksHtml = '';
     if (data.top_picks && data.top_picks.length > 0) {
       picksHtml = '<div class="mt-3 flex flex-wrap gap-2">' + data.top_picks.slice(0, 4).map(p =>
-        `<span class="ui-chip"><span class="ui-num text-white font-semibold">${esc(p.ticker)}</span> ${esc(String(p.action || '').replace('_', ' '))} <span class="ui-num">${esc(p.consensus_score)}</span></span>`
+        `<span class="ui-chip"><span class="ui-num text-slate-50 font-semibold">${esc(p.ticker)}</span> ${esc(String(p.action || '').replace('_', ' '))} <span class="ui-num">${esc(p.consensus_score)}</span></span>`
       ).join('') + '</div>';
     }
 
@@ -2353,7 +2394,7 @@ async function loadMarketReview(market = null) {
         positions.map(pos => {
           const up = pos.unrealized_pnl_eur >= 0;
           const sign = up ? '+' : '';
-          return `<div class="kv"><span><span class="ui-num text-white">${esc(pos.ticker)}</span> <span class="ui-num">${esc(pos.shares)} @ ${esc(pos.entry_price_native)} ${esc(pos.currency)}</span></span>
+          return `<div class="kv"><span><span class="ui-num text-slate-50">${esc(pos.ticker)}</span> <span class="ui-num">${esc(pos.shares)} @ ${esc(pos.entry_price_native)} ${esc(pos.currency)}</span></span>
             <span class="${up ? 'ui-gain' : 'ui-loss'}">${up ? '▲' : '▼'} ${sign}€${num(pos.unrealized_pnl_eur)} (${sign}${num(pos.unrealized_pnl_pct, 1)}%)</span></div>`;
         }).join('') + '</div></div>';
     }
@@ -2459,7 +2500,7 @@ async function loadWeeklyReviewComparison() {
     if (!comp.has_history || !comp.tracked_picks || comp.tracked_picks.length === 0) {
       if (winRateEl) { winRateEl.innerText = '--%'; winRateEl.className = `${STAT} ui-faint`; }
       if (winCountsEl) winCountsEl.innerText = '0 picks evaluated';
-      if (deltaEl) { deltaEl.innerText = '€0.00 (+0.0%)'; deltaEl.className = `${STAT} text-white`; }
+      if (deltaEl) { deltaEl.innerText = '€0.00 (+0.0%)'; deltaEl.className = `${STAT} text-slate-50`; }
       if (bestPickEl) bestPickEl.innerText = '--';
       if (picksContainer) {
         picksContainer.innerHTML = `<div class="p-3.5 adv-prose">No picks recorded in the past 7 days yet. Run a market review to start tracking.</div>`;
@@ -2510,7 +2551,7 @@ async function loadWeeklyReviewComparison() {
             <div class="flex items-start justify-between gap-3">
               <div class="min-w-0">
                 <div class="flex flex-wrap items-center gap-2">
-                  <span class="text-[15px] font-bold text-white">${esc(p.ticker)}</span>
+                  <span class="text-[15px] font-bold text-slate-50">${esc(p.ticker)}</span>
                   ${badgeText ? `<span class="${badgeClass}">${esc(badgeText)}</span>` : ''}
                 </div>
                 <div class="ui-faint text-[13px] truncate">${esc(p.name)}</div>
@@ -2549,11 +2590,11 @@ function renderWeeklyArchive() {
     return `
       <div class="ui-inset p-3.5 space-y-1.5">
         <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
-          <span class="text-[14px] font-semibold text-white">${esc(r.market)} ${esc(r.session)} · ${esc(r.headline)}</span>
+          <span class="text-[14px] font-semibold text-slate-50">${esc(r.market)} ${esc(r.session)} · ${esc(r.headline)}</span>
           <span class="ui-num ui-faint text-[12px]">${esc(r.timestamp)}</span>
         </div>
         <div class="adv-prose adv-clamp">${safeRichText(r.content)}</div>
-        <div class="ui-faint text-[13px]">Picks: <span class="ui-num text-white">${esc(picks)}</span></div>
+        <div class="ui-faint text-[13px]">Picks: <span class="ui-num text-slate-50">${esc(picks)}</span></div>
       </div>
     `;
   }).join('');
@@ -2882,8 +2923,8 @@ function drawShadowChart(s, mainLabel) {
     data: {
       labels,
       datasets: [
-        { label: s.label, data: hist.shadow.map(p => p[1]), borderColor: '#8EA2FF', backgroundColor: '#8EA2FF', borderWidth: 2, pointRadius: 0, tension: 0.2 },
-        { label: mainLabel, data: labels.map(l => mainMap.has(l) ? mainMap.get(l) : null), borderColor: '#A3ADBD', backgroundColor: '#A3ADBD', borderWidth: 2, borderDash: [4, 4], pointRadius: 0, tension: 0.2, spanGaps: true }
+        { label: s.label, data: hist.shadow.map(p => p[1]), borderWidth: 2, pointRadius: 0, tension: 0.2 },
+        { label: mainLabel, data: labels.map(l => mainMap.has(l) ? mainMap.get(l) : null), borderWidth: 2, borderDash: [4, 4], pointRadius: 0, tension: 0.2, spanGaps: true }
       ]
     },
     options: {
@@ -2891,15 +2932,17 @@ function drawShadowChart(s, mainLabel) {
       maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       plugins: {
-        legend: { position: 'bottom', labels: { color: '#A3ADBD', boxWidth: 12 } },
+        legend: { position: 'bottom', labels: { boxWidth: 12 } },
         tooltip: { callbacks: { label: c => `${c.dataset.label}: ${signedPct(c.parsed.y)}` } }
       },
       scales: {
-        x: { ticks: { color: '#7D8799', maxTicksLimit: 4, maxRotation: 0, callback(v) { return String(this.getLabelForValue(v)).slice(0, 5); } }, grid: { display: false } },
-        y: { ticks: { color: '#7D8799', callback: v => `${v}%` }, grid: { color: '#1E2533' } }
+        x: { ticks: { maxTicksLimit: 4, maxRotation: 0, callback(v) { return String(this.getLabelForValue(v)).slice(0, 5); } }, grid: { display: false } },
+        y: { ticks: { callback: v => `${v}%` }, grid: {} }
       }
     }
   });
+  styleShadowChart(shadowCharts[s.key]);
+  shadowCharts[s.key].update('none');
 }
 
 async function loadShadow() {
