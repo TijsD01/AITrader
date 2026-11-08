@@ -119,6 +119,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initChart();
   loadAllData();
   switchTabUi('portfolio');
+  updateMoreButton('portfolio');
   initFolds();
   resumePendingJob();
 
@@ -211,6 +212,7 @@ const TAB_CONFIG = {
 
 // Toggle Mobile Dropdown Menu
 function toggleMobileDropdown() {
+  if (moreIsSettingsOnly()) { switchTab('settings'); return; }
   const menu = document.getElementById('mobileDropdownMenu');
   const backdrop = document.getElementById('mobileDropdownBackdrop');
   const chevron = document.getElementById('mobileDropdownChevron');
@@ -261,20 +263,65 @@ document.addEventListener('keydown', (e) => {
 });
 
 // Tab Switching
-const MORE_TABS = ['screener', 'debate', 'shadow', 'memory', 'settings'];
+// Optional modules come from features.js. If it failed to load, everything stays visible.
+const F = window.Features || { isEnabled: () => true, fallbackTab: t => t };
+const MODULE_TABS = ['screener', 'debate', 'shadow', 'memory'];
+function moduleState() {
+  return Object.fromEntries(MODULE_TABS.map(id => [id, F.isEnabled(id)]));
+}
+// Tabs that live in the mobile "More" sheet: enabled modules plus Settings
+function moreTabs() {
+  return MODULE_TABS.filter(id => F.isEnabled(id)).concat('settings');
+}
+// Only Settings left: the "More" button opens Settings directly instead of an almost empty sheet
+function moreIsSettingsOnly() {
+  const tabs = moreTabs();
+  return tabs.length === 1 && tabs[0] === 'settings';
+}
+
+// Mobile "More" button: label and icon of the current tab inside it, or a plain Settings button
+function updateMoreButton(tabId) {
+  const btn = document.getElementById('mobileMenuDropdownBtn');
+  const mobileLabel = document.getElementById('mobileDropdownActiveText');
+  const mobileIcon = document.getElementById('mobileDropdownActiveIcon');
+  if (moreIsSettingsOnly()) {
+    if (mobileLabel) mobileLabel.textContent = 'Settings';
+    if (mobileIcon) mobileIcon.className = 'fa-solid fa-sliders';
+    if (btn) { btn.removeAttribute('aria-haspopup'); btn.removeAttribute('aria-expanded'); }
+    return;
+  }
+  if (btn) {
+    btn.setAttribute('aria-haspopup', 'dialog');
+    if (!btn.hasAttribute('aria-expanded')) btn.setAttribute('aria-expanded', 'false');
+  }
+  const cfg = TAB_CONFIG[tabId] || { label: tabId, icon: 'fa-solid fa-bars' };
+  const inMore = moreTabs().includes(tabId);
+  const SHORT = { screener: 'Screener', debate: 'Debate', shadow: 'Shadow', memory: 'Memory', settings: 'Settings' };
+  if (mobileLabel) mobileLabel.textContent = inMore ? (SHORT[tabId] || cfg.label) : 'More';
+  if (mobileIcon) mobileIcon.className = inMore ? cfg.icon : 'fa-solid fa-table-cells-large';
+}
+
+// A module was switched on or off in Settings: update nav at once, leave a tab that just went away
+document.addEventListener('modules:changed', () => {
+  if (!F.isEnabled(currentTab)) { switchTab('portfolio'); return; }
+  switchTabUi(currentTab);
+  updateMoreButton(currentTab);
+});
 
 function switchTabUi(tabId) {
   currentTab = tabId;
   // Bottom nav active state ("More" lights up for the tabs that live inside it)
   document.querySelectorAll('.bottom-nav-btn').forEach(btn => {
     const isMore = btn.dataset.more === '1';
-    const active = isMore ? MORE_TABS.includes(tabId) : btn.dataset.tab === tabId;
+    const active = isMore ? moreTabs().includes(tabId) : btn.dataset.tab === tabId;
     btn.classList.toggle('active', active);
     if (active) btn.setAttribute('aria-current', 'page'); else btn.removeAttribute('aria-current');
   });
 }
 
 function switchTab(tabId) {
+  // A disabled module (stored tab, deep link, shortcut) lands on Home, never on a blank page
+  tabId = F.fallbackTab(tabId, moduleState());
   switchTabUi(tabId);
   // Hide all contents
   document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
@@ -292,14 +339,7 @@ function switchTab(tabId) {
     }
   });
 
-  // Update mobile dropdown button header label and icon
-  const cfg = TAB_CONFIG[tabId] || { label: tabId, icon: 'fa-solid fa-bars' };
-  const mobileLabel = document.getElementById('mobileDropdownActiveText');
-  const mobileIcon = document.getElementById('mobileDropdownActiveIcon');
-  const inMore = MORE_TABS.includes(tabId);
-  const SHORT = { screener: 'Screener', debate: 'Debate', shadow: 'Shadow', memory: 'Memory', settings: 'Settings' };
-  if (mobileLabel) mobileLabel.textContent = inMore ? (SHORT[tabId] || cfg.label) : 'More';
-  if (mobileIcon) mobileIcon.className = inMore ? cfg.icon : 'fa-solid fa-table-cells-large';
+  updateMoreButton(tabId);
 
   // Update the "More" sheet tiles: mark the current section
   document.querySelectorAll('.mobile-dropdown-item').forEach(item => {
@@ -761,14 +801,14 @@ async function loadRecommendations() {
             <div class="kv"><span>Stop loss</span><span class="${r.stop_loss ? 'ui-loss' : ''}">${r.stop_loss ? `▼ ${esc(r.stop_loss)}` : '—'}</span></div>
           </div>
 
-          <div class="grid grid-cols-3 gap-2 mt-auto">
+          <div class="grid ${F.isEnabled('debate') ? 'grid-cols-3' : 'grid-cols-2'} gap-2 mt-auto">
             <button type="button" data-action="buy" data-ticker="${esc(r.ticker)}" class="ui-btn ui-btn-primary !px-2 !gap-1.5" title="Market buy now">
               <i class="fa-solid fa-cart-shopping"></i> Buy
             </button>
             <button type="button" data-action="arm-trigger" data-ticker="${esc(r.ticker)}" class="ui-btn !px-2 !gap-1.5" title="Arm an AI-calculated limit trigger">
               <i class="fa-solid fa-crosshairs"></i> Trigger
             </button>
-            <button type="button" data-action="inspect" data-idx="${idx}" class="ui-btn !px-2 !gap-1.5" title="Open the committee debate">
+            <button type="button" data-action="inspect" data-idx="${idx}" class="ui-btn !px-2 !gap-1.5${F.isEnabled('debate') ? '' : ' hidden'}" title="Open the committee debate">
               <i class="fa-solid fa-comments"></i> Debate
             </button>
           </div>
@@ -827,7 +867,7 @@ async function loadScreener() {
           <div class="kv"><span>5 days</span>${retHtml}</div>
         </div>
 
-        <button type="button" data-action="analyze" data-ticker="${esc(c.ticker)}" class="ui-btn ui-btn-primary w-full mt-auto">
+        <button type="button" data-action="analyze" data-ticker="${esc(c.ticker)}" class="ui-btn ui-btn-primary w-full mt-auto${F.isEnabled('debate') ? '' : ' hidden'}">
           <i class="fa-solid fa-users-viewfinder"></i> Analyze
         </button>
       </article>

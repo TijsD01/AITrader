@@ -1,4 +1,9 @@
 import re
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
 
 from fastapi.testclient import TestClient
 
@@ -47,3 +52,14 @@ def test_settings_has_modules_group():
 
 def test_features_js_is_served():
     assert _client().get("/static/features.js").status_code == 200
+
+
+def test_features_js_unit_tests():
+    if shutil.which("node") is None:
+        pytest.skip("node not installed")
+    root = Path(__file__).resolve().parent.parent
+    res = subprocess.run(
+        ["node", "--test", "tests/js/features.test.mjs"],
+        cwd=root, capture_output=True, text=True, timeout=60,
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
