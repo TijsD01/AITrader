@@ -21,12 +21,6 @@
     return out;
   }
 
-  // Pure: a disabled module's tab lands on Home; every other tab passes through.
-  function fallbackTab(tabId, state) {
-    if (!IDS.includes(tabId)) return tabId;
-    return resolveModules(state)[tabId] ? tabId : 'portfolio';
-  }
-
   function load() {
     try {
       if (typeof localStorage === 'undefined') return resolveModules(null);
@@ -93,7 +87,7 @@
     }
   }
 
-  const api = { MODULES, STORAGE_KEY, resolveModules, fallbackTab, isEnabled, setEnabled, applyModules };
+  const api = { MODULES, STORAGE_KEY, resolveModules, isEnabled, setEnabled, applyModules };
 
   if (typeof window !== 'undefined') window.Features = api;
   if (typeof document !== 'undefined') {

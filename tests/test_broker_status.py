@@ -46,3 +46,22 @@ async def test_api_broker_ping_endpoint():
         assert "connected" in data
         assert "status" in data
         assert "broker" in data
+
+
+@pytest.mark.asyncio
+async def test_cached_status_reports_current_kill_switch(monkeypatch):
+    # The live status is cached for a few seconds; the kill switch shown to the user must not be stale
+    import time
+    monkeypatch.setattr(live_broker, "_last_connection_status", {
+        "broker": "TRADING212", "connected": True, "status": "ONLINE", "message": "ok",
+        "kill_switch_active": False, "live_trading_enabled": False,
+    })
+    monkeypatch.setattr(live_broker, "_last_connection_check", time.time())
+    monkeypatch.setattr(settings, "KILL_SWITCH_ACTIVE", True)
+    monkeypatch.setattr(settings, "LIVE_TRADING_ENABLED", True)
+
+    status = await check_broker_status(probe_live=True)
+
+    assert status["kill_switch_active"] is True
+    assert status["live_trading_enabled"] is True
+    assert live_broker._last_connection_status["kill_switch_active"] is False  # cache itself untouched

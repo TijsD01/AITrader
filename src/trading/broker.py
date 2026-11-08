@@ -32,9 +32,14 @@ async def check_broker_status(force: bool = False, probe_live: bool = False) -> 
     If probe_live is True, explicitly probes the LiveBroker even when currently in paper mode.
     Otherwise checks the currently active broker.
     """
-    if probe_live:
-        return await live_broker.check_connection(force=force)
-    return await active_broker.check_connection(force=force)
+    broker = live_broker if probe_live else active_broker
+    status = await broker.check_connection(force=force)
+    # The connection probe is cached; the safety switches must always be read live
+    return {
+        **status,
+        "kill_switch_active": settings.KILL_SWITCH_ACTIVE,
+        "live_trading_enabled": settings.LIVE_TRADING_ENABLED,
+    }
 
 __all__ = [
     "BaseBroker",

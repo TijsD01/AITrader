@@ -28,22 +28,7 @@ test('resolveModules: only booleans count, unknown ids dropped', () => {
   );
 });
 
-test('fallbackTab: disabled module goes to portfolio', () => {
-  assert.equal(F.fallbackTab('shadow', { ...allOff, shadow: false }), 'portfolio');
-  assert.equal(F.fallbackTab('shadow', { ...allOff, shadow: true }), 'shadow');
-});
-
-test('fallbackTab: core tabs pass through', () => {
-  for (const t of ['portfolio', 'triggers', 'advice', 'history', 'settings']) {
-    assert.equal(F.fallbackTab(t, allOff), t);
-  }
-});
-
-test('fallbackTab: missing state counts as default (off)', () => {
-  assert.equal(F.fallbackTab('memory', {}), 'portfolio');
-});
-
 test('isEnabled works without a DOM: non-modules true, modules default off', () => {
-  assert.equal(F.isEnabled('settings'), true);
-  assert.equal(F.isEnabled('screener'), false);
+  for (const t of ['portfolio', 'triggers', 'advice', 'history', 'settings']) assert.equal(F.isEnabled(t), true, t);
+  for (const m of ['screener', 'debate', 'shadow', 'memory']) assert.equal(F.isEnabled(m), false, m);
 });

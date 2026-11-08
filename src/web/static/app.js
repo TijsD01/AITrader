@@ -265,11 +265,8 @@ document.addEventListener('keydown', (e) => {
 
 // Tab Switching
 // Optional modules come from features.js. If it failed to load, everything stays visible.
-const F = window.Features || { isEnabled: () => true, fallbackTab: t => t };
-const MODULE_TABS = ['screener', 'debate', 'shadow', 'memory'];
-function moduleState() {
-  return Object.fromEntries(MODULE_TABS.map(id => [id, F.isEnabled(id)]));
-}
+const F = window.Features || { MODULES: [], isEnabled: () => true };
+const MODULE_TABS = F.MODULES.length ? F.MODULES.map(m => m.id) : ['screener', 'debate', 'shadow', 'memory'];
 // Tabs that live in the mobile "More" sheet: enabled modules plus Settings
 function moreTabs() {
   return MODULE_TABS.filter(id => F.isEnabled(id)).concat('settings');
@@ -373,7 +370,7 @@ function switchTabUi(tabId) {
 
 function switchTab(tabId) {
   // A disabled module (stored tab, deep link, shortcut) lands on Home, never on a blank page
-  tabId = F.fallbackTab(tabId, moduleState());
+  if (!F.isEnabled(tabId)) tabId = 'portfolio';
   switchTabUi(tabId);
   // Hide all contents
   document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
