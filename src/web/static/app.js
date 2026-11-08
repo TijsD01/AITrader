@@ -309,6 +309,15 @@ document.addEventListener('modules:changed', () => {
   updateMoreButton(currentTab);
 });
 
+// Header hairline only once content scrolls under it
+(() => {
+  const header = document.querySelector('.app-header');
+  if (!header) return;
+  const onScroll = () => header.classList.toggle('is-scrolled', window.scrollY > 4);
+  window.addEventListener('scroll', onScroll, { passive: true });
+  onScroll();
+})();
+
 function switchTabUi(tabId) {
   currentTab = tabId;
   // Bottom nav active state ("More" lights up for the tabs that live inside it)
@@ -329,15 +338,11 @@ function switchTab(tabId) {
   const target = document.getElementById(`tab-${tabId}`);
   if (target) target.classList.remove('hidden');
 
-  // Update desktop nav
+  // Update desktop nav (segmented control; .active-tab is the raised segment)
   document.querySelectorAll('.tab-btn').forEach(btn => {
-    if (btn.dataset.tab === tabId) {
-      btn.classList.add('active-tab', 'text-gain');
-      btn.classList.remove('text-slate-400');
-    } else {
-      btn.classList.remove('active-tab', 'text-gain');
-      btn.classList.add('text-slate-400');
-    }
+    const active = btn.dataset.tab === tabId;
+    btn.classList.toggle('active-tab', active);
+    if (active) btn.setAttribute('aria-current', 'page'); else btn.removeAttribute('aria-current');
   });
 
   updateMoreButton(tabId);

@@ -57,48 +57,39 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js" integrity="sha384-dug+JxfBvklEQdJ4AYuBBAIScUz0bVN73xpy273gcAwHjb3qI0fXmuYNaNfdyYJG" crossorigin="anonymous"></script>
   <link rel="stylesheet" href="/static/style.css">
 </head>
-<body class="bg-darkBg text-slate-100 min-h-screen md:pb-8 flex flex-col font-sans antialiased overflow-x-hidden selection:bg-indigo-500 selection:text-white">
+<body class="bg-darkBg text-slate-100 min-h-screen md:pb-8 flex flex-col font-sans antialiased overflow-x-clip selection:bg-indigo-500 selection:text-white">
 
-  <!-- App header: brand, mode and broker status, then Refresh + Scan -->
+  <!-- App header: logo, one status pill (mode + broker), then Refresh + Scan -->
   <header class="app-header">
-    <div class="px-4 py-2.5 sm:px-6 flex items-center justify-between gap-3 max-w-7xl mx-auto w-full">
+    <div class="app-header-row px-4 sm:px-6 flex items-center justify-between gap-2 sm:gap-3 max-w-7xl mx-auto w-full">
       <div class="flex items-center gap-2.5 min-w-0">
         <div class="app-logo" aria-hidden="true">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l5-5 4 4 8-9"></path><path d="M15 7h5v5"></path></svg>
         </div>
-        <div class="min-w-0">
-          <h1 class="text-base font-bold tracking-tight text-slate-50 leading-tight">AlphaAgent</h1>
-          <div class="flex items-center gap-1.5 text-xs text-slate-400 leading-tight mt-0.5 min-w-0">
-            <span id="tradingModeBadge" class="mode-tag">PAPER</span>
-            <span aria-hidden="true">&middot;</span>
-            <button type="button" onclick="pingBrokerStatus(true)" id="mobileBrokerStatusPill" class="flex items-center gap-1.5 min-w-0 text-slate-400 hover:text-slate-50" title="Test the broker connection">
-              <span id="mobileBrokerStatusDot" class="ui-dot"></span>
-              <span id="mobileBrokerStatusText" class="truncate">Broker: Checking...</span>
-            </button>
-          </div>
+        <h1 class="app-brand max-sm:sr-only">AlphaAgent</h1>
+        <!-- Status pill: trading mode + broker; tap to test the broker. Market, auto-buy and kill switch live on Home. -->
+        <div class="status-pill min-w-0">
+          <span id="tradingModeBadge" class="mode-tag">PAPER</span>
+          <button type="button" onclick="pingBrokerStatus(true)" id="mobileBrokerStatusPill" class="status-pill-btn min-w-0" title="Test the broker connection">
+            <span id="mobileBrokerStatusDot" class="ui-dot"></span>
+            <span id="mobileBrokerStatusText" class="truncate">Broker: Checking...</span>
+          </button>
         </div>
       </div>
 
-      <div class="flex items-center gap-2 shrink-0">
-        <!-- Desktop-only status badges -->
-        <button onclick="pingBrokerStatus(true)" id="brokerStatusBadge" type="button" title="Broker connection status (click to test)" class="hidden">
-          <span id="brokerStatusDot" class="ui-dot"></span>
-          <span id="brokerStatusText">Broker: Checking...</span>
-        </button>
-        <div id="marketStatusBadge" class="hidden xl:flex ui-chip">
-          <i class="fa-regular fa-clock"></i>
-          <span id="marketStatusText">Markets: Checking...</span>
+      <div class="flex items-center gap-1.5 sm:gap-2 shrink-0">
+        <!-- Legacy header badges: app.js still writes to them; Home shows the same status -->
+        <div class="hidden" aria-hidden="true">
+          <button onclick="pingBrokerStatus(true)" id="brokerStatusBadge" type="button" tabindex="-1" class="hidden">
+            <span id="brokerStatusDot" class="ui-dot"></span>
+            <span id="brokerStatusText">Broker: Checking...</span>
+          </button>
+          <div id="marketStatusBadge" class="hidden"><span id="marketStatusText">Markets: Checking...</span></div>
+          <div id="autoBuyBadge" class="hidden"><span id="autoBuyDot" class="ui-dot"></span><span id="autoBuyStatusText">Active</span></div>
+          <button onclick="toggleKillSwitch()" id="killSwitchBtnDesktop" type="button" tabindex="-1" class="hidden"><span class="kill-switch-label">Kill Switch</span></button>
         </div>
-        <div id="autoBuyBadge" class="hidden xl:flex ui-chip">
-          <span id="autoBuyDot" class="ui-dot"></span>
-          <span class="hidden lg:inline">Auto-buy:</span> <span id="autoBuyStatusText">Active</span>
-        </div>
-        <button onclick="toggleKillSwitch()" id="killSwitchBtnDesktop" type="button" title="Emergency kill switch: halt or resume all new automated buying" class="hidden md:flex ui-btn ui-btn-sm ui-btn-danger">
-          <i class="fa-solid fa-power-off"></i>
-          <span class="kill-switch-label">Kill Switch</span>
-        </button>
 
-        <button onclick="refreshMarketData()" id="refreshDataBtn" type="button" aria-label="Refresh data" title="Pull fresh prices and account balance, resize triggers, and run trigger &amp; stop checks now" class="ui-btn ui-icon-btn">
+        <button onclick="refreshMarketData()" id="refreshDataBtn" type="button" aria-label="Refresh data" title="Pull fresh prices and account balance, resize triggers, and run trigger &amp; stop checks now" class="ui-btn ui-btn-quiet ui-icon-btn">
           <i class="fa-solid fa-arrows-rotate"></i>
         </button>
         <button onclick="triggerQuickScan()" id="scanBtn" type="button" aria-label="Run scan" class="ui-btn ui-btn-primary px-3.5">
@@ -159,26 +150,26 @@
     <button type="button" onclick="toggleMobileDropdown()" id="mobileMenuDropdownBtn" class="bottom-nav-btn" data-more="1" aria-haspopup="dialog" aria-expanded="false"><span class="nav-pill"><i id="mobileDropdownActiveIcon" class="fa-solid fa-table-cells-large"></i></span><span id="mobileDropdownActiveText">More</span></button>
   </nav>
 
-  <!-- Desktop tab bar -->
-  <nav class="hidden md:block border-b border-borderCol" aria-label="Sections">
-    <div class="max-w-7xl mx-auto px-6 py-2 flex gap-1 text-sm font-medium overflow-x-auto scrollbar-none">
-      <button onclick="switchTab('portfolio')" class="tab-btn px-3.5 py-2 whitespace-nowrap active-tab" data-tab="portfolio"><i class="fa-solid fa-house mr-2"></i>Home</button>
-      <button onclick="switchTab('triggers')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="triggers"><i class="fa-solid fa-crosshairs mr-2"></i>Triggers</button>
-      <button onclick="switchTab('advice')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="advice"><i class="fa-regular fa-lightbulb mr-2"></i>Advice</button>
-      <button onclick="switchTab('history')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="history"><i class="fa-solid fa-clock-rotate-left mr-2"></i>History</button>
-      <button onclick="switchTab('screener')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="screener" data-module="screener"><i class="fa-solid fa-magnifying-glass-chart mr-2"></i>Screener</button>
-      <button onclick="switchTab('debate')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="debate" data-module="debate"><i class="fa-solid fa-comments mr-2"></i>Debate</button>
-      <button onclick="switchTab('shadow')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="shadow" data-module="shadow"><i class="fa-solid fa-flask mr-2"></i>Shadow</button>
-      <button onclick="switchTab('memory')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="memory" data-module="memory"><i class="fa-solid fa-brain mr-2"></i>Memory</button>
-      <button onclick="switchTab('settings')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="settings"><i class="fa-solid fa-sliders mr-2"></i>Settings</button>
+  <!-- Desktop nav: centered segmented control (module tabs hidden by features.js) -->
+  <nav class="hidden md:flex justify-center px-6 pt-3" aria-label="Sections">
+    <div class="seg-nav scrollbar-none">
+      <button onclick="switchTab('portfolio')" class="tab-btn seg-btn active-tab" aria-current="page" data-tab="portfolio"><i class="fa-solid fa-house" aria-hidden="true"></i>Home</button>
+      <button onclick="switchTab('triggers')" class="tab-btn seg-btn" data-tab="triggers"><i class="fa-solid fa-crosshairs" aria-hidden="true"></i>Triggers</button>
+      <button onclick="switchTab('advice')" class="tab-btn seg-btn" data-tab="advice"><i class="fa-regular fa-lightbulb" aria-hidden="true"></i>Advice</button>
+      <button onclick="switchTab('history')" class="tab-btn seg-btn" data-tab="history"><i class="fa-solid fa-clock-rotate-left" aria-hidden="true"></i>History</button>
+      <button onclick="switchTab('screener')" class="tab-btn seg-btn" data-tab="screener" data-module="screener"><i class="fa-solid fa-magnifying-glass-chart" aria-hidden="true"></i>Screener</button>
+      <button onclick="switchTab('debate')" class="tab-btn seg-btn" data-tab="debate" data-module="debate"><i class="fa-solid fa-comments" aria-hidden="true"></i>Debate</button>
+      <button onclick="switchTab('shadow')" class="tab-btn seg-btn" data-tab="shadow" data-module="shadow"><i class="fa-solid fa-flask" aria-hidden="true"></i>Shadow</button>
+      <button onclick="switchTab('memory')" class="tab-btn seg-btn" data-tab="memory" data-module="memory"><i class="fa-solid fa-brain" aria-hidden="true"></i>Memory</button>
+      <button onclick="switchTab('settings')" class="tab-btn seg-btn" data-tab="settings"><i class="fa-solid fa-sliders" aria-hidden="true"></i>Settings</button>
     </div>
   </nav>
 
   <!-- Main Content Container -->
-  <main class="flex-1 max-w-7xl w-full mx-auto px-4 pt-2 pb-4 sm:p-6 space-y-4 sm:space-y-6 min-w-0">
+  <main class="flex-1 max-w-7xl w-full mx-auto px-4 pt-3 pb-4 sm:px-6 sm:pt-6 sm:pb-6 space-y-4 sm:space-y-6 min-w-0">
 
     <!-- TAB 1: HOME (PORTFOLIO) -->
-    <section id="tab-portfolio" class="tab-content space-y-3.5 sm:space-y-5">
+    <section id="tab-portfolio" class="tab-content space-y-6 md:space-y-8">
 
       <!-- Broker offline alert (LIVE mode only) -->
       <div id="brokerDisconnectBanner" class="hidden ui-card ui-card-pad" style="background: var(--danger-surface); border-color: var(--danger-line);">
@@ -198,8 +189,46 @@
         </div>
       </div>
 
-      <div class="grid grid-cols-1 lg:grid-cols-3 gap-3.5 sm:gap-5">
-        <div class="lg:col-span-2 space-y-3.5 sm:space-y-5 min-w-0">
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 md:gap-8">
+        <div class="lg:col-span-2 space-y-6 md:space-y-8 min-w-0">
+
+          <!-- Hero: total value, return, allocation bar -->
+          <section class="ui-card hero-card space-y-4" aria-label="Portfolio value">
+            <div class="space-y-1">
+              <div class="hero-label">Portfolio value</div>
+              <div id="metricTotalVal" class="hero-value truncate">&euro;0.00</div>
+              <div id="metricReturnBadge" class="flex items-center gap-2 text-sm font-semibold text-slate-400">--</div>
+            </div>
+            <div class="space-y-2">
+              <div id="allocationBar" class="alloc-bar" role="img" aria-label="Capital allocation"><span style="flex:1;background:var(--line-strong)"></span></div>
+              <div class="flex justify-between gap-3 text-[13px] text-slate-400">
+                <span>Bot <strong id="metricEquity" class="ui-num text-slate-50 font-semibold">&euro;0.00</strong></span>
+                <span id="metricMineWrap" hidden>Yours <strong id="metricMine" class="ui-num text-slate-50 font-semibold">&euro;0.00</strong></span>
+                <span>Cash <strong id="metricTotalCash" class="ui-num text-slate-50 font-semibold">&euro;0.00</strong></span>
+              </div>
+              <div id="allocationLegend" class="alloc-legend"></div>
+            </div>
+          </section>
+
+          <!-- KPIs -->
+          <section class="home-kpis grid grid-cols-3" aria-label="Key figures">
+            <div class="kpi">
+              <span class="ui-label">Deployable cash</span>
+              <span id="metricCash" class="kpi-value">&euro;0.00</span>
+              <span id="metricCashSub" class="kpi-sub">Buffer capital</span>
+            </div>
+            <div class="kpi">
+              <span class="ui-label">Open P&amp;L</span>
+              <span id="metricUnrealizedPnl" class="kpi-value">&euro;0.00</span>
+              <span class="kpi-sub"><span id="metricPosCount">0 open positions</span><span id="metricUnrealizedPnlSub" class="sr-only">Open paper positions</span></span>
+            </div>
+            <!-- Pending triggers (opens the Triggers tab) -->
+            <button type="button" onclick="switchTab('triggers')" id="pendingTriggersSummary" class="trigger-link">
+              <span class="ui-label"><i class="fa-solid fa-crosshairs" aria-hidden="true"></i> Triggers</span>
+              <span id="pendingTriggersSummaryText" class="trigger-text">0 pending triggers</span>
+              <span id="pendingTriggersSummarySub" class="kpi-sub max-md:sr-only">Limit orders waiting for their price</span>
+            </button>
+          </section>
 
           <!-- Status and controls: market + cash-limit chips, broker strip, control tiles -->
           <section class="status-block" aria-label="Status and controls">
@@ -240,44 +269,6 @@
                 <i class="fa-solid fa-power-off text-xl" aria-hidden="true"></i>
               </button>
             </div>
-          </section>
-
-          <!-- Hero: total value, return, allocation bar -->
-          <section class="ui-card p-4 sm:p-6 space-y-3 sm:space-y-4" aria-label="Portfolio value">
-            <div class="space-y-1">
-              <div class="ui-label text-[13px]">Portfolio value</div>
-              <div id="metricTotalVal" class="hero-value truncate">&euro;0.00</div>
-              <div id="metricReturnBadge" class="flex items-center gap-2 text-sm font-semibold text-slate-400">--</div>
-            </div>
-            <div class="space-y-2">
-              <div id="allocationBar" class="alloc-bar" role="img" aria-label="Capital allocation"><span style="flex:1;background:var(--line-strong)"></span></div>
-              <div class="flex justify-between gap-3 text-[13px] text-slate-400">
-                <span>Bot <strong id="metricEquity" class="ui-num text-slate-50 font-semibold">&euro;0.00</strong></span>
-                <span id="metricMineWrap" hidden>Yours <strong id="metricMine" class="ui-num text-slate-50 font-semibold">&euro;0.00</strong></span>
-                <span>Cash <strong id="metricTotalCash" class="ui-num text-slate-50 font-semibold">&euro;0.00</strong></span>
-              </div>
-              <div id="allocationLegend" class="alloc-legend"></div>
-            </div>
-          </section>
-
-          <!-- KPIs -->
-          <section class="home-kpis grid grid-cols-3 gap-2" aria-label="Key figures">
-            <div class="ui-card kpi">
-              <span class="ui-label">Deployable cash</span>
-              <span id="metricCash" class="kpi-value">&euro;0.00</span>
-              <span id="metricCashSub" class="kpi-sub">Buffer capital</span>
-            </div>
-            <div class="ui-card kpi">
-              <span class="ui-label">Open P&amp;L</span>
-              <span id="metricUnrealizedPnl" class="kpi-value">&euro;0.00</span>
-              <span class="kpi-sub"><span id="metricPosCount">0 open positions</span><span id="metricUnrealizedPnlSub" class="sr-only">Open paper positions</span></span>
-            </div>
-            <!-- Pending triggers (opens the Triggers tab) -->
-            <button type="button" onclick="switchTab('triggers')" id="pendingTriggersSummary" class="trigger-link">
-              <span class="ui-label"><i class="fa-solid fa-crosshairs" aria-hidden="true"></i> Triggers</span>
-              <span id="pendingTriggersSummaryText" class="trigger-text">0 pending triggers</span>
-              <span id="pendingTriggersSummarySub" class="kpi-sub max-md:sr-only">Limit orders waiting for their price</span>
-            </button>
           </section>
 
           <!-- Positions -->
@@ -614,22 +605,22 @@
           </div>
 
           <div class="grid grid-cols-2 lg:grid-cols-4 gap-2.5">
-            <div class="ui-card kpi">
+            <div class="kpi">
               <span class="ui-label">Win rate</span>
               <span id="learningWinRate" class="kpi-value">--%</span>
               <span id="learningTradeCounts" class="kpi-sub ui-num">0 trades</span>
             </div>
-            <div class="ui-card kpi">
+            <div class="kpi">
               <span class="ui-label">Min. score</span>
               <span id="learningMinScore" class="kpi-value">70/100</span>
               <span class="kpi-sub">To open a position</span>
             </div>
-            <div class="ui-card kpi">
+            <div class="kpi">
               <span class="ui-label">Position size</span>
               <span id="learningPositionSize" class="kpi-value">8.0%</span>
               <span class="kpi-sub">Scaled by drawdown</span>
             </div>
-            <div class="ui-card kpi">
+            <div class="kpi">
               <span class="ui-label">Reward : risk</span>
               <span id="learningRiskParams" class="kpi-value">1:2.1 (1.75x)</span>
               <span class="kpi-sub">Take profit R:R (ATR stop)</span>
