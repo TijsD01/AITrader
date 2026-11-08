@@ -367,7 +367,7 @@ button.ui-chip { cursor: pointer; }
   min-height: 34px; padding: 0 14px; border-radius: 999px; border: 0;
   background: transparent; color: var(--text-2);
   font: 500 13px/1 var(--font-sans); white-space: nowrap; cursor: pointer;
-  transition: background-color .15s var(--ease-out), color .15s var(--ease-out), box-shadow .15s var(--ease-out);
+  transition: background-color .15s var(--ease-out), color .15s var(--ease-out), box-shadow .15s var(--ease-out), transform var(--dur-press) var(--ease-out);
 }
 .seg-btn i { font-size: 12px; }
 .seg-btn:hover { color: var(--text); }
@@ -442,8 +442,7 @@ button.ui-chip { cursor: pointer; }
 /* First real content replacing a "Loading..." placeholder fades in (see app.js) */
 .just-loaded { animation: fadeIn var(--dur-in) var(--ease-out); }
 
-/* Tab change: short crossfade so the new view never pops in */
-.tab-content:not(.hidden) { animation: fadeIn 180ms var(--ease-out); }
+/* Tab change motion lives in the motion section at the end of this file */
 
 /* Toast: small drop-in, quicker exit */
 #toast { opacity: 0; transform: translateY(-12px) scale(.97);
@@ -736,3 +735,40 @@ button.ui-chip { cursor: pointer; }
 /* Allocation bar: your share is hatched, the bot's shares stay coloured */
 .alloc-mine { background: repeating-linear-gradient(135deg, var(--text-2) 0 3px, var(--line-strong) 3px 6px); }
 .own-note { font-size: 12px; line-height: 1.45; color: var(--text-3); }
+
+/* ------------------------------------------------------------------ */
+/* Motion (Task 5). transform + opacity only. Entrances use fill-mode  */
+/* `backwards`: hidden only while running, always end at natural style */
+/* ------------------------------------------------------------------ */
+@keyframes riseIn { from { opacity: 0; transform: translateY(8px); } }
+@keyframes riseInSm { from { opacity: 0; transform: translateY(4px); } }
+@keyframes navIn { from { opacity: 0; transform: translateX(-6px); } }
+
+.tab-enter { animation: riseIn var(--dur-in) var(--ease-out) backwards; }
+.stagger-item { animation: riseIn var(--dur-in) var(--ease-out) backwards; animation-delay: calc(min(var(--i, 0), 8) * 30ms); }
+.nav-enter { animation: navIn var(--dur-in) var(--ease-out) backwards; }
+
+/* Press feedback for every button flavour */
+.ui-btn:active, .seg-btn:active, button:active { transform: scale(.97); }
+
+/* Switch thumb stretches ~12% along its travel while pressed (also when the press lands on the parent button) */
+.ui-switch::after { transform-origin: left center; }
+.ui-switch.on::after { transform-origin: right center; }
+.ui-switch:active::after, button:active .ui-switch::after { transform: scaleX(1.12); }
+.ui-switch.on:active::after, button:active .ui-switch.on::after { transform: translateX(16px) scaleX(1.12); }
+/* Settings switches: the invisible <input> on top takes the press */
+.set-toggle input:active + .ui-switch::after { transform-origin: left center; transform: scaleX(1.12); }
+.set-toggle input:checked:active + .ui-switch::after { transform-origin: right center; transform: translateX(16px) scaleX(1.12); }
+
+/* Folds: content eases in on open */
+details[data-fold][open] > :not(summary), .adv-details[open] > :not(summary) { animation: riseInSm var(--dur-in) var(--ease-out) backwards; }
+
+@media (prefers-reduced-motion: reduce) {
+  .tab-enter, .stagger-item, .nav-enter { animation-name: fadeIn; animation-delay: 0ms; }
+  details[data-fold][open] > :not(summary), .adv-details[open] > :not(summary) { animation-name: fadeIn; }
+  .ui-btn:active, .seg-btn:active, button:active { transform: none; }
+  .ui-switch:active::after, button:active .ui-switch::after { transform: none; }
+  .ui-switch.on:active::after, button:active .ui-switch.on::after { transform: translateX(16px); }
+  .set-toggle input:active + .ui-switch::after { transform: none; }
+  .set-toggle input:checked:active + .ui-switch::after { transform: translateX(16px); }
+}

@@ -302,11 +302,53 @@ function updateMoreButton(tabId) {
   if (mobileIcon) mobileIcon.className = inMore ? cfg.icon : 'fa-solid fa-table-cells-large';
 }
 
+// Restart a one-shot CSS animation class. Fill mode is `backwards`, so content is only
+// hidden while the animation runs and always ends at its natural styles.
+function replayClass(el, cls) {
+  document.querySelectorAll('.' + cls).forEach(n => { if (n !== el) n.classList.remove(cls); });
+  el.classList.remove(cls);
+  void el.offsetWidth;
+  el.classList.add(cls);
+  el.addEventListener('animationend', (e) => { if (e.target === el) el.classList.remove(cls); }, { once: true });
+}
+
+// Give the first rendered children of a list a 30ms entrance stagger (max 8, rest appear at once).
+// Runs once per tab visit: switchTab clears data-staggered, 30 s refreshes find it set and skip.
+function staggerChildren(el) {
+  if (!el || el.dataset.staggered === '1') return;
+  el.dataset.staggered = '1';
+  Array.from(el.children).slice(0, 8).forEach((child, i) => {
+    child.style.setProperty('--i', i);
+    child.classList.add('stagger-item');
+    child.addEventListener('animationend', () => child.classList.remove('stagger-item'), { once: true });
+  });
+}
+
+// Nav items that just became visible (module switched on) slide in
+let navSeen = null;
+function visibleNavTabs() {
+  const out = new Set();
+  document.querySelectorAll('.seg-btn[data-tab], .bottom-nav-btn[data-tab], .mobile-dropdown-item[data-tab]').forEach(el => {
+    if (el.offsetParent !== null) out.add(el);
+  });
+  return out;
+}
+function replayNav(el) {
+  el.classList.remove('nav-enter');
+  void el.offsetWidth;
+  el.classList.add('nav-enter');
+  el.addEventListener('animationend', () => el.classList.remove('nav-enter'), { once: true });
+}
+document.addEventListener('DOMContentLoaded', () => { navSeen = visibleNavTabs(); });
+
 // A module was switched on or off in Settings: update nav at once, leave a tab that just went away
 document.addEventListener('modules:changed', () => {
   if (!F.isEnabled(currentTab)) { switchTab('portfolio'); return; }
   switchTabUi(currentTab);
   updateMoreButton(currentTab);
+  const now = visibleNavTabs();
+  if (navSeen) now.forEach(el => { if (!navSeen.has(el)) replayNav(el); });
+  navSeen = now;
 });
 
 // Header hairline only once content scrolls under it
@@ -337,6 +379,9 @@ function switchTab(tabId) {
   document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
   const target = document.getElementById(`tab-${tabId}`);
   if (target) target.classList.remove('hidden');
+  // A new visit staggers its lists once again; refreshes within a visit do not
+  document.querySelectorAll('[data-staggered]').forEach(el => delete el.dataset.staggered);
+  if (target) replayClass(target, 'tab-enter');
 
   // Update desktop nav (segmented control; .active-tab is the raised segment)
   document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -798,6 +843,7 @@ async function loadPortfolio() {
       `;
     }).join('');
 
+    staggerChildren(container);
   } catch (e) {
     console.error('Failed to load portfolio:', e);
   }
@@ -862,6 +908,7 @@ async function loadRecommendations() {
       `;
     }).join('');
 
+    staggerChildren(container);
   } catch (e) {
     console.error('Failed to load recommendations:', e);
   }
@@ -2023,6 +2070,7 @@ async function loadTriggers() {
             </div>
           `;
         }).join('');
+        staggerChildren(pendingContainer);
       }
     }
 
