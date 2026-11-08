@@ -92,7 +92,7 @@ class RevalidatingStaticFiles(StaticFiles):
 app.mount("/static", RevalidatingStaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # Assets referenced from index.html get a ?v=<content hash> so a changed file is a new URL
-VERSIONED_ASSETS = ("style.css", "app.js")
+VERSIONED_ASSETS = ("style.css", "features.js", "app.js")
 
 
 def _asset_version(name: str) -> str:

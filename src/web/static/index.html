@@ -108,22 +108,22 @@
       <span class="text-xs text-slate-500 font-mono">EUR &euro;</span>
     </div>
     <div class="grid grid-cols-2 gap-2.5">
-      <button type="button" onclick="switchTab('screener')" class="mobile-dropdown-item more-tile" data-tab="screener">
+      <button type="button" onclick="switchTab('screener')" class="mobile-dropdown-item more-tile" data-tab="screener" data-module="screener">
         <i class="fa-solid fa-magnifying-glass-chart text-cyan-300"></i>
         <span><span class="more-title">Screener</span><span class="more-sub">EU &amp; US momentum</span></span>
         <i class="fa-solid fa-check text-xs text-indigo-300 mobile-active-check hidden absolute top-3.5 right-3.5"></i>
       </button>
-      <button type="button" onclick="switchTab('debate')" class="mobile-dropdown-item more-tile" data-tab="debate">
+      <button type="button" onclick="switchTab('debate')" class="mobile-dropdown-item more-tile" data-tab="debate" data-module="debate">
         <i class="fa-solid fa-comments text-violet-300"></i>
         <span><span class="more-title">Debate</span><span class="more-sub">Ask the committee</span></span>
         <i class="fa-solid fa-check text-xs text-indigo-300 mobile-active-check hidden absolute top-3.5 right-3.5"></i>
       </button>
-      <button type="button" onclick="switchTab('shadow')" class="mobile-dropdown-item more-tile" data-tab="shadow">
+      <button type="button" onclick="switchTab('shadow')" class="mobile-dropdown-item more-tile" data-tab="shadow" data-module="shadow">
         <i class="fa-solid fa-flask text-pink-300"></i>
         <span><span class="more-title">Shadow</span><span class="more-sub">Paper strategy test</span></span>
         <i class="fa-solid fa-check text-xs text-indigo-300 mobile-active-check hidden absolute top-3.5 right-3.5"></i>
       </button>
-      <button type="button" onclick="switchTab('memory')" class="mobile-dropdown-item more-tile" data-tab="memory">
+      <button type="button" onclick="switchTab('memory')" class="mobile-dropdown-item more-tile" data-tab="memory" data-module="memory">
         <i class="fa-solid fa-brain text-amber-300"></i>
         <span><span class="more-title">Memory</span><span class="more-sub">Agent memory hub</span></span>
         <i class="fa-solid fa-check text-xs text-indigo-300 mobile-active-check hidden absolute top-3.5 right-3.5"></i>
@@ -155,10 +155,10 @@
       <button onclick="switchTab('triggers')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="triggers"><i class="fa-solid fa-crosshairs mr-2"></i>Triggers</button>
       <button onclick="switchTab('advice')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="advice"><i class="fa-regular fa-lightbulb mr-2"></i>Advice</button>
       <button onclick="switchTab('history')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="history"><i class="fa-solid fa-clock-rotate-left mr-2"></i>History</button>
-      <button onclick="switchTab('screener')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="screener"><i class="fa-solid fa-magnifying-glass-chart mr-2"></i>Screener</button>
-      <button onclick="switchTab('debate')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="debate"><i class="fa-solid fa-comments mr-2"></i>Debate</button>
-      <button onclick="switchTab('shadow')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="shadow"><i class="fa-solid fa-flask mr-2"></i>Shadow</button>
-      <button onclick="switchTab('memory')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="memory"><i class="fa-solid fa-brain mr-2"></i>Memory</button>
+      <button onclick="switchTab('screener')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="screener" data-module="screener"><i class="fa-solid fa-magnifying-glass-chart mr-2"></i>Screener</button>
+      <button onclick="switchTab('debate')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="debate" data-module="debate"><i class="fa-solid fa-comments mr-2"></i>Debate</button>
+      <button onclick="switchTab('shadow')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="shadow" data-module="shadow"><i class="fa-solid fa-flask mr-2"></i>Shadow</button>
+      <button onclick="switchTab('memory')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="memory" data-module="memory"><i class="fa-solid fa-brain mr-2"></i>Memory</button>
       <button onclick="switchTab('settings')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="settings"><i class="fa-solid fa-sliders mr-2"></i>Settings</button>
     </div>
   </nav>
@@ -417,7 +417,7 @@
     </section>
 
     <!-- TAB 3: SCREENER -->
-    <section id="tab-screener" class="tab-content hidden space-y-5">
+    <section id="tab-screener" data-module="screener" class="tab-content hidden space-y-5">
       <div class="ui-page-head">
         <div class="min-w-0">
           <h2 class="ui-page-title">Screener</h2>
@@ -436,7 +436,7 @@
     </section>
 
     <!-- TAB 4: COMMITTEE DEBATE -->
-    <section id="tab-debate" class="tab-content hidden space-y-5">
+    <section id="tab-debate" data-module="debate" class="tab-content hidden space-y-5">
       <div class="ui-page-head">
         <div class="min-w-0">
           <h2 class="ui-page-title">Committee Debate</h2>
@@ -689,7 +689,7 @@
     </section>
 
     <!-- TAB: SHADOW PAPER PORTFOLIOS -->
-    <section id="tab-shadow" class="tab-content hidden space-y-6">
+    <section id="tab-shadow" data-module="shadow" class="tab-content hidden space-y-6">
       <div class="ui-page-head" style="flex-wrap:nowrap;align-items:flex-start">
         <div class="min-w-0">
           <h2 class="ui-page-title">Shadow paper</h2>
@@ -705,7 +705,7 @@
     </section>
 
     <!-- TAB 7: MEMORY -->
-    <section id="tab-memory" class="tab-content hidden space-y-6">
+    <section id="tab-memory" data-module="memory" class="tab-content hidden space-y-6">
       <div class="ui-page-head">
         <div>
           <h2 class="ui-page-title">Memory</h2>
@@ -793,6 +793,18 @@
           <p class="ui-page-sub">Trading rules, broker connection and integrations.</p>
         </div>
       </div>
+
+      <!-- Modules -->
+      <details class="ui-list adv-details fold" data-fold="settings-modules" open>
+        <summary class="px-4 py-3">
+          <span class="min-w-0">
+            <h3 class="ui-section-title">Modules</h3>
+            <span class="set-help">Extra sections. Off by default; only this browser.</span>
+          </span>
+          <i class="fa-solid fa-chevron-down text-[12px] ui-faint adv-chev" aria-hidden="true"></i>
+        </summary>
+        <div id="moduleToggleList" class="ui-list"></div>
+      </details>
 
       <!-- Trading -->
       <details class="ui-list adv-details fold" data-fold="settings-trading" open>
@@ -1032,6 +1044,7 @@
     <span id="toastMsg">Action executed.</span>
   </div>
 
+  <script src="/static/features.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

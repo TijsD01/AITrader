@@ -1,0 +1,49 @@
+import re
+
+from fastapi.testclient import TestClient
+
+from src.web.app import app
+
+MODULES = ("screener", "debate", "shadow", "memory")
+
+
+def _client():
+    # No `with`: the lifespan (scheduler, Telegram, broker) is not started
+    return TestClient(app, client=("192.168.1.20", 5000))
+
+
+def _html():
+    res = _client().get("/")
+    assert res.status_code == 200
+    return res.text
+
+
+def test_features_js_versioned_and_before_app_js():
+    html = _html()
+    f = re.search(r'src="/static/features\.js\?v=[0-9a-f]{10}"', html)
+    a = re.search(r'src="/static/app\.js\?v=[0-9a-f]{10}"', html)
+    assert f and a and f.start() < a.start()
+
+
+def test_every_module_element_is_tagged():
+    html = _html()
+    for m in MODULES:
+        assert re.search(rf'<section\b[^>]*id="tab-{m}"[^>]*data-module="{m}"', html), m
+        assert len(re.findall(rf'data-tab="{m}"[^>]*data-module="{m}"|data-module="{m}"[^>]*data-tab="{m}"', html)) == 2, m
+
+
+def test_core_tabs_are_not_modules():
+    html = _html()
+    for t in ("portfolio", "triggers", "advice", "history", "settings"):
+        assert not re.search(rf'data-tab="{t}"[^>]*data-module=', html), t
+
+
+def test_settings_has_modules_group():
+    html = _html()
+    assert 'data-fold="settings-modules"' in html
+    assert 'id="moduleToggleList"' in html
+    assert html.index('data-fold="settings-modules"') < html.index('data-fold="settings-trading"')
+
+
+def test_features_js_is_served():
+    assert _client().get("/static/features.js").status_code == 200
