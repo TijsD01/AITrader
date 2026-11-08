@@ -2448,7 +2448,7 @@ async function loadMarketReview(market = null) {
           const up = pos.unrealized_pnl_eur >= 0;
           const sign = up ? '+' : '';
           return `<div class="kv"><span><span class="ui-num text-slate-50">${esc(pos.ticker)}</span> <span class="ui-num">${esc(pos.shares)} @ ${esc(pos.entry_price_native)} ${esc(pos.currency)}</span></span>
-            <span class="${up ? 'ui-gain' : 'ui-loss'}">${up ? '▲' : '▼'} ${sign}€${num(pos.unrealized_pnl_eur)} (${sign}${num(pos.unrealized_pnl_pct, 1)}%)</span></div>`;
+            <span class="${up ? 'ui-gain' : 'ui-loss'}">${up ? '▲' : '▼'} ${esc(signedEur(pos.unrealized_pnl_eur))} (${sign}${num(pos.unrealized_pnl_pct, 1)}%)</span></div>`;
         }).join('') + '</div></div>';
     }
 

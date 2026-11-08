@@ -515,6 +515,7 @@ button.ui-chip { cursor: pointer; }
 .kpi { padding: 2px 16px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .home-kpis > :first-child { padding-left: 4px; }
 .kpi .kpi-value { font: 600 20px/1.2 var(--font-mono); letter-spacing: -0.02em; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#learningRiskParams { white-space: normal; overflow: visible; }
 .kpi .kpi-sub, .trigger-link .kpi-sub { font-size: 12px; color: var(--text-3); line-height: 1.35; }
 
 .trigger-link, button.trigger-link {
