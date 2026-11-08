@@ -19,6 +19,14 @@ from src.trading.trigger_gate import (
 
 logger = logging.getLogger(__name__)
 
+ACTION_NL = {
+    "STRONG_BUY": "sterk koopadvies",
+    "BUY": "koopadvies",
+    "HOLD": "afwachten",
+    "SELL": "verkoopadvies",
+    "STRONG_SELL": "sterk verkoopadvies",
+}
+
 class TelegramAssistant:
     def __init__(self):
         self.token = settings.TELEGRAM_BOT_TOKEN
@@ -203,6 +211,58 @@ class TelegramAssistant:
 
         return await self.send_message(msg)
 
+    @staticmethod
+    def _action_nl(action: str) -> str:
+        """Committee verdict in plain Dutch."""
+        return ACTION_NL.get(str(action or "").upper(), str(action or "").replace("_", " ").lower())
+
+    @staticmethod
+    def _holding_lines(positions: List[Dict[str, Any]]) -> str:
+        """One short block per holding: result first, then the exit levels."""
+        from src.data.review_tracker import fmt_eur, fmt_num, fmt_pct
+        lines = []
+        for p in positions or []:
+            pnl_val = p.get("unrealized_pnl_eur", 0.0) or 0.0
+            icon = "🟢" if pnl_val > 0 else ("🔴" if pnl_val < 0 else "⚪")
+            curr = html.escape(str(p.get("currency", "EUR")))
+            shares = float(p.get("shares") or 0)
+            levels = []
+            if p.get("stop_loss_native"):
+                levels.append(f"verkoopt onder {fmt_num(p['stop_loss_native'])}")
+            if p.get("take_profit_native"):
+                levels.append(f"winst nemen bij {fmt_num(p['take_profit_native'])}")
+            lines.append(
+                f"{icon} <b>{html.escape(str(p.get('ticker', '')))}</b> "
+                f"<b>{fmt_eur(pnl_val, signed=True)} ({fmt_pct(p.get('unrealized_pnl_pct'))})</b>\n"
+                f"   {fmt_num(shares, 0 if shares.is_integer() else 4)} st. · "
+                f"gekocht {fmt_num(p.get('entry_price_native'))} · nu {fmt_num(p.get('current_price_native'))} {curr} · "
+                f"waarde {fmt_eur(p.get('current_value_eur'))}"
+                + (f"\n   {' · '.join(levels)}" if levels else "")
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _pick_status_nl(r: Dict[str, Any], trade: Optional[Dict[str, Any]], trig: Optional[Dict[str, Any]], min_score: int) -> str:
+        """What the bot did with this pick, in plain Dutch."""
+        from src.data.review_tracker import fmt_eur, fmt_num
+        status_type = r.get("status_type")
+        curr = html.escape(str(r.get("currency", "")))
+        if trade or status_type == "BOUGHT":
+            trade = trade or {}
+            return f"🚀 Gekocht: {trade.get('shares', '')} st. voor {fmt_eur(trade.get('total_eur', 0))}"
+        if trig or status_type == "TRIGGER_ARMED":
+            target = (trig or {}).get("target_price") or r.get("entry_trigger_price")
+            if target:
+                return f"🎯 Koopopdracht klaar: koopt als de koers {fmt_num(target)} {curr} raakt"
+            return "🎯 Koopopdracht klaar: koopt zodra de instapkoers geraakt wordt"
+        return {
+            "ALREADY_HELD": "💼 Zit al in de portefeuille, niet bijgekocht",
+            "TRIGGER_PENDING": "⏳ Er stond al een koopopdracht klaar, die wacht nog",
+            "INSUFFICIENT_CASH": "⏸️ Goed genoeg, maar geen vrij geld of vrije plek",
+            "SHARE_TOO_EXPENSIVE": "💶 Goed genoeg, maar 1 aandeel kost meer dan het budget per positie",
+            "REGIME_FILTER": "🌧️ Goed genoeg, maar de hele markt daalt (index onder 200-daags gemiddelde)",
+        }.get(status_type, f"👀 Alleen volgen: score onder {min_score}, dus nog niet kopen")
+
     async def notify_market_open(
         self,
         market: str,
@@ -214,125 +274,65 @@ class TelegramAssistant:
         positions: Optional[List[Dict[str, Any]]] = None,
         target_chat_id: Optional[Union[int, str]] = None
     ) -> str:
-        """Broadcasts full comprehensive Market Open & Daily Investment Advice report."""
-        from src.data.review_tracker import review_tracker
+        """Sends the opening review: summary first, then holdings, picks and last week."""
+        from src.data.review_tracker import review_tracker, fmt_eur, fmt_num, fmt_date_nl
         next_info = review_tracker.get_next_session_info()
         flag = "🇪🇺" if market.upper() == "EU" else "🇺🇸"
-        market_title = "EUROPEAN" if market.upper() == "EU" else "US"
-        now_str = datetime.datetime.now().strftime("%A, %b %d | %H:%M CET")
+        min_score = await get_trigger_min_score()
 
         cash = portfolio.get("cash_eur", 0.0)
         total_val = portfolio.get("total_value_eur", 10000.0)
-        cash_pct = round((cash / total_val) * 100, 1) if total_val > 0 else 100.0
+        cash_pct = round((cash / total_val) * 100) if total_val > 0 else 100
+        n_held = len(positions) if positions is not None else portfolio.get("open_positions_count", 0)
 
-        # Build Current Holdings Section
-        holdings_blocks = []
-        if positions:
-            for p in positions:
-                pnl_val = p.get("unrealized_pnl_eur", 0.0) or 0.0
-                pnl_pct = p.get("unrealized_pnl_pct", 0.0) or 0.0
-                sign = "+" if pnl_val >= 0 else ""
-                icon = "🟢" if pnl_val >= 0 else ("🔴" if pnl_val < 0 else "⚪")
-                sl = p.get("stop_loss_native")
-                tp = p.get("take_profit_native")
-                sl_str = f"<code>{sl}</code>" if sl else "<code>None</code>"
-                tp_str = f"<code>{tp}</code>" if tp else "<code>None</code>"
-                curr_pr = p.get("current_price_native", 0.0)
-                entry_pr = p.get("entry_price_native", 0.0)
-                shs = p.get("shares", 0)
-                curr = p.get("currency", "EUR")
-                val_eur = p.get("current_value_eur", 0.0)
+        # What the bot did this session
+        bought = [t.get("ticker") for t in executed_trades or []]
+        armed = [t.get("ticker") for t in armed_triggers or []]
+        did = []
+        if bought:
+            did.append(f"{len(bought)} gekocht ({', '.join(bought)})")
+        if armed:
+            did.append(f"{len(armed)} koopopdracht{'en' if len(armed) > 1 else ''} klaargezet ({', '.join(armed)})")
+        did_line = "Gedaan: " + " en ".join(did) + "." if did else "Gedaan: niets gekocht, geen nieuwe koopopdrachten."
+        if armed:
+            did_line += " De bot koopt zelf zodra de koers het instapniveau raakt."
 
-                holdings_blocks.append(
-                    f"{icon} <b>{p['ticker']}</b> ({shs} shs @ {entry_pr} {curr})\n"
-                    f"   • Current: <b>{curr_pr} {curr}</b> | Value: <b>€{val_eur:,.2f}</b>\n"
-                    f"   • Unrealized PnL: <b>{sign}€{pnl_val:.2f} ({sign}{pnl_pct:.1f}%)</b>\n"
-                    f"   • Trailing Stop: {sl_str} | Target: {tp_str}"
-                )
-            holdings_text = "\n\n".join(holdings_blocks)
-        else:
-            holdings_text = "• <i>No open stock positions currently held (100% in cash buffer).</i>"
+        holdings_text = self._holding_lines(positions or []) or "<i>Geen aandelen. Alles staat in cash.</i>"
 
-        # Build Candidate Advice Cards
-        candidates_blocks = []
+        cards = []
         for idx, r in enumerate(reports[:4], 1):
             ticker = r.get("ticker")
             name = html.escape(str(r.get("name", ticker)))
-            score = r.get("consensus_score", 0)
-            action = r.get("action", "BUY")
-            price = r.get("price", 0)
             curr = html.escape(str(r.get("currency", "USD")))
-            
-            action_icon = "🟢" if "BUY" in action else ("🔴" if "SELL" in action else "🟡")
-            tech = r.get("technical", {})
-            fund = r.get("fundamental", {})
+            action = str(r.get("action", "BUY"))
+            icon = "🟢" if "BUY" in action else ("🔴" if "SELL" in action else "🟡")
             risk = r.get("risk", {})
-
-            sl = html.escape(str(risk.get("stop_loss_price", "N/A")))
-            tp = html.escape(str(risk.get("take_profit_price", "N/A")))
-            rr = risk.get("risk_reward_ratio", 2.0)
-            
-            # Check execution / position status of this stock
-            status_type = r.get("status_type")
-            auto_trade = next((t for t in (executed_trades or []) if t.get("ticker") == ticker), None)
-            armed_trig = next((t for t in (armed_triggers or []) if t.get("ticker") == ticker), None)
-
-            if auto_trade or status_type == "BOUGHT":
-                trade = auto_trade or {}
-                status_str = f"🚀 <b>AUTO-BOUGHT:</b> {trade.get('shares', '')} shs for €{trade.get('total_eur', 0):.2f}"
-            elif armed_trig or status_type == "TRIGGER_ARMED":
-                trig = armed_trig or {}
-                target_pr = trig.get("target_price", r.get("entry_trigger_price", "pullback"))
-                status_str = f"🎯 <b>TRIGGER ARMED:</b> Limit pullback order at <code>{target_pr} {curr}</code>"
-            elif status_type == "ALREADY_HELD":
-                status_str = f"💼 <b>CURRENT HOLDING:</b> Position already active in portfolio"
-            elif status_type == "TRIGGER_PENDING":
-                status_str = f"⏳ <b>TRIGGER PENDING:</b> Limit trigger waiting for entry pullback"
-            elif status_type == "INSUFFICIENT_CASH":
-                status_str = f"⏸️ <b>ON RADAR:</b> High conviction ({score}/100), awaiting available cash"
-            elif status_type == "SHARE_TOO_EXPENSIVE":
-                status_str = f"💶 <b>ON RADAR:</b> High conviction ({score}/100), but one share costs more than the position budget"
-            elif status_type == "REGIME_FILTER":
-                status_str = f"🌧️ <b>ON RADAR:</b> High conviction ({score}/100), but the market index is below its 200-day average"
-            else:
-                status_str = f"👀 <b>STATUS:</b> On Radar (Conviction: {score}/100)"
-
-            tech_summary = html.escape(str(tech.get("analysis_summary", "")))
-            if len(tech_summary) > 130:
-                tech_summary = tech_summary[:127] + "..."
-
+            trade = next((t for t in executed_trades or [] if t.get("ticker") == ticker), None)
+            trig = next((t for t in armed_triggers or [] if t.get("ticker") == ticker), None)
             card = (
-                f"{idx}. {action_icon} <b>{ticker}</b> — {name}\n"
-                f"   • <b>Verdict:</b> {action.replace('_', ' ')} (Conviction: <b>{score}/100</b>)\n"
-                f"   • <b>Price:</b> {price} {curr}\n"
-                f"   • <b>Technical:</b> {tech.get('bias', 'NEUTRAL')} ({tech_summary})\n"
-                f"   • <b>Fundamental:</b> {fund.get('valuation', 'FAIR')} valuation ({fund.get('health', 'MODERATE')} health)\n"
-                f"   • <b>Risk Parameters:</b>\n"
-                f"     ↳ Stop-Loss: <code>{sl}</code>\n"
-                f"     ↳ Take-Profit: <code>{tp}</code> (R:R {rr}:1)\n"
-                f"   • {status_str}"
+                f"{idx}. {icon} <b>{ticker}</b> {name}\n"
+                f"   {self._action_nl(action).capitalize()} · score <b>{r.get('consensus_score', 0)}</b>/100 · koers {fmt_num(r.get('price'))} {curr}\n"
+                f"   {self._pick_status_nl(r, trade, trig, min_score)}"
             )
-            candidates_blocks.append(card)
+            if "BUY" in action and risk.get("stop_loss_price") and risk.get("take_profit_price"):
+                card += f"\n   Na kopen: verkoopt onder {fmt_num(risk['stop_loss_price'])} · winst nemen bij {fmt_num(risk['take_profit_price'])}"
+            cards.append(card)
+        picks_text = "\n\n".join(cards) if cards else "<i>Geen aandelen door de filters gekomen.</i>"
 
-        candidates_text = "\n\n".join(candidates_blocks) if candidates_blocks else "• <i>No high-momentum setups passed filtering this session.</i>"
-
-        comparison_section = ""
-        if comparison and comparison.get("has_history"):
-            comparison_section = f"\n\n{comparison['text_summary']}"
+        comparison_section = f"\n\n{comparison['text_summary']}" if comparison and comparison.get("has_history") else ""
 
         text = (
-            f"🔔 {flag} <b>{market_title} MARKET OPEN & DAILY ADVICE</b>\n"
-            f"📅 <code>{now_str}</code>\n\n"
-            f"💼 <b>PORTFOLIO STATUS:</b>\n"
-            f"• Total Equity: <b>€{total_val:,.2f}</b>\n"
-            f"• Available Cash: €{cash:,.2f} ({cash_pct}%)\n"
-            f"• Open Holdings: {len(positions) if positions is not None else portfolio.get('open_positions_count', 0)} / {settings.MAX_POSITIONS} max\n\n"
-            f"📊 <b>CURRENT STOCK HOLDINGS:</b>\n"
+            f"🔔 {flag} <b>{market.upper()}-beurs open</b> · {fmt_date_nl(datetime.datetime.now())}\n\n"
+            f"📌 <b>In het kort</b>\n"
+            f"Portefeuille <b>{fmt_eur(total_val)}</b> · vrij geld {fmt_eur(cash)} ({cash_pct}%)\n"
+            f"{did_line}\n\n"
+            f"💼 <b>Bezit</b> ({n_held} van max {settings.MAX_POSITIONS})\n"
             f"{holdings_text}\n\n"
-            f"🎯 <b>TOP COMMITTEE STOCK RECOMMENDATIONS:</b>\n\n"
-            f"{candidates_text}"
+            f"🎯 <b>Kansen vandaag</b>\n"
+            f"<i>Score = hoe zeker de AI-commissie is (0-100). Vanaf {min_score} zet de bot een koopopdracht klaar.</i>\n\n"
+            f"{picks_text}"
             f"{comparison_section}\n\n"
-            f"🛡️ <i>Risk guardrails & trailing stops active. Next update: <b>{next_info['formatted']}</b>.</i>"
+            f"⏭️ Volgende update: <b>{next_info['formatted']}</b>"
         )
         await self.send_message(text, chat_id=target_chat_id)
         if self.chat_id and target_chat_id and str(self.chat_id) != str(target_chat_id):
@@ -348,74 +348,41 @@ class TelegramAssistant:
         comparison: Optional[Dict[str, Any]] = None,
         target_chat_id: Optional[Union[int, str]] = None
     ) -> str:
-        """Broadcasts full comprehensive Market Close & Portfolio Performance wrap-up."""
-        from src.data.review_tracker import review_tracker
+        """Sends the closing review: summary first, then holdings, closed trades and last week."""
+        from src.data.review_tracker import review_tracker, fmt_eur, fmt_pct, fmt_date_nl
         next_info = review_tracker.get_next_session_info()
         flag = "🇪🇺" if market.upper() == "EU" else "🇺🇸"
-        market_title = "EUROPEAN" if market.upper() == "EU" else "US"
-        now_str = datetime.datetime.now().strftime("%A, %b %d | %H:%M CET")
 
         total_val = portfolio.get("total_value_eur", 10000.0)
         cash = portfolio.get("cash_eur", 10000.0)
-        equity = portfolio.get("equity_eur", 0.0)
         unrealized = portfolio.get("unrealized_pnl_eur", 0.0)
         total_ret = portfolio.get("total_return_pct", 0.0)
 
-        ret_sign = "+" if total_ret >= 0 else ""
-        unrealized_sign = "+" if unrealized >= 0 else ""
+        holdings_text = self._holding_lines(positions) or "<i>Geen aandelen. Alles staat in cash.</i>"
 
-        # Open positions summary
-        pos_lines = []
-        for p in positions:
-            pnl_val = p.get("unrealized_pnl_eur", 0.0) or 0.0
-            pnl_pct = p.get("unrealized_pnl_pct", 0.0) or 0.0
-            sign = "+" if pnl_val >= 0 else ""
-            icon = "🟢" if pnl_val >= 0 else "🔴"
-            p_ticker = html.escape(str(p.get("ticker", "")))
-            curr = html.escape(str(p.get("currency", "EUR")))
-
-            pos_lines.append(
-                f"{icon} <b>{p_ticker}</b> ({p.get('shares')} shares)\n"
-                f"   • Entry: {p.get('entry_price_native')} ➔ Current: <b>{p.get('current_price_native')} {curr}</b>\n"
-                f"   • Value: €{p.get('current_value_eur', 0):.2f} (PnL: <b>{sign}€{pnl_val:.2f} / {sign}{pnl_pct}%</b>)\n"
-                f"   • Stop: <code>{html.escape(str(p.get('stop_loss_native', 'None')))}</code> | Target: <code>{html.escape(str(p.get('take_profit_native', 'None')))}</code>"
-            )
-
-        pos_text = "\n\n".join(pos_lines) if pos_lines else "• <i>No open positions currently held overnight.</i>"
-
-        # Closed trades today
         closed_lines = []
-        for t in closed_trades_today:
+        for t in closed_trades_today or []:
             pnl = t.get("realized_pnl_eur", 0.0) or 0.0
-            pnl_pct = t.get("realized_pnl_pct", 0.0) or 0.0
-            sign = "+" if pnl >= 0 else ""
-            icon = "💰" if pnl >= 0 else "⚠️"
-            t_ticker = html.escape(str(t.get("ticker", "")))
-            t_order = html.escape(str(t.get("order_type", "SELL")))
-            t_rat = html.escape(str(t.get("rationale", "")))
             closed_lines.append(
-                f"{icon} <b>{t_order} {t_ticker}</b>: PnL {sign}€{pnl:.2f} ({sign}{pnl_pct}%) — <i>{t_rat}</i>"
+                f"{'💰' if pnl >= 0 else '⚠️'} <b>{html.escape(str(t.get('ticker', '')))}</b> verkocht: "
+                f"<b>{fmt_eur(pnl, signed=True)} ({fmt_pct(t.get('realized_pnl_pct'))})</b>"
+                + (f" · <i>{html.escape(str(t['rationale']))}</i>" if t.get("rationale") else "")
             )
-        closed_text = "\n".join(closed_lines) if closed_lines else "• <i>No positions exited during this session.</i>"
+        closed_text = "\n".join(closed_lines) if closed_lines else "<i>Vandaag niets verkocht.</i>"
 
-        comparison_section = ""
-        if comparison and comparison.get("has_history"):
-            comparison_section = f"\n\n{comparison['text_summary']}"
+        comparison_section = f"\n\n{comparison['text_summary']}" if comparison and comparison.get("has_history") else ""
 
         text = (
-            f"📊 {flag} <b>{market_title} MARKET CLOSE & PORTFOLIO WRAP-UP</b>\n"
-            f"📅 <code>{now_str}</code>\n\n"
-            f"📈 <b>PORTFOLIO CLOSE VALUATION:</b>\n"
-            f"• Total Portfolio Value: <b>€{total_val:,.2f}</b> ({ret_sign}{total_ret}% total)\n"
-            f"• Unrealized PnL: <b>{unrealized_sign}€{unrealized:.2f}</b>\n"
-            f"• Cash Balance: €{cash:,.2f}\n"
-            f"• Invested Equity: €{equity:,.2f}\n\n"
-            f"💼 <b>OVERNIGHT HOLDINGS ({len(positions)}):</b>\n\n"
-            f"{pos_text}\n\n"
-            f"📜 <b>TRADES CLOSED TODAY:</b>\n"
+            f"📊 {flag} <b>{market.upper()}-beurs dicht</b> · {fmt_date_nl(datetime.datetime.now())}\n\n"
+            f"📌 <b>In het kort</b>\n"
+            f"Portefeuille <b>{fmt_eur(total_val)}</b> ({fmt_pct(total_ret)} sinds start)\n"
+            f"Nog open winst/verlies: <b>{fmt_eur(unrealized, signed=True)}</b> · vrij geld {fmt_eur(cash)}\n\n"
+            f"💼 <b>Bezit voor vannacht</b> ({len(positions)})\n"
+            f"{holdings_text}\n\n"
+            f"💰 <b>Vandaag gesloten</b>\n"
             f"{closed_text}"
             f"{comparison_section}\n\n"
-            f"🌐 <b>NEXT UP:</b> {next_info['formatted']}."
+            f"⏭️ Volgende update: <b>{next_info['formatted']}</b>"
         )
         await self.send_message(text, chat_id=target_chat_id)
         if self.chat_id and target_chat_id and str(self.chat_id) != str(target_chat_id):
