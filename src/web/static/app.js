@@ -1827,6 +1827,8 @@ async function refreshSystemStatus() {
 
 // Kill switch ---------------------------------------------------------
 function renderKillSwitch() {
+  const halted = document.getElementById('haltedChip');
+  if (halted) halted.classList.toggle('hidden', !killSwitchActive);
   document.querySelectorAll('#killSwitchBtn, #killSwitchBtnDesktop').forEach(btn => {
     const label = btn.querySelector('.kill-switch-label');
     if (killSwitchActive) {

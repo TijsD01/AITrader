@@ -353,6 +353,9 @@ button.ui-chip { cursor: pointer; }
 .status-pill-btn:hover { color: var(--text); }
 .mode-tag { font: 600 11px/1 var(--font-mono); letter-spacing: .06em; color: var(--gain); }
 .mode-tag.is-live { color: var(--loss); }
+/* Kill switch engaged: visible on every tab, tap goes to the Home control */
+.halted-chip { display: inline-flex; align-items: center; gap: 4px; min-height: 24px; padding: 0 8px; border: 0; border-radius: 999px; background: var(--danger-surface); color: var(--danger-text); font: 600 11px/1 var(--font-mono); letter-spacing: .04em; cursor: pointer; }
+.halted-chip.hidden { display: none; }
 
 /* Desktop nav: centered segmented control. `display` stays on the plain
    .seg-btn class so Tailwind's later .hidden (set by features.js) still wins. */
@@ -408,9 +411,9 @@ button.ui-chip { cursor: pointer; }
   transition: background-color .18s ease, color .18s ease;
 }
 .bottom-nav-btn .nav-pill i { font-size: 17px; }
-.bottom-nav-btn.active { color: var(--text); }
 .bottom-nav-btn.active { color: var(--accent-strong); }
-.bottom-nav-btn.active .nav-pill { color: var(--accent-strong); }
+/* Filled pill: the current tab never depends on colour alone */
+.bottom-nav-btn.active .nav-pill { color: var(--accent-strong); background: var(--accent-soft); }
 .bottom-nav-btn b {
   position: absolute; top: -4px; right: 4px;
   min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;

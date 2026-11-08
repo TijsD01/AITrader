@@ -70,6 +70,7 @@
         <!-- Status pill: trading mode + broker; tap to test the broker. Market, auto-buy and kill switch live on Home. -->
         <div class="status-pill min-w-0">
           <span id="tradingModeBadge" class="mode-tag">PAPER</span>
+          <button type="button" id="haltedChip" onclick="switchTab('portfolio')" class="halted-chip hidden" title="Kill switch is active: new buying is blocked. Open Home to resume."><i class="fa-solid fa-power-off" aria-hidden="true"></i>HALTED</button>
           <button type="button" onclick="pingBrokerStatus(true)" id="mobileBrokerStatusPill" class="status-pill-btn min-w-0" title="Test the broker connection">
             <span id="mobileBrokerStatusDot" class="ui-dot"></span>
             <span id="mobileBrokerStatusText" class="truncate">Broker: Checking...</span>
