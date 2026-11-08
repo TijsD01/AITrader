@@ -3,9 +3,14 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#0A0D13">
-  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#F5F5F7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0A0D13" media="(prefers-color-scheme: dark)">
+  <meta name="color-scheme" content="light dark">
   <title>AlphaAgent</title>
+  <script>
+    // Tailwind `dark:` variants only; the colour tokens switch by media query in style.css.
+    try { document.documentElement.classList.toggle('dark', matchMedia('(prefers-color-scheme: dark)').matches); } catch (e) {}
+  </script>
   
   <!-- Tailwind CSS & FontAwesome -->
   <script src="https://cdn.tailwindcss.com/3.4.1"></script>
@@ -15,7 +20,7 @@
       theme: {
         extend: {
           fontFamily: {
-            sans: ['"IBM Plex Sans"', 'system-ui', '-apple-system', '"Segoe UI"', 'sans-serif'],
+            sans: ['-apple-system', 'BlinkMacSystemFont', '"SF Pro Text"', '"Inter"', 'system-ui', '"Segoe UI"', 'sans-serif'],
             mono: ['"IBM Plex Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace']
           },
           colors: {
@@ -25,14 +30,20 @@
               600: '#059669',
               700: '#047857'
             },
-            accent: { DEFAULT: '#8EA2FF', strong: '#B4C1FF', soft: '#222B4D' },
-            // Design tokens (see style.css :root). Existing class names keep working.
-            darkBg: '#0A0D13',
-            cardBg: '#121722',
-            borderCol: '#242C3B',
+            // Design tokens (see style.css :root). Every colour reads a CSS variable,
+            // so existing class names follow the light/dark theme.
+            accent: { DEFAULT: 'rgb(var(--rgb-accent) / <alpha-value>)', strong: 'rgb(var(--rgb-accent-strong) / <alpha-value>)', soft: 'rgb(var(--rgb-accent-soft) / <alpha-value>)' },
+            gain: 'rgb(var(--rgb-gain) / <alpha-value>)',
+            loss: 'rgb(var(--rgb-loss) / <alpha-value>)',
+            warn: 'rgb(var(--rgb-warn) / <alpha-value>)',
+            info: 'rgb(var(--rgb-info) / <alpha-value>)',
+            violet: { 300: 'rgb(var(--rgb-violet) / <alpha-value>)' },
+            pink: { 300: 'rgb(var(--rgb-pink) / <alpha-value>)' },
+            darkBg: 'rgb(var(--rgb-bg) / <alpha-value>)',
+            cardBg: 'rgb(var(--rgb-surface) / <alpha-value>)',
+            borderCol: 'rgb(var(--rgb-line) / <alpha-value>)',
             slate: {
-              50: '#F6F8FB', 100: '#EEF1F6', 200: '#D9DEE7', 300: '#C1C8D4', 400: '#A3ADBD',
-              500: '#7D8799', 600: '#5A6476', 700: '#2B3446', 800: '#1A2130', 900: '#0F141D', 950: '#080B10'
+              50: 'rgb(var(--rgb-slate-50) / <alpha-value>)', 100: 'rgb(var(--rgb-slate-100) / <alpha-value>)', 200: 'rgb(var(--rgb-slate-200) / <alpha-value>)', 300: 'rgb(var(--rgb-slate-300) / <alpha-value>)', 400: 'rgb(var(--rgb-slate-400) / <alpha-value>)', 500: 'rgb(var(--rgb-slate-500) / <alpha-value>)', 600: 'rgb(var(--rgb-slate-600) / <alpha-value>)', 700: 'rgb(var(--rgb-slate-700) / <alpha-value>)', 800: 'rgb(var(--rgb-slate-800) / <alpha-value>)', 900: 'rgb(var(--rgb-slate-900) / <alpha-value>)', 950: 'rgb(var(--rgb-slate-950) / <alpha-value>)'
             }
           }
         }
@@ -41,53 +52,45 @@
   </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js" integrity="sha384-dug+JxfBvklEQdJ4AYuBBAIScUz0bVN73xpy273gcAwHjb3qI0fXmuYNaNfdyYJG" crossorigin="anonymous"></script>
   <link rel="stylesheet" href="/static/style.css">
 </head>
-<body class="bg-darkBg text-slate-100 min-h-screen md:pb-8 flex flex-col font-sans antialiased overflow-x-hidden selection:bg-indigo-500 selection:text-white">
+<body class="bg-darkBg text-slate-100 min-h-screen md:pb-8 flex flex-col font-sans antialiased overflow-x-clip selection:bg-indigo-500 selection:text-white">
 
-  <!-- App header: brand, mode and broker status, then Refresh + Scan -->
+  <!-- App header: logo, one status pill (mode + broker), then Refresh + Scan -->
   <header class="app-header">
-    <div class="px-4 py-2.5 sm:px-6 flex items-center justify-between gap-3 max-w-7xl mx-auto w-full">
+    <div class="app-header-row px-4 sm:px-6 flex items-center justify-between gap-2 sm:gap-3 max-w-7xl mx-auto w-full">
       <div class="flex items-center gap-2.5 min-w-0">
         <div class="app-logo" aria-hidden="true">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l5-5 4 4 8-9"></path><path d="M15 7h5v5"></path></svg>
         </div>
-        <div class="min-w-0">
-          <h1 class="text-base font-bold tracking-tight text-white leading-tight">AlphaAgent</h1>
-          <div class="flex items-center gap-1.5 text-xs text-slate-400 leading-tight mt-0.5 min-w-0">
-            <span id="tradingModeBadge" class="mode-tag">PAPER</span>
-            <span aria-hidden="true">&middot;</span>
-            <button type="button" onclick="pingBrokerStatus(true)" id="mobileBrokerStatusPill" class="flex items-center gap-1.5 min-w-0 text-slate-400 hover:text-white" title="Test the broker connection">
-              <span id="mobileBrokerStatusDot" class="ui-dot"></span>
-              <span id="mobileBrokerStatusText" class="truncate">Broker: Checking...</span>
-            </button>
-          </div>
+        <h1 class="app-brand max-sm:sr-only">AlphaAgent</h1>
+        <!-- Status pill: trading mode + broker; tap to test the broker. Market, auto-buy and kill switch live on Home. -->
+        <div class="status-pill min-w-0">
+          <span id="tradingModeBadge" class="mode-tag">PAPER</span>
+          <button type="button" id="haltedChip" onclick="switchTab('portfolio')" class="halted-chip hidden" title="Kill switch is active: new buying is blocked. Open Home to resume."><i class="fa-solid fa-power-off" aria-hidden="true"></i>HALTED</button>
+          <button type="button" onclick="pingBrokerStatus(true)" id="mobileBrokerStatusPill" class="status-pill-btn min-w-0" title="Test the broker connection">
+            <span id="mobileBrokerStatusDot" class="ui-dot"></span>
+            <span id="mobileBrokerStatusText" class="truncate">Broker: Checking...</span>
+          </button>
         </div>
       </div>
 
-      <div class="flex items-center gap-2 shrink-0">
-        <!-- Desktop-only status badges -->
-        <button onclick="pingBrokerStatus(true)" id="brokerStatusBadge" type="button" title="Broker connection status (click to test)" class="hidden">
-          <span id="brokerStatusDot" class="ui-dot"></span>
-          <span id="brokerStatusText">Broker: Checking...</span>
-        </button>
-        <div id="marketStatusBadge" class="hidden xl:flex ui-chip">
-          <i class="fa-regular fa-clock"></i>
-          <span id="marketStatusText">Markets: Checking...</span>
+      <div class="flex items-center gap-1.5 sm:gap-2 shrink-0">
+        <!-- Legacy header badges: app.js still writes to them; Home shows the same status -->
+        <div class="hidden" aria-hidden="true">
+          <button onclick="pingBrokerStatus(true)" id="brokerStatusBadge" type="button" tabindex="-1" class="hidden">
+            <span id="brokerStatusDot" class="ui-dot"></span>
+            <span id="brokerStatusText">Broker: Checking...</span>
+          </button>
+          <div id="marketStatusBadge" class="hidden"><span id="marketStatusText">Markets: Checking...</span></div>
+          <div id="autoBuyBadge" class="hidden"><span id="autoBuyDot" class="ui-dot"></span><span id="autoBuyStatusText">Active</span></div>
+          <button onclick="toggleKillSwitch()" id="killSwitchBtnDesktop" type="button" tabindex="-1" class="hidden"><span class="kill-switch-label">Kill Switch</span></button>
         </div>
-        <div id="autoBuyBadge" class="hidden xl:flex ui-chip">
-          <span id="autoBuyDot" class="ui-dot"></span>
-          <span class="hidden lg:inline">Auto-buy:</span> <span id="autoBuyStatusText">Active</span>
-        </div>
-        <button onclick="toggleKillSwitch()" id="killSwitchBtnDesktop" type="button" title="Emergency kill switch: halt or resume all new automated buying" class="hidden md:flex ui-btn ui-btn-sm ui-btn-danger">
-          <i class="fa-solid fa-power-off"></i>
-          <span class="kill-switch-label">Kill Switch</span>
-        </button>
 
-        <button onclick="refreshMarketData()" id="refreshDataBtn" type="button" aria-label="Refresh data" title="Pull fresh prices and account balance, resize triggers, and run trigger &amp; stop checks now" class="ui-btn ui-icon-btn">
+        <button onclick="refreshMarketData()" id="refreshDataBtn" type="button" aria-label="Refresh data" title="Pull fresh prices and account balance, resize triggers, and run trigger &amp; stop checks now" class="ui-btn ui-btn-quiet ui-icon-btn">
           <i class="fa-solid fa-arrows-rotate"></i>
         </button>
         <button onclick="triggerQuickScan()" id="scanBtn" type="button" aria-label="Run scan" class="ui-btn ui-btn-primary px-3.5">
@@ -99,39 +102,39 @@
   </header>
 
   <!-- Backdrop for the mobile "More" sheet -->
-  <div id="mobileDropdownBackdrop" onclick="closeMobileDropdown()" class="hidden md:hidden fixed inset-0 z-30 bg-black/60 backdrop-blur-sm"></div>
+  <div id="mobileDropdownBackdrop" onclick="closeMobileDropdown()" class="hidden md:hidden fixed inset-0 z-30 bg-black/30 dark:bg-black/60 backdrop-blur-sm"></div>
 
   <!-- Mobile "More" sheet (floats above the bottom dock) -->
   <div id="mobileDropdownMenu" class="hidden md:hidden fixed z-[35] p-4" role="dialog" aria-label="More sections">
     <div class="flex items-center justify-between px-1 pb-3">
-      <span class="text-base font-bold text-white">More</span>
+      <span class="text-base font-bold text-slate-50">More</span>
       <span class="text-xs text-slate-500 font-mono">EUR &euro;</span>
     </div>
     <div class="grid grid-cols-2 gap-2.5">
-      <button type="button" onclick="switchTab('screener')" class="mobile-dropdown-item more-tile" data-tab="screener">
-        <i class="fa-solid fa-magnifying-glass-chart text-cyan-300"></i>
+      <button type="button" onclick="switchTab('screener')" class="mobile-dropdown-item more-tile" data-tab="screener" data-module="screener">
+        <i class="fa-solid fa-magnifying-glass-chart text-info"></i>
         <span><span class="more-title">Screener</span><span class="more-sub">EU &amp; US momentum</span></span>
-        <i class="fa-solid fa-check text-xs text-indigo-300 mobile-active-check hidden absolute top-3.5 right-3.5"></i>
+        <i class="fa-solid fa-check text-xs text-accent mobile-active-check hidden absolute top-3.5 right-3.5"></i>
       </button>
-      <button type="button" onclick="switchTab('debate')" class="mobile-dropdown-item more-tile" data-tab="debate">
+      <button type="button" onclick="switchTab('debate')" class="mobile-dropdown-item more-tile" data-tab="debate" data-module="debate">
         <i class="fa-solid fa-comments text-violet-300"></i>
         <span><span class="more-title">Debate</span><span class="more-sub">Ask the committee</span></span>
-        <i class="fa-solid fa-check text-xs text-indigo-300 mobile-active-check hidden absolute top-3.5 right-3.5"></i>
+        <i class="fa-solid fa-check text-xs text-accent mobile-active-check hidden absolute top-3.5 right-3.5"></i>
       </button>
-      <button type="button" onclick="switchTab('shadow')" class="mobile-dropdown-item more-tile" data-tab="shadow">
+      <button type="button" onclick="switchTab('shadow')" class="mobile-dropdown-item more-tile" data-tab="shadow" data-module="shadow">
         <i class="fa-solid fa-flask text-pink-300"></i>
         <span><span class="more-title">Shadow</span><span class="more-sub">Paper strategy test</span></span>
-        <i class="fa-solid fa-check text-xs text-indigo-300 mobile-active-check hidden absolute top-3.5 right-3.5"></i>
+        <i class="fa-solid fa-check text-xs text-accent mobile-active-check hidden absolute top-3.5 right-3.5"></i>
       </button>
-      <button type="button" onclick="switchTab('memory')" class="mobile-dropdown-item more-tile" data-tab="memory">
-        <i class="fa-solid fa-brain text-amber-300"></i>
+      <button type="button" onclick="switchTab('memory')" class="mobile-dropdown-item more-tile" data-tab="memory" data-module="memory">
+        <i class="fa-solid fa-brain text-warn"></i>
         <span><span class="more-title">Memory</span><span class="more-sub">Agent memory hub</span></span>
-        <i class="fa-solid fa-check text-xs text-indigo-300 mobile-active-check hidden absolute top-3.5 right-3.5"></i>
+        <i class="fa-solid fa-check text-xs text-accent mobile-active-check hidden absolute top-3.5 right-3.5"></i>
       </button>
       <button type="button" onclick="switchTab('settings')" class="mobile-dropdown-item more-tile" data-tab="settings">
-        <i class="fa-solid fa-sliders text-emerald-300"></i>
+        <i class="fa-solid fa-sliders text-gain"></i>
         <span><span class="more-title">Settings</span><span class="more-sub">Mode, broker, risk</span></span>
-        <i class="fa-solid fa-check text-xs text-indigo-300 mobile-active-check hidden absolute top-3.5 right-3.5"></i>
+        <i class="fa-solid fa-check text-xs text-accent mobile-active-check hidden absolute top-3.5 right-3.5"></i>
       </button>
     </div>
     <button type="button" onclick="pingBrokerStatus(true); closeMobileDropdown();" class="ui-btn w-full mt-3">
@@ -148,34 +151,34 @@
     <button type="button" onclick="toggleMobileDropdown()" id="mobileMenuDropdownBtn" class="bottom-nav-btn" data-more="1" aria-haspopup="dialog" aria-expanded="false"><span class="nav-pill"><i id="mobileDropdownActiveIcon" class="fa-solid fa-table-cells-large"></i></span><span id="mobileDropdownActiveText">More</span></button>
   </nav>
 
-  <!-- Desktop tab bar -->
-  <nav class="hidden md:block border-b border-borderCol" aria-label="Sections">
-    <div class="max-w-7xl mx-auto px-6 py-2 flex gap-1 text-sm font-medium overflow-x-auto scrollbar-none">
-      <button onclick="switchTab('portfolio')" class="tab-btn px-3.5 py-2 whitespace-nowrap active-tab" data-tab="portfolio"><i class="fa-solid fa-house mr-2"></i>Home</button>
-      <button onclick="switchTab('triggers')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="triggers"><i class="fa-solid fa-crosshairs mr-2"></i>Triggers</button>
-      <button onclick="switchTab('advice')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="advice"><i class="fa-regular fa-lightbulb mr-2"></i>Advice</button>
-      <button onclick="switchTab('history')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="history"><i class="fa-solid fa-clock-rotate-left mr-2"></i>History</button>
-      <button onclick="switchTab('screener')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="screener"><i class="fa-solid fa-magnifying-glass-chart mr-2"></i>Screener</button>
-      <button onclick="switchTab('debate')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="debate"><i class="fa-solid fa-comments mr-2"></i>Debate</button>
-      <button onclick="switchTab('shadow')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="shadow"><i class="fa-solid fa-flask mr-2"></i>Shadow</button>
-      <button onclick="switchTab('memory')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="memory"><i class="fa-solid fa-brain mr-2"></i>Memory</button>
-      <button onclick="switchTab('settings')" class="tab-btn px-3.5 py-2 whitespace-nowrap" data-tab="settings"><i class="fa-solid fa-sliders mr-2"></i>Settings</button>
+  <!-- Desktop nav: centered segmented control (module tabs hidden by features.js) -->
+  <nav class="hidden md:flex justify-center px-6 pt-3" aria-label="Sections">
+    <div class="seg-nav scrollbar-none">
+      <button onclick="switchTab('portfolio')" class="tab-btn seg-btn active-tab" aria-current="page" data-tab="portfolio"><i class="fa-solid fa-house" aria-hidden="true"></i>Home</button>
+      <button onclick="switchTab('triggers')" class="tab-btn seg-btn" data-tab="triggers"><i class="fa-solid fa-crosshairs" aria-hidden="true"></i>Triggers</button>
+      <button onclick="switchTab('advice')" class="tab-btn seg-btn" data-tab="advice"><i class="fa-regular fa-lightbulb" aria-hidden="true"></i>Advice</button>
+      <button onclick="switchTab('history')" class="tab-btn seg-btn" data-tab="history"><i class="fa-solid fa-clock-rotate-left" aria-hidden="true"></i>History</button>
+      <button onclick="switchTab('screener')" class="tab-btn seg-btn" data-tab="screener" data-module="screener"><i class="fa-solid fa-magnifying-glass-chart" aria-hidden="true"></i>Screener</button>
+      <button onclick="switchTab('debate')" class="tab-btn seg-btn" data-tab="debate" data-module="debate"><i class="fa-solid fa-comments" aria-hidden="true"></i>Debate</button>
+      <button onclick="switchTab('shadow')" class="tab-btn seg-btn" data-tab="shadow" data-module="shadow"><i class="fa-solid fa-flask" aria-hidden="true"></i>Shadow</button>
+      <button onclick="switchTab('memory')" class="tab-btn seg-btn" data-tab="memory" data-module="memory"><i class="fa-solid fa-brain" aria-hidden="true"></i>Memory</button>
+      <button onclick="switchTab('settings')" class="tab-btn seg-btn" data-tab="settings"><i class="fa-solid fa-sliders" aria-hidden="true"></i>Settings</button>
     </div>
   </nav>
 
   <!-- Main Content Container -->
-  <main class="flex-1 max-w-7xl w-full mx-auto px-4 pt-2 pb-4 sm:p-6 space-y-4 sm:space-y-6 min-w-0">
+  <main class="flex-1 max-w-7xl w-full mx-auto px-4 pt-3 pb-4 sm:px-6 sm:pt-6 sm:pb-6 space-y-4 sm:space-y-6 min-w-0">
 
     <!-- TAB 1: HOME (PORTFOLIO) -->
-    <section id="tab-portfolio" class="tab-content space-y-3.5 sm:space-y-5">
+    <section id="tab-portfolio" class="tab-content space-y-6 md:space-y-8">
 
       <!-- Broker offline alert (LIVE mode only) -->
       <div id="brokerDisconnectBanner" class="hidden ui-card ui-card-pad" style="background: var(--danger-surface); border-color: var(--danger-line);">
         <div class="flex items-start gap-3">
-          <i class="fa-solid fa-triangle-exclamation text-rose-300 text-lg mt-0.5" aria-hidden="true"></i>
+          <i class="fa-solid fa-triangle-exclamation text-loss text-lg mt-0.5" aria-hidden="true"></i>
           <div class="flex-1 min-w-0">
             <div class="flex items-center justify-between gap-2">
-              <span class="font-bold text-sm text-rose-200">Broker offline: live orders halted</span>
+              <span class="font-bold text-sm text-loss">Broker offline: live orders halted</span>
               <span id="bannerBrokerName" class="ui-badge ui-badge-loss">Broker</span>
             </div>
             <p id="brokerDisconnectDetail" class="mt-1 text-xs text-slate-300">Broker gateway is currently unreachable. Live order routing and account synchronization cannot proceed until reconnected.</p>
@@ -187,8 +190,46 @@
         </div>
       </div>
 
-      <div class="grid grid-cols-1 lg:grid-cols-3 gap-3.5 sm:gap-5">
-        <div class="lg:col-span-2 space-y-3.5 sm:space-y-5 min-w-0">
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 md:gap-8">
+        <div class="lg:col-span-2 space-y-6 md:space-y-8 min-w-0">
+
+          <!-- Hero: total value, return, allocation bar -->
+          <section class="ui-card hero-card space-y-4" aria-label="Portfolio value">
+            <div class="space-y-1">
+              <div class="hero-label">Portfolio value</div>
+              <div id="metricTotalVal" class="hero-value truncate">&euro;0.00</div>
+              <div id="metricReturnBadge" class="flex items-center gap-2 text-sm font-semibold text-slate-400">--</div>
+            </div>
+            <div class="space-y-2">
+              <div id="allocationBar" class="alloc-bar" role="img" aria-label="Capital allocation"><span style="flex:1;background:var(--line-strong)"></span></div>
+              <div class="flex justify-between gap-3 text-[13px] text-slate-400">
+                <span>Bot <strong id="metricEquity" class="ui-num text-slate-50 font-semibold">&euro;0.00</strong></span>
+                <span id="metricMineWrap" hidden>Yours <strong id="metricMine" class="ui-num text-slate-50 font-semibold">&euro;0.00</strong></span>
+                <span>Cash <strong id="metricTotalCash" class="ui-num text-slate-50 font-semibold">&euro;0.00</strong></span>
+              </div>
+              <div id="allocationLegend" class="alloc-legend"></div>
+            </div>
+          </section>
+
+          <!-- KPIs -->
+          <section class="home-kpis grid grid-cols-3" aria-label="Key figures">
+            <div class="kpi">
+              <span class="ui-label">Deployable cash</span>
+              <span id="metricCash" class="kpi-value">&euro;0.00</span>
+              <span id="metricCashSub" class="kpi-sub">Buffer capital</span>
+            </div>
+            <div class="kpi">
+              <span class="ui-label">Open P&amp;L</span>
+              <span id="metricUnrealizedPnl" class="kpi-value">&euro;0.00</span>
+              <span class="kpi-sub"><span id="metricPosCount">0 open positions</span><span id="metricUnrealizedPnlSub" class="sr-only">Open paper positions</span></span>
+            </div>
+            <!-- Pending triggers (opens the Triggers tab) -->
+            <button type="button" onclick="switchTab('triggers')" id="pendingTriggersSummary" class="trigger-link">
+              <span class="ui-label"><i class="fa-solid fa-crosshairs" aria-hidden="true"></i> Triggers</span>
+              <span id="pendingTriggersSummaryText" class="trigger-text">0 pending triggers</span>
+              <span id="pendingTriggersSummarySub" class="kpi-sub max-md:sr-only">Limit orders waiting for their price</span>
+            </button>
+          </section>
 
           <!-- Status and controls: market + cash-limit chips, broker strip, control tiles -->
           <section class="status-block" aria-label="Status and controls">
@@ -201,7 +242,7 @@
             <!-- Broker online strip (LIVE mode only) -->
             <div id="brokerConnectedStrip" class="hidden ui-card px-4 py-3 flex flex-wrap items-center justify-between gap-2 text-xs">
               <div class="flex items-center flex-wrap gap-x-3 gap-y-1 text-slate-400 min-w-0">
-                <span class="flex items-center gap-1.5 font-semibold text-emerald-300"><span class="ui-dot" style="background:var(--gain)"></span><span id="stripBrokerName">Broker</span> online</span>
+                <span class="flex items-center gap-1.5 font-semibold text-gain"><span class="ui-dot" style="background:var(--gain)"></span><span id="stripBrokerName">Broker</span> online</span>
                 <span><strong id="stripBrokerEndpoint" class="text-slate-200 font-mono font-medium">172.17.0.2:4003</strong></span>
                 <span><strong id="stripBrokerLatency" class="text-slate-200 font-mono font-medium">-- ms</strong></span>
                 <span class="hidden sm:inline">Account <strong id="stripBrokerAccount" class="text-slate-200 font-mono font-medium">--</strong></span>
@@ -229,44 +270,6 @@
                 <i class="fa-solid fa-power-off text-xl" aria-hidden="true"></i>
               </button>
             </div>
-          </section>
-
-          <!-- Hero: total value, return, allocation bar -->
-          <section class="ui-card p-4 sm:p-6 space-y-3 sm:space-y-4" aria-label="Portfolio value">
-            <div class="space-y-1">
-              <div class="ui-label text-[13px]">Portfolio value</div>
-              <div id="metricTotalVal" class="hero-value truncate">&euro;0.00</div>
-              <div id="metricReturnBadge" class="flex items-center gap-2 text-sm font-semibold text-slate-400">--</div>
-            </div>
-            <div class="space-y-2">
-              <div id="allocationBar" class="alloc-bar" role="img" aria-label="Capital allocation"><span style="flex:1;background:var(--line-strong)"></span></div>
-              <div class="flex justify-between gap-3 text-[13px] text-slate-400">
-                <span>Bot <strong id="metricEquity" class="ui-num text-white font-semibold">&euro;0.00</strong></span>
-                <span id="metricMineWrap" hidden>Yours <strong id="metricMine" class="ui-num text-white font-semibold">&euro;0.00</strong></span>
-                <span>Cash <strong id="metricTotalCash" class="ui-num text-white font-semibold">&euro;0.00</strong></span>
-              </div>
-              <div id="allocationLegend" class="alloc-legend"></div>
-            </div>
-          </section>
-
-          <!-- KPIs -->
-          <section class="home-kpis grid grid-cols-3 gap-2" aria-label="Key figures">
-            <div class="ui-card kpi">
-              <span class="ui-label">Deployable cash</span>
-              <span id="metricCash" class="kpi-value">&euro;0.00</span>
-              <span id="metricCashSub" class="kpi-sub">Buffer capital</span>
-            </div>
-            <div class="ui-card kpi">
-              <span class="ui-label">Open P&amp;L</span>
-              <span id="metricUnrealizedPnl" class="kpi-value">&euro;0.00</span>
-              <span class="kpi-sub"><span id="metricPosCount">0 open positions</span><span id="metricUnrealizedPnlSub" class="sr-only">Open paper positions</span></span>
-            </div>
-            <!-- Pending triggers (opens the Triggers tab) -->
-            <button type="button" onclick="switchTab('triggers')" id="pendingTriggersSummary" class="trigger-link">
-              <span class="ui-label"><i class="fa-solid fa-crosshairs" aria-hidden="true"></i> Triggers</span>
-              <span id="pendingTriggersSummaryText" class="trigger-text">0 pending triggers</span>
-              <span id="pendingTriggersSummarySub" class="kpi-sub max-md:sr-only">Limit orders waiting for their price</span>
-            </button>
           </section>
 
           <!-- Positions -->
@@ -299,7 +302,7 @@
             <canvas id="allocationChart"></canvas>
           </div>
           <div class="text-xs text-slate-400 pt-3 border-t border-borderCol flex justify-between">
-            <span>Base currency <strong class="text-white">EUR</strong></span>
+            <span>Base currency <strong class="text-slate-50">EUR</strong></span>
           </div>
         </aside>
       </div>
@@ -327,7 +330,7 @@
           <i class="fa-solid fa-chevron-down text-[12px] ui-faint adv-chev" aria-hidden="true"></i>
         </summary>
         <div class="fold-body space-y-3">
-          <h4 id="digestHeadline" class="text-[17px] font-bold text-white leading-snug">Opening Market Review</h4>
+          <h4 id="digestHeadline" class="text-[17px] font-bold text-slate-50 leading-snug">Opening Market Review</h4>
           <div class="flex flex-wrap items-center gap-2">
             <div class="adv-seg" role="group" aria-label="Review market">
               <button type="button" onclick="loadMarketReview('')" data-review-market="" class="is-active" aria-pressed="true" title="Latest review">Latest</button>
@@ -376,22 +379,22 @@
           <div class="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
             <div class="ui-inset p-3 min-w-0">
               <div class="ui-label truncate">Win rate</div>
-              <div id="weeklyWinRate" class="ui-num text-[17px] font-semibold text-white mt-1 truncate">--%</div>
+              <div id="weeklyWinRate" class="ui-num text-[17px] font-semibold text-slate-50 mt-1 truncate">--%</div>
               <div id="weeklyWinCounts" class="ui-faint text-[12px] truncate">0 picks evaluated</div>
             </div>
             <div class="ui-inset p-3 min-w-0">
               <div class="ui-label truncate">Portfolio</div>
-              <div id="weeklyPortfolioDelta" class="ui-num text-[17px] font-semibold text-white mt-1 truncate">€0.00 (+0.0%)</div>
+              <div id="weeklyPortfolioDelta" class="ui-num text-[17px] font-semibold text-slate-50 mt-1 truncate">€0.00 (+0.0%)</div>
               <div id="weeklyPortfolioRange" class="ui-num ui-faint text-[12px] truncate">Past 7 days</div>
             </div>
             <div class="ui-inset p-3 min-w-0">
               <div class="ui-label truncate">Best pick</div>
-              <div id="weeklyBestPick" class="ui-num text-[17px] font-semibold text-white mt-1 truncate">--</div>
+              <div id="weeklyBestPick" class="ui-num text-[17px] font-semibold text-slate-50 mt-1 truncate">--</div>
               <div id="weeklyBestPickDetails" class="ui-faint text-[12px] truncate">No data</div>
             </div>
             <div class="ui-inset p-3 min-w-0">
               <div class="ui-label truncate">Sessions</div>
-              <div id="weeklySessionsCount" class="ui-num text-[17px] font-semibold text-white mt-1 truncate">0</div>
+              <div id="weeklySessionsCount" class="ui-num text-[17px] font-semibold text-slate-50 mt-1 truncate">0</div>
               <div class="ui-faint text-[12px] truncate">Opens &amp; closes</div>
             </div>
           </div>
@@ -405,7 +408,7 @@
 
           <details class="adv-details fold" data-fold="advice-archive">
             <summary class="px-1">
-              <span class="text-[15px] font-semibold text-white">Archived reviews <span class="ui-num ui-faint">(<span id="archiveCountBadge">0</span>)</span></span>
+              <span class="text-[15px] font-semibold text-slate-50">Archived reviews <span class="ui-num ui-faint">(<span id="archiveCountBadge">0</span>)</span></span>
               <i class="fa-solid fa-chevron-down text-[12px] ui-faint adv-chev" aria-hidden="true"></i>
             </summary>
             <div id="weeklyArchiveContainer" class="space-y-2 pt-1">
@@ -417,7 +420,7 @@
     </section>
 
     <!-- TAB 3: SCREENER -->
-    <section id="tab-screener" class="tab-content hidden space-y-5">
+    <section id="tab-screener" data-module="screener" class="tab-content hidden space-y-5">
       <div class="ui-page-head">
         <div class="min-w-0">
           <h2 class="ui-page-title">Screener</h2>
@@ -436,7 +439,7 @@
     </section>
 
     <!-- TAB 4: COMMITTEE DEBATE -->
-    <section id="tab-debate" class="tab-content hidden space-y-5">
+    <section id="tab-debate" data-module="debate" class="tab-content hidden space-y-5">
       <div class="ui-page-head">
         <div class="min-w-0">
           <h2 class="ui-page-title">Committee Debate</h2>
@@ -465,28 +468,28 @@
           <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div class="ui-card ui-card-pad space-y-2">
               <div class="flex items-center justify-between gap-2">
-                <span class="text-[15px] font-semibold text-white flex items-center gap-2"><i class="fa-solid fa-chart-line ui-faint"></i> Technical</span>
+                <span class="text-[15px] font-semibold text-slate-50 flex items-center gap-2"><i class="fa-solid fa-chart-line ui-faint"></i> Technical</span>
                 <span id="techBiasBadge" class="ui-badge"></span>
               </div>
               <p id="techSummaryText" class="adv-prose"></p>
             </div>
             <div class="ui-card ui-card-pad space-y-2">
               <div class="flex items-center justify-between gap-2">
-                <span class="text-[15px] font-semibold text-white flex items-center gap-2"><i class="fa-solid fa-landmark ui-faint"></i> Fundamental</span>
+                <span class="text-[15px] font-semibold text-slate-50 flex items-center gap-2"><i class="fa-solid fa-landmark ui-faint"></i> Fundamental</span>
                 <span id="fundValuationBadge" class="ui-badge"></span>
               </div>
               <p id="fundSummaryText" class="adv-prose"></p>
             </div>
             <div class="ui-card ui-card-pad space-y-2">
               <div class="flex items-center justify-between gap-2">
-                <span class="text-[15px] font-semibold text-white flex items-center gap-2"><i class="fa-solid fa-newspaper ui-faint"></i> Sentiment</span>
+                <span class="text-[15px] font-semibold text-slate-50 flex items-center gap-2"><i class="fa-solid fa-newspaper ui-faint"></i> Sentiment</span>
                 <span id="sentMoodBadge" class="ui-badge"></span>
               </div>
               <p id="sentSummaryText" class="adv-prose"></p>
             </div>
             <div class="ui-card ui-card-pad space-y-2">
               <div class="flex items-center justify-between gap-2">
-                <span class="text-[15px] font-semibold text-white flex items-center gap-2"><i class="fa-solid fa-shield-halved ui-faint"></i> Risk</span>
+                <span class="text-[15px] font-semibold text-slate-50 flex items-center gap-2"><i class="fa-solid fa-shield-halved ui-faint"></i> Risk</span>
                 <span id="riskApprovedBadge" class="ui-badge"></span>
               </div>
               <p id="riskSummaryText" class="adv-prose"></p>
@@ -603,22 +606,22 @@
           </div>
 
           <div class="grid grid-cols-2 lg:grid-cols-4 gap-2.5">
-            <div class="ui-card kpi">
+            <div class="kpi">
               <span class="ui-label">Win rate</span>
               <span id="learningWinRate" class="kpi-value">--%</span>
               <span id="learningTradeCounts" class="kpi-sub ui-num">0 trades</span>
             </div>
-            <div class="ui-card kpi">
+            <div class="kpi">
               <span class="ui-label">Min. score</span>
               <span id="learningMinScore" class="kpi-value">70/100</span>
               <span class="kpi-sub">To open a position</span>
             </div>
-            <div class="ui-card kpi">
+            <div class="kpi">
               <span class="ui-label">Position size</span>
               <span id="learningPositionSize" class="kpi-value">8.0%</span>
               <span class="kpi-sub">Scaled by drawdown</span>
             </div>
-            <div class="ui-card kpi">
+            <div class="kpi">
               <span class="ui-label">Reward : risk</span>
               <span id="learningRiskParams" class="kpi-value">1:2.1 (1.75x)</span>
               <span class="kpi-sub">Take profit R:R (ATR stop)</span>
@@ -689,7 +692,7 @@
     </section>
 
     <!-- TAB: SHADOW PAPER PORTFOLIOS -->
-    <section id="tab-shadow" class="tab-content hidden space-y-6">
+    <section id="tab-shadow" data-module="shadow" class="tab-content hidden space-y-6">
       <div class="ui-page-head" style="flex-wrap:nowrap;align-items:flex-start">
         <div class="min-w-0">
           <h2 class="ui-page-title">Shadow paper</h2>
@@ -705,7 +708,7 @@
     </section>
 
     <!-- TAB 7: MEMORY -->
-    <section id="tab-memory" class="tab-content hidden space-y-6">
+    <section id="tab-memory" data-module="memory" class="tab-content hidden space-y-6">
       <div class="ui-page-head">
         <div>
           <h2 class="ui-page-title">Memory</h2>
@@ -793,6 +796,18 @@
           <p class="ui-page-sub">Trading rules, broker connection and integrations.</p>
         </div>
       </div>
+
+      <!-- Modules -->
+      <details class="ui-list adv-details fold" data-fold="settings-modules" open>
+        <summary class="px-4 py-3">
+          <span class="min-w-0">
+            <h3 class="ui-section-title">Modules</h3>
+            <span class="set-help">Extra sections. Off by default; only this browser.</span>
+          </span>
+          <i class="fa-solid fa-chevron-down text-[12px] ui-faint adv-chev" aria-hidden="true"></i>
+        </summary>
+        <div id="moduleToggleList" class="ui-list"></div>
+      </details>
 
       <!-- Trading -->
       <details class="ui-list adv-details fold" data-fold="settings-trading" open>
@@ -1032,6 +1047,7 @@
     <span id="toastMsg">Action executed.</span>
   </div>
 
+  <script src="/static/features.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>
