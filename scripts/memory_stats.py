@@ -37,7 +37,17 @@ show("reports: score_source x action", q(tb, """
     SELECT COALESCE(json_extract(raw_signals,'$.score_source'),'missing') src, action, COUNT(*)
     FROM analysis_reports GROUP BY src, action ORDER BY src, action"""))
 show("triggers: status x live", q(tb, "SELECT status, is_live, COUNT(*) FROM order_triggers GROUP BY 1,2"))
-show("triggers: cancel reasons", q(tb, "SELECT status, cancel_reason, COUNT(*) FROM order_triggers WHERE status IN ('CANCELLED','EXPIRED') GROUP BY 1,2"))
+show("triggers: cancel reasons", q(tb, """
+    SELECT status, CASE
+        WHEN cancel_reason='Cancelled by user' THEN 'Cancelled by user'
+        WHEN cancel_reason='Ticker released to user' THEN 'Ticker released to user'
+        WHEN cancel_reason LIKE 'Expired after%' THEN 'Expired'
+        WHEN cancel_reason LIKE 'Unaffordable:%' THEN 'Unaffordable'
+        WHEN cancel_reason LIKE '%stop-loss%' THEN 'Price through stop'
+        WHEN cancel_reason LIKE '%take-profit%' THEN 'Price through target'
+        WHEN cancel_reason IS NULL THEN 'No reason (before this change)'
+        ELSE 'Other' END AS category, COUNT(*)
+    FROM order_triggers WHERE status IN ('CANCELLED','EXPIRED') GROUP BY 1,2"""))
 show("trades: type x live", q(tb, "SELECT order_type, is_live, COUNT(*), MIN(executed_at), MAX(executed_at) FROM trades GROUP BY 1,2"))
 show("lessons: outcome", q(tb, "SELECT outcome, COUNT(*) FROM trade_lessons GROUP BY 1"))
 show("config (numeric only)", [r for r in q(tb, "SELECT key, value FROM system_configs ORDER BY key")
