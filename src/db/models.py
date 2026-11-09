@@ -185,6 +185,7 @@ class OrderTrigger(Base):
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     triggered_at = Column(DateTime, nullable=True)
     executed_trade_id = Column(Integer, nullable=True)
+    cancel_reason = Column(String(255), nullable=True)  # why the trigger was CANCELLED or EXPIRED
 
 class TradeLesson(Base):
     __tablename__ = "trade_lessons"

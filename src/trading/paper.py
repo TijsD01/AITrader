@@ -778,6 +778,7 @@ class PaperBroker(BaseBroker):
                 return {"success": False, "message": f"Trigger #{trigger_id} is already {trigger.status}."}
             
             trigger.status = "CANCELLED"
+            trigger.cancel_reason = "Cancelled by user"
             await session.commit()
             logger.info(f"Cancelled trigger #{trigger_id} for {trigger.ticker}")
             return {"success": True, "message": f"Trigger #{trigger_id} for {trigger.ticker} cancelled."}
@@ -896,6 +897,7 @@ class PaperBroker(BaseBroker):
                 if is_trigger_expired(t.created_at):
                     logger.info(f"Trigger #{t.id} for {t.ticker} expired (older than {settings.TRIGGER_EXPIRY_DAYS} days).")
                     t.status = "EXPIRED"
+                    t.cancel_reason = f"Expired after {settings.TRIGGER_EXPIRY_DAYS} days"
                     await session.commit()
                     continue
 
@@ -922,6 +924,7 @@ class PaperBroker(BaseBroker):
                 if invalid_reason:
                     logger.info(f"Cancelling trigger #{t.id} for {t.ticker}: {invalid_reason}")
                     t.status = "CANCELLED"
+                    t.cancel_reason = str(invalid_reason)[:255]
                     await session.commit()
                     continue
 
@@ -961,6 +964,7 @@ class PaperBroker(BaseBroker):
                         # Not even one whole share fits: release the reserved cash for other triggers
                         logger.info(f"Cancelling trigger #{t.id} for {t.ticker}: {trade_res.get('message')}")
                         t.status = "CANCELLED"
+                        t.cancel_reason = ("Unaffordable: " + str(trade_res.get("message") or ""))[:255]
                         await session.commit()
                     else:
                         logger.warning(f"Trigger #{t.id} buy order blocked for {t.ticker}: {trade_res.get('message')}")
