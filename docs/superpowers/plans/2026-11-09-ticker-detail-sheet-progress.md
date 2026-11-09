@@ -19,3 +19,8 @@ Baseline before work: `python -m pytest tests/ -q` → 693 passed, 1 failed (`te
 - Holdings and bot positions render the ticker inside the row's expand `<button class="pos-head">`. Nested buttons are invalid HTML, so those rows get a "Chart" button inside the expanded `.pos-detail` instead of a tappable ticker.
 - Shadow summary payload (`src/trading/shadow.py` ~line 817) has no row ids; unit 3 adds `"id"` to open_positions, pending_triggers and recent_closed so `source` can preselect the tapped shadow item.
 - Unit 3 site list (app.js, verified by grep at commit a66e076): advice cards ~940, debate report header ~1152, trades table ~1329, screener ~1005, pending trigger cards ~2099, trigger history ~2146, shadow lists ~3002/3011/3020, holdings ~632 and positions ~879 (Chart button). Review/learning lists (~2416, 2537, 2552, 2714) are optional extras.
+
+## Process rules from the user
+
+- All workers code in ponytail style (`.claude/skills/ponytail/SKILL.md`). Sent to units 1 and 2 mid-run; include it in every later brief.
+- Run a ponytail review (`ponytail-review` skill) after each unit lands, before starting the next.
