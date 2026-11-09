@@ -141,6 +141,7 @@ async def test_trigger_fill_trailing_stop_and_exit(shadows):
     async with AsyncSessionLocal() as session:
         pos = (await session.execute(select(ShadowPosition).where(ShadowPosition.ticker == "SHD.AS"))).scalars().one()
         assert pos.stop_loss_native == round(110.0 * 0.94, 2)
+        assert pos.initial_stop_native == 91.25  # the trigger stop_loss at fill
 
     # Falls back through the trailing stop: closed with a profit
     prices["SHD.AS"] = 103.0
@@ -474,3 +475,23 @@ async def test_main_deposits_and_withdrawals_reach_the_shadow_cash(shadows):
         async with AsyncSessionLocal() as session:
             await session.execute(delete(CashFlow))
             await session.commit()
+
+
+def test_new_presets_exist():
+    assert PRESETS["breakeven_1r"].breakeven_r == 1.0
+    assert PRESETS["no_breakeven"].breakeven_pct == 10.0
+    assert PRESETS["score_76"].score_offset == -6
+    assert PRESETS["score_76"].threshold(82) == 76
+
+
+def test_effective_breakeven_pct():
+    from src.trading.shadow import effective_breakeven_pct
+    s = PRESETS["breakeven_1r"]
+    # entry 100, initial stop 92 -> 1R = 8% gain
+    assert effective_breakeven_pct(s, 0.02, 100.0, 92.0) == pytest.approx(0.08)
+    # no initial stop (position opened before deploy) -> main's pct
+    assert effective_breakeven_pct(s, 0.02, 100.0, None) == 0.02
+    # stop at/above entry -> main's pct
+    assert effective_breakeven_pct(s, 0.02, 100.0, 100.0) == 0.02
+    # strategy without breakeven_r -> eff pct unchanged
+    assert effective_breakeven_pct(PRESETS["baseline"], 0.02, 100.0, 92.0) == 0.02

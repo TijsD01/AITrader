@@ -254,6 +254,7 @@ class ShadowPosition(Base):
     current_price_native = Column(Float, nullable=False)
     highest_price_native = Column(Float, nullable=False)
     stop_loss_native = Column(Float, nullable=True)
+    initial_stop_native = Column(Float, nullable=True)  # Stop at entry, before any ratchet
     take_profit_native = Column(Float, nullable=True)
     entry_price_eur = Column(Float, nullable=False)
     current_price_eur = Column(Float, nullable=False)

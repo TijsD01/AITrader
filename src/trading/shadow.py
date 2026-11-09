@@ -73,6 +73,7 @@ class ShadowStrategy:
     reward_risk: Optional[float] = None       # Take profit at entry + R x stop distance (None = main bot's target)
     use_take_profit: bool = True              # False = no fixed target; exits come from the stop / trailing stop / time
     breakeven_pct: Optional[float] = None     # Gain at which the stop moves to entry +1% (None = main bot's, frozen)
+    breakeven_r: Optional[float] = None       # Gain, in multiples of the initial stop distance, at which the stop moves to entry +1%; overrides breakeven_pct
     trailing_stop_pct: Optional[float] = None # Stop trails the highest price by this fraction
     max_positions: Optional[int] = None       # None = main bot's MAX_POSITIONS (frozen)
     max_hold_days: Optional[int] = None       # Close positions older than this many days
@@ -85,6 +86,13 @@ class ShadowStrategy:
 
     def to_params(self) -> Dict[str, Any]:
         return {k: v for k, v in dataclasses.asdict(self).items() if k not in ("key", "label", "description")}
+
+
+def effective_breakeven_pct(strategy: "ShadowStrategy", eff_pct: float, entry: float, initial_stop: Optional[float]) -> float:
+    """Breakeven trigger as a gain fraction: breakeven_r x the initial stop distance when set, else eff_pct."""
+    if strategy.breakeven_r and initial_stop and entry > initial_stop:
+        return strategy.breakeven_r * (entry - initial_stop) / entry
+    return eff_pct
 
 
 PRESETS: Dict[str, ShadowStrategy] = {
@@ -118,6 +126,27 @@ PRESETS: Dict[str, ShadowStrategy] = {
         description="Same rules as the main bot (as they were when this shadow started). A control group: "
                     "differences against the main portfolio come from the simulation itself (fills, cash timing), "
                     "not from parameters.",
+    ),
+    "breakeven_1r": ShadowStrategy(
+        key="breakeven_1r",
+        label="Breakeven at 1R",
+        description="Baseline rules plus one change: the stop moves to entry +1% only after the gain equals the "
+                    "initial stop distance (1R), instead of the main bot's fixed breakeven percentage.",
+        breakeven_r=1.0,
+    ),
+    "no_breakeven": ShadowStrategy(
+        key="no_breakeven",
+        label="No breakeven",
+        description="Baseline rules plus one change: the breakeven ratchet is off (it needs a 1000% gain, never "
+                    "reached), so positions run to the stop or target. The ATR trail never starts either.",
+        breakeven_pct=10.0,
+    ),
+    "score_76": ShadowStrategy(
+        key="score_76",
+        label="Score 76",
+        description="Baseline rules plus one change: takes setups 6 points below the main threshold frozen at "
+                    "start, 76 when the main bot is at 82.",
+        score_offset=-6,
     ),
 }
 
@@ -537,6 +566,7 @@ class ShadowPortfolios:
             current_price_native=price,
             highest_price_native=price,
             stop_loss_native=t.stop_loss,
+            initial_stop_native=t.stop_loss,
             take_profit_native=t.take_profit,
             entry_price_eur=price_eur,
             current_price_eur=price_eur,
@@ -593,7 +623,9 @@ class ShadowPortfolios:
                 # Main bot's ratchet: breakeven +1% past breakeven_pct, then high - N x ATR
                 p.stop_loss_native = compute_trailing_stop(
                     p.entry_price_native, p.stop_loss_native, p.highest_price_native,
-                    (data.get("technicals") or {}).get("atr14"), eff["breakeven_pct"], atr_mult=eff["trailing_atr_mult"],
+                    (data.get("technicals") or {}).get("atr14"),
+                    effective_breakeven_pct(s, eff["breakeven_pct"], p.entry_price_native, p.initial_stop_native),
+                    atr_mult=eff["trailing_atr_mult"],
                 )
                 if s.trailing_stop_pct:
                     trail = round(p.highest_price_native * (1.0 - s.trailing_stop_pct), 2)
