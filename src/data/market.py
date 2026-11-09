@@ -18,6 +18,16 @@ _REGIME_CACHE_TTL: float = 3600.0
 # ticker.info (fundamentals) is the slowest Yahoo call and the first to hit 429; it barely moves intraday
 _info_cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
 _INFO_CACHE_TTL: float = 24 * 3600.0
+# shortcut: never evicted (one entry per ticker+range viewed), add LRU if memory grows
+_history_cache: Dict[tuple, tuple[float, list]] = {}
+
+# range key -> yfinance history() kwargs for the ticker detail chart
+_HISTORY_RANGES: Dict[str, Dict[str, Any]] = {
+    "1D": {"period": "1d", "interval": "5m", "prepost": True},
+    "1M": {"period": "1mo", "interval": "1d"},
+    "3M": {"period": "3mo", "interval": "1d"},
+    "1Y": {"period": "1y", "interval": "1d"},
+}
 
 class MarketDataProvider:
     @staticmethod
@@ -219,6 +229,30 @@ class MarketDataProvider:
         # A failed fetch is retried after 10 minutes instead of on every trigger check
         _regime_cache[key] = (now if result is not None else now - _REGIME_CACHE_TTL + 600.0, result)
         return result
+
+    @staticmethod
+    def get_price_history(ticker_symbol: str, range_key: str = "3M") -> Optional[list]:
+        """Close prices for the chart as [[iso_time, close], ...], or None on failure. Unknown range means 3M."""
+        sym = ticker_symbol.upper().strip()
+        range_key = range_key if range_key in _HISTORY_RANGES else "3M"
+        key = (sym, range_key)
+        now = time.time()
+        ttl = _CACHE_TTL_OPEN if quotes_moving(sym) else _CACHE_TTL_CLOSED
+        cached = _history_cache.get(key)
+        if cached and (now - cached[0]) < ttl:
+            return cached[1]
+        try:
+            closes = yf.Ticker(sym).history(**_HISTORY_RANGES[range_key])["Close"].dropna()
+            if closes.index.tz is not None:  # naive UTC, like the timestamps stored in the DB
+                closes.index = closes.index.tz_convert("UTC").tz_localize(None)
+            points = [[ts.isoformat(timespec="minutes"), round(float(v), 2)] for ts, v in closes.items()]
+        except Exception as e:
+            logger.error(f"Error fetching price history for {sym} ({range_key}): {e}")
+            return None
+        if not points:
+            return None
+        _history_cache[key] = (now, points)
+        return points
 
     @staticmethod
     def invalidate(ticker_symbols) -> None:
