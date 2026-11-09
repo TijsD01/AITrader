@@ -611,7 +611,6 @@ Return valid JSON with exactly these keys:
             cfg_res = await session.execute(select(SystemConfig))
             configs = {c.key: c.value for c in cfg_res.scalars().all()}
 
-            win_rate = configs.get("LEARNER_WIN_RATE", "50.0")
             min_score = configs.get("MIN_CONSENSUS_SCORE", str(settings.MIN_CONSENSUS_SCORE))
             size_pct = settings.POSITION_SIZE_PCT  # capped on load, the raw DB row may be stale
             atr_mult = configs.get("ATR_STOP_MULTIPLIER", "1.75")
@@ -621,7 +620,7 @@ Return valid JSON with exactly these keys:
 
             lines = [
                 f"=== HISTORICAL TRADE LEARNING & ADAPTED PARAMETERS ===",
-                f"• Recent Win Rate: {win_rate}% | Active Adapted Min Score: {min_score}/100",
+                f"• Active Adapted Min Score: {min_score}/100",
                 f"• Active Risk Sizing: {float(size_pct)*100:.1f}% | Stop ATR Multiplier: {atr_mult}x | TP R:R: {tp_rr}:1",
                 f"• Trailing Breakeven Trigger: +{float(be_pct)*100:.1f}% | Committee Risk Weight: {float(w_risk)*100:.0f}%",
             ]

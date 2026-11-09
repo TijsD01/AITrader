@@ -139,3 +139,25 @@ async def test_committee_prompt_gets_track_record_not_cold_start():
     assert len(committee_prompts) == 1
     assert "TRACK RECORD SENTINEL" in committee_prompts[0]
     cold.assert_not_called()
+
+
+async def test_committee_still_reports_when_track_record_fails():
+    from unittest.mock import AsyncMock
+    from src.agents.committee import investment_committee
+
+    stock = {
+        "ticker": "NVDA", "name": "NVIDIA", "price": 120.0, "currency": "USD",
+        "technicals": {"price": 120.0, "ema20": 118.0, "ema50": 114.0, "sma200": 105.0, "above_ema20": True,
+                       "above_ema50": True, "above_sma200": True, "rsi14": 58.0, "macd": 1.5, "macd_signal": 1.2,
+                       "macd_hist": 0.3, "atr14": 3.5, "support_20d": 115.0, "resistance_20d": 125.0,
+                       "return_5d_pct": 2.4, "return_1m_pct": 6.8, "volume_surge_ratio": 1.1},
+        "fundamentals": {"beta": 1.2, "market_cap": 2500000000000},
+    }
+    broken = AsyncMock(side_effect=RuntimeError("db down"))
+    with patch("src.trading.trade_stats.track_record_block", broken), \
+         patch("src.agents.base.llm_client.has_active_key", return_value=False), \
+         patch("src.agents.committee.llm_client.has_active_key", return_value=False):
+        report = await investment_committee.evaluate_ticker(stock, 10000.0)
+    broken.assert_awaited_once()
+    assert report["action"] in ("STRONG_BUY", "BUY", "HOLD", "SELL")
+    assert 0 <= report["consensus_score"] <= 100

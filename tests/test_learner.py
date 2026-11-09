@@ -137,6 +137,7 @@ async def test_learning_context_for_agents():
     assert "Active Adapted Min Score" in context
     assert "Active Risk Sizing" in context
     assert "Key Lessons" not in context
+    assert "Win Rate" not in context  # small-sample stat with its own win rule: kept out of the prompt
     assert "Stale single-trade story" not in context
 
 @pytest.mark.asyncio
