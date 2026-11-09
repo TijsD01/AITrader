@@ -271,6 +271,7 @@ async def test_shadow_only_badge_clears_when_main_arms_the_ticker_later(shadows)
     await shadow_portfolios.follow_report(_report("SHK.AS", score=85), _data("SHK.AS"))
     comparison = await shadow_portfolios.get_comparison({"total_value_eur": 10000.0}, False)
     assert comparison["strategies"][0]["pending_triggers"][0]["followed_main"] is False
+    assert comparison["strategies"][0]["pending_triggers"][0]["id"]  # sheet source `shadow_trigger:<id>`
 
     try:
         async with AsyncSessionLocal() as session:

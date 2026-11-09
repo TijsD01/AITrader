@@ -646,6 +646,7 @@ async function renderHoldings(req, show) {
             <div class="kv col-span-2"><span>P&amp;L</span><span class="${tone}">${signedEur(pnl)}</span></div>
           </div>
           ${ownerSwitchHtml(h.ticker, 'mine')}
+          <button type="button" class="ui-btn w-full mt-3" data-action="open-ticker" data-ticker="${esc(h.ticker)}" data-source="" aria-label="Chart for ${esc(h.ticker)}"><i class="fa-solid fa-chart-line" aria-hidden="true"></i> Chart</button>
         </div>
       </div>`;
   }).join('');
@@ -895,6 +896,7 @@ async function loadPortfolio() {
               <div class="kv col-span-2"><span>P&amp;L</span><span class="${tone}">${signedEur(pnl)}</span></div>
             </div>
             ${ownerSlider ? ownerSwitchHtml(pos.ticker, 'bot') : ''}
+            <button type="button" class="ui-btn w-full mt-3" data-action="open-ticker" data-ticker="${esc(pos.ticker)}" data-source="" aria-label="Chart for ${esc(pos.ticker)}"><i class="fa-solid fa-chart-line" aria-hidden="true"></i> Chart</button>
             <button type="button" data-action="close-position" data-ticker="${esc(pos.ticker)}" class="ui-btn ui-btn-danger w-full mt-3" aria-label="Sell position ${esc(pos.ticker)}">
               <i class="fa-solid fa-arrow-right-from-bracket"></i> Sell position
             </button>
@@ -938,7 +940,7 @@ async function loadRecommendations() {
           <div class="flex items-start justify-between gap-3">
             <div class="min-w-0 space-y-1">
               <div class="flex flex-wrap items-center gap-2">
-                <span class="text-[17px] font-bold text-slate-50">${esc(r.ticker)}</span>
+                <span class="text-[17px] font-bold text-slate-50">${tickerLink(r.ticker, `report:${r.ticker}`)}</span>
                 ${adviceVerdictBadge(r.action)}
               </div>
               ${sub ? `<div class="ui-faint text-[13px] truncate ${r.name ? '' : 'ui-num'}">${esc(sub)}</div>` : ''}
@@ -1003,7 +1005,7 @@ async function loadScreener() {
       <article class="stock-card ui-card ui-card-pad flex flex-col gap-3">
         <div class="flex items-start justify-between gap-3">
           <div class="min-w-0 space-y-1">
-            <div class="text-[17px] font-bold text-slate-50">${esc(c.ticker)}</div>
+            <div class="text-[17px] font-bold text-slate-50">${tickerLink(c.ticker)}</div>
             <div class="ui-faint text-[13px] truncate">${esc(c.name)}</div>
           </div>
           ${adviceScoreBlock(c.pre_score, 'Scanner')}
@@ -1150,7 +1152,7 @@ function renderDebateReport(report) {
     <div class="flex items-start justify-between gap-3">
       <div class="min-w-0 space-y-1">
         <div class="flex flex-wrap items-center gap-2">
-          <span class="text-[22px] font-bold text-slate-50 leading-tight">${esc(report.ticker)}</span>
+          <span class="text-[22px] font-bold text-slate-50 leading-tight">${tickerLink(report.ticker, `report:${report.ticker}`)}</span>
           ${adviceVerdictBadge(report.action)}
         </div>
         ${report.name ? `<div class="ui-faint text-[13px] truncate">${esc(report.name)}</div>` : ''}
@@ -1327,7 +1329,7 @@ async function loadTrades() {
         <tr>
           <td data-label="Date" class="py-3 px-4 ui-num ui-faint whitespace-nowrap">${esc(t.executed_at)}</td>
           <td data-label="Type" class="py-3 px-4">${typeBadge}</td>
-          <td data-label="Asset" class="py-3 px-4 font-bold" style="color:var(--text)">${esc(t.ticker)}</td>
+          <td data-label="Asset" class="py-3 px-4 font-bold" style="color:var(--text)">${tickerLink(t.ticker)}</td>
           <td data-label="Shares" class="py-3 px-4 ui-num">${esc(t.shares)}</td>
           <td data-label="Price" class="py-3 px-4 ui-num"><span>${esc(t.price_native)} <span class="ui-faint text-xs">${esc(t.currency)}</span></span></td>
           <td data-label="Total (EUR)" class="py-3 px-4 ui-num font-semibold" style="color:var(--text)">€${num(t.total_eur)}</td>
@@ -2097,7 +2099,7 @@ async function loadTriggers() {
             <div class="ui-card ui-card-pad flex flex-col gap-3">
               <div class="flex items-start justify-between gap-3">
                 <div class="min-w-0">
-                  <div class="text-base font-bold truncate" style="color:var(--text)">${esc(t.ticker)}</div>
+                  <div class="text-base font-bold truncate" style="color:var(--text)">${tickerLink(t.ticker, `trigger:${t.id}`)}</div>
                   <div class="text-[13px] ui-muted truncate">${esc(subParts.join(' · '))}${t.name ? ` · ${esc(t.name)}` : ''}</div>
                 </div>
                 <span class="ui-badge ${distCls} shrink-0">${esc(distLabel)}</span>
@@ -2144,7 +2146,7 @@ async function loadTriggers() {
       } else {
         historyBody.innerHTML = history.map(t => `
             <tr>
-              <td data-label="Ticker" class="py-3 px-4 font-bold" style="color:var(--text)">${esc(t.ticker)}</td>
+              <td data-label="Ticker" class="py-3 px-4 font-bold" style="color:var(--text)">${tickerLink(t.ticker, `trigger:${t.id}`)}</td>
               <td data-label="Type" class="py-3 px-4">${esc(triggerTypeLabel(t.trigger_type))}</td>
               <td data-label="Target" class="py-3 px-4 ui-num" style="color:var(--text)"><span>${esc(num(t.target_price))} <span class="ui-faint text-xs">${esc(t.currency)}</span></span></td>
               <td data-label="Status" class="py-3 px-4">${triggerStatusBadge(t.status)}</td>
@@ -2414,7 +2416,7 @@ async function loadLearningInsights() {
               <div class="flex items-start justify-between gap-3">
                 <div class="min-w-0">
                   <div class="flex items-center gap-2">
-                    <span class="text-base font-bold" style="color:var(--text)">${esc(l.ticker)}</span>
+                    <span class="text-base font-bold" style="color:var(--text)">${tickerLink(l.ticker)}</span>
                     <span class="ui-badge ${badgeCls}">${arrow} ${esc(l.outcome)}</span>
                   </div>
                   <div class="text-xs ui-faint ui-num mt-0.5">${esc(l.created_at)}</div>
@@ -2535,7 +2537,7 @@ async function loadMarketReview(market = null) {
             pos.take_profit_native ? `winst nemen bij ${esc(pos.take_profit_native)}` : ''
           ].filter(Boolean).join(' · ');
           return `<div>
-            <div class="kv"><span class="ui-num text-slate-50 font-semibold">${esc(pos.ticker)}</span>
+            <div class="kv"><span class="ui-num text-slate-50 font-semibold">${tickerLink(pos.ticker)}</span>
               <span class="ui-num ${up ? 'ui-gain' : 'ui-loss'}">${up ? '▲' : '▼'} ${esc(signedEur(pos.unrealized_pnl_eur))} (${up ? '+' : ''}${num(pos.unrealized_pnl_pct, 1)}%)</span></div>
             <div class="ui-faint text-[13px] ui-num">${esc(pos.shares)} st. · gekocht ${esc(pos.entry_price_native)} · nu ${esc(pos.current_price_native)} ${esc(pos.currency)}</div>
             ${levels ? `<div class="ui-faint text-[13px] ui-num">${levels}</div>` : ''}
@@ -2550,7 +2552,7 @@ async function loadMarketReview(market = null) {
           const risk = p.risk || {};
           return `<div class="p-3.5 space-y-1">
             <div class="flex items-baseline justify-between gap-3">
-              <span class="min-w-0 truncate"><span class="text-[15px] font-bold text-slate-50">${esc(p.ticker)}</span> <span class="ui-faint text-[13px]">${esc(p.name || '')}</span></span>
+              <span class="min-w-0 truncate"><span class="text-[15px] font-bold text-slate-50">${tickerLink(p.ticker)}</span> <span class="ui-faint text-[13px]">${esc(p.name || '')}</span></span>
               <span class="ui-num shrink-0"><span class="text-slate-50 font-semibold">${esc(p.consensus_score)}</span><span class="ui-faint">/100</span></span>
             </div>
             <div class="adv-prose">${esc(reviewActionNl(p.action))} · koers ${advicePrice(p.price, p.currency)}</div>
@@ -2712,7 +2714,7 @@ async function loadWeeklyReviewComparison() {
             <div class="flex items-start justify-between gap-3">
               <div class="min-w-0">
                 <div class="flex flex-wrap items-center gap-2">
-                  <span class="text-[15px] font-bold text-slate-50">${esc(p.ticker)}</span>
+                  <span class="text-[15px] font-bold text-slate-50">${tickerLink(p.ticker)}</span>
                   ${badgeText ? `<span class="${badgeClass}">${esc(badgeText)}</span>` : ''}
                 </div>
                 <div class="ui-faint text-[13px] truncate">${esc(p.name)}</div>
@@ -3000,7 +3002,7 @@ function renderShadowStrategy(s, mainLabel) {
   const positions = (s.open_positions || []).map(p => `
     <div class="flex items-center justify-between gap-3 py-2 text-[13px]">
       <div class="min-w-0">
-        <span class="font-semibold" style="color:var(--text)">${esc(p.ticker)}</span>
+        <span class="font-semibold" style="color:var(--text)">${tickerLink(p.ticker, `shadow_position:${p.id}`)}</span>
         ${p.followed_main ? '' : '<span class="ui-badge ui-badge-accent ml-1">Shadow only</span>'}
         <div class="ui-faint ui-num text-xs">${esc(num(p.entry_price_native))} &rarr; ${esc(num(p.current_price_native))} ${esc(p.currency)} · stop ${p.stop_loss_native ? esc(num(p.stop_loss_native)) : '--'}</div>
       </div>
@@ -3009,7 +3011,7 @@ function renderShadowStrategy(s, mainLabel) {
   const pending = (s.pending_triggers || []).map(t => `
     <div class="flex items-center justify-between gap-3 py-2 text-[13px]">
       <div class="min-w-0">
-        <span class="font-semibold" style="color:var(--text)">${esc(t.ticker)}</span>
+        <span class="font-semibold" style="color:var(--text)">${tickerLink(t.ticker, `shadow_trigger:${t.id}`)}</span>
         ${t.followed_main ? '' : '<span class="ui-badge ui-badge-accent ml-1">Shadow only</span>'}
         <div class="ui-faint text-xs">${esc(t.trigger_type === 'MARKET' ? 'Buy at market (next open)' : triggerTypeLabel(t.trigger_type))} · score ${esc(t.consensus_score)}</div>
       </div>
@@ -3018,7 +3020,7 @@ function renderShadowStrategy(s, mainLabel) {
   const closed = (s.recent_closed || []).map(c => `
     <div class="flex items-center justify-between gap-3 py-2 text-[13px]">
       <div class="min-w-0">
-        <span class="font-semibold" style="color:var(--text)">${esc(c.ticker)}</span>
+        <span class="font-semibold" style="color:var(--text)">${tickerLink(c.ticker, `shadow_position:${c.id}`)}</span>
         ${c.followed_main ? '' : '<span class="ui-badge ui-badge-accent ml-1">Shadow only</span>'}
         <div class="ui-faint text-xs">${esc(c.closed_at)} · ${esc(c.exit_reason || '')}</div>
       </div>
