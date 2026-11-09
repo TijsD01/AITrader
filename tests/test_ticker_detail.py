@@ -225,3 +225,10 @@ async def test_other_broker_never_calls_t212(seeded, monkeypatch):
     _t212(monkeypatch, client, broker="alpaca")
     data = (await _get(f"/api/ticker/{T}/detail")).json()
     assert client.calls == 0 and data["price_source"] == "yahoo"
+
+
+async def test_not_held_ticker_never_calls_t212(seeded, monkeypatch):
+    client = _FakeT212(_held(105.5))
+    _t212(monkeypatch, client)
+    data = (await _get("/api/ticker/ZZNOPE/detail")).json()  # no user holding, no open live position
+    assert client.calls == 0 and data["price_source"] == "yahoo"

@@ -1073,13 +1073,17 @@ async def get_ticker_detail(ticker: str, range: str = "3M"):
     client = trading212.get_client() if settings.LIVE_BROKER.lower() == "trading212" else None
     if client:
         try:
-            # shortcut: one positions call per sheet load, cache if T212 starts returning 429
-            held = {bp["instrument"]["ticker"]: bp.get("currentPrice") for bp in await client.positions()}
-            if held:
-                async with AsyncSessionLocal() as session:
-                    t212_ticker = (await session.execute(
-                        select(UserHolding.t212_ticker).where(UserHolding.ticker == sym))).scalars().first()
-                t212_ticker = t212_ticker or await client.resolve_ticker(sym, currency)
+            # Only tickers the account holds (a user holding or an open live bot position): no T212 calls otherwise
+            async with AsyncSessionLocal() as session:
+                t212_ticker = (await session.execute(
+                    select(UserHolding.t212_ticker).where(UserHolding.ticker == sym))).scalars().first()
+                live_held = (await session.execute(select(Position.id).where(
+                    Position.ticker == sym, Position.status == "OPEN", Position.is_live == True))).first()
+            if not t212_ticker and live_held:
+                t212_ticker = await client.resolve_ticker(sym, currency)
+            if t212_ticker:
+                # shortcut: one positions call per sheet load, cache if T212 starts returning 429
+                held = {bp["instrument"]["ticker"]: bp.get("currentPrice") for bp in await client.positions()}
                 t212_price = float(held.get(t212_ticker) or 0)
                 if t212_price > 0:
                     current_price, price_source = t212_price, "trading212"
