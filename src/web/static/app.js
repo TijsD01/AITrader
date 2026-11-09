@@ -521,7 +521,6 @@ function styleShadowChart(chart) {
   const [shadow, main] = chart.data.datasets;
   shadow.borderColor = shadow.backgroundColor = cssVar('--accent');
   main.borderColor = main.backgroundColor = cssVar('--text-2');
-  chart.options.plugins.legend.labels.color = cssVar('--text-2');
   chart.options.scales.x.ticks.color = cssVar('--text-3');
   chart.options.scales.y.ticks.color = cssVar('--text-3');
   chart.options.scales.y.grid.color = cssVar('--line-soft');
@@ -3113,7 +3112,14 @@ function renderShadowStrategy(s, mainLabel) {
         <div class="ui-card kpi"><span class="ui-label">Shadow-only trades</span><span class="kpi-value">${esc(s.shadow_only_trades)}</span><span class="kpi-sub">The main bot skipped these</span></div>
       </div>
 
-      <div class="relative h-44 ${(s.history && s.history.shadow && s.history.shadow.length > 1) ? '' : 'hidden'}"><canvas id="shadowChart-${esc(s.key)}"></canvas></div>
+      <div class="space-y-2 ${(s.history && s.history.shadow && s.history.shadow.length > 1) ? '' : 'hidden'}">
+        <div id="shadowReadout-${esc(s.key)}" class="ts-legend">
+          <span><span class="ts-swatch" style="border-top: 2px solid var(--accent)"></span>${esc(s.label)} <b class="ui-num" data-v="0"></b></span>
+          <span><span class="ts-swatch" style="border-top: 2px dashed var(--text-2)"></span>${esc(mainLabel)} <b class="ui-num" data-v="1"></b></span>
+          <span class="ui-num ml-auto" data-v="at"></span>
+        </div>
+        <div class="relative h-44"><canvas id="shadowChart-${esc(s.key)}"></canvas></div>
+      </div>
 
       ${list('Open positions', positions, 'No open shadow positions.')}
       ${list('Pending entries', pending, 'No pending shadow entries.')}
@@ -3143,8 +3149,8 @@ function drawShadowChart(s, mainLabel) {
       maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       plugins: {
-        legend: { position: 'bottom', labels: { boxWidth: 12 } },
-        tooltip: { callbacks: { label: c => `${c.dataset.label}: ${signedPct(c.parsed.y)}` } }
+        legend: { display: false },
+        tooltip: { enabled: false } // values show in the legend row above the chart
       },
       scales: {
         x: { ticks: { maxTicksLimit: 4, maxRotation: 0, callback(v) { return String(this.getLabelForValue(v)).slice(0, 5); } }, grid: { display: false } },
@@ -3152,8 +3158,21 @@ function drawShadowChart(s, mainLabel) {
       }
     }
   });
-  styleShadowChart(shadowCharts[s.key]);
-  shadowCharts[s.key].update('none');
+  // Legend row doubles as the readout: latest values at rest, hovered values and time while hovering
+  const readout = document.getElementById(`shadowReadout-${s.key}`);
+  const chart = shadowCharts[s.key];
+  chart.$readout = i => {
+    const at = i === null ? labels.length - 1 : i;
+    chart.data.datasets.forEach((ds, d) => {
+      const v = ds.data[at];
+      readout.querySelector(`[data-v="${d}"]`).textContent = v == null ? '--' : signedPct(v);
+    });
+    readout.querySelector('[data-v="at"]').textContent = i === null ? 'Latest'
+      : new Date(hist.shadow[i][0].replace(' ', 'T') + 'Z').toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  };
+  chart.$readout(null);
+  styleShadowChart(chart);
+  chart.update('none');
 }
 
 async function loadShadow() {
