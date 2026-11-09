@@ -44,6 +44,10 @@ async def lifespan(app: FastAPI):
     logger.info("Initializing TencentDB Agent Memory storage...")
     await memory_store.init_db()
     
+    # to_eur never waits for Yahoo on the event loop, so load real FX rates before the first valuation
+    from src.data.currency import currency_service, FETCHABLE_CURRENCIES
+    await asyncio.to_thread(lambda: [currency_service.update_rates(c) for c in FETCHABLE_CURRENCIES])
+
     logger.info("Starting background scheduler...")
     trading_scheduler.start()
     asyncio.create_task(trading_scheduler.check_and_run_startup_sessions())
