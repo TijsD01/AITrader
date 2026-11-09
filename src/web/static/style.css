@@ -792,3 +792,87 @@ details[data-fold][open] > :not(summary), .adv-details[open] > :not(summary) { a
   .set-toggle input:active + .ui-switch::after { transform: none; }
   .set-toggle input:checked:active + .ui-switch::after { transform: translateX(16px); }
 }
+
+/* ------------------------------------------------------------------ */
+/* Ticker detail sheet (#tickerSheet, ts-*)                            */
+/* ------------------------------------------------------------------ */
+.ticker-link {
+  position: relative;
+  font: inherit; color: inherit; background: none; border: 0; padding: 0;
+  cursor: pointer; text-align: inherit;
+}
+/* 44px hit area without moving the layout */
+.ticker-link::after { content: ""; position: absolute; inset: 50% -6px auto; height: 44px; min-width: 44px; transform: translateY(-50%); }
+.ticker-link:hover, .ticker-link:focus-visible { text-decoration: underline; text-underline-offset: 3px; }
+.ticker-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+button.ticker-link:active { transform: none; }
+
+.ticker-sheet {
+  width: 100%; max-width: none; height: 100dvh; max-height: none;
+  margin: 0; padding: 0; border: 0;
+  background: var(--surface); color: var(--text);
+}
+.ticker-sheet::backdrop { background: rgba(0, 0, 0, 0.45); }
+@media (min-width: 768px) {
+  .ticker-sheet {
+    max-width: 720px; height: calc(100dvh - 48px);
+    margin: auto auto 0; border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+    box-shadow: var(--shadow-sheet);
+  }
+}
+.ts-panel {
+  height: 100%; overflow-y: auto; overscroll-behavior: contain;
+  padding: max(12px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
+  display: flex; flex-direction: column; gap: 14px;
+}
+.ts-panel > * { flex-shrink: 0; }
+.ts-head { display: flex; align-items: center; gap: 12px; }
+.ts-head > .min-w-0 { flex: 1; }
+.ts-ticker { margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+.ts-price { font-size: 17px; font-weight: 600; white-space: nowrap; }
+.ts-range { align-self: flex-start; }
+.ts-range .seg-btn:disabled { opacity: .55; cursor: default; }
+.ts-chart { position: relative; height: 280px; }
+@media (min-width: 768px) { .ts-chart { height: 340px; } }
+.ts-chart-note { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; margin: 0; font-size: 14px; color: var(--text-2); }
+.ts-chart.is-empty canvas { display: none; }
+.ts-chart-note[hidden] { display: none; }
+.ts-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--text-2); }
+.ts-legend > span { display: inline-flex; align-items: center; gap: 6px; }
+.ts-swatch { display: inline-block; width: 18px; height: 0; }
+.ts-sets { display: flex; flex-wrap: wrap; gap: 8px; }
+.ts-chip[aria-pressed="true"], button.ts-chip[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-strong); font-weight: 600; }
+.ts-chip { min-height: 36px; }
+.ts-info-title { margin: 0; font-size: 15px; font-weight: 600; }
+.ts-rows { display: grid; grid-template-columns: 1fr; margin: 0; }
+.ts-row { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--line-soft); font-size: 14px; }
+.ts-row dt { color: var(--text-2); }
+.ts-row dd { margin: 0; text-align: right; }
+.ts-rationale {
+  margin: 10px 0 0; font-size: 13px; line-height: 1.5; color: var(--text-2);
+  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
+}
+
+/* States: data-state on the dialog is loading | ready | error */
+.ts-error { display: none; }
+.ticker-sheet[data-state="error"] .ts-error { display: block; }
+.ticker-sheet[data-state="error"] .ts-body { display: none; }
+.ticker-sheet[data-state="loading"] .ts-legend,
+.ticker-sheet[data-state="loading"] .ts-sets,
+.ticker-sheet[data-state="loading"] #tsInfo,
+.ticker-sheet[data-state="loading"] .ts-chart > * { visibility: hidden; }
+.ticker-sheet[data-state="loading"] .ts-chart { border-radius: var(--radius); background: var(--surface-2); animation: tsPulse 1.2s ease-in-out infinite alternate; }
+@keyframes tsPulse { to { opacity: .55; } }
+
+/* Motion: up from the bottom, quicker exit */
+@keyframes tsIn { from { transform: translateY(100%); } }
+@keyframes tsOut { to { transform: translateY(100%); } }
+.ticker-sheet[open] { animation: tsIn 220ms cubic-bezier(0.22, 1, 0.36, 1); }
+.ticker-sheet[open]::backdrop { animation: fadeIn 220ms var(--ease-out); }
+.ticker-sheet.is-closing { animation: tsOut 170ms var(--ease-in) forwards; }
+.ticker-sheet.is-closing::backdrop { animation: fadeOut 170ms var(--ease-in) forwards; }
+@media (prefers-reduced-motion: reduce) {
+  .ticker-sheet[open] { animation-name: fadeIn; }
+  .ticker-sheet.is-closing { animation-name: fadeOut; }
+  .ticker-sheet[data-state="loading"] .ts-chart { animation: none; }
+}

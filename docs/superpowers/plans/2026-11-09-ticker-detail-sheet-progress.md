@@ -10,8 +10,9 @@ Baseline before work: `python -m pytest tests/ -q` → 693 passed, 1 failed (`te
 | # | Unit | Model | Files | Status |
 |---|---|---|---|---|
 | 1 | Backend: `get_price_history` + `/api/ticker/{ticker}/detail` + tests | opus, medium | `src/data/market.py`, `src/web/routes.py`, `tests/test_ticker_detail.py` | done, reviewed, committed |
-| 2 | Frontend sheet: dialog, chart + level plugin, info panel, motion, `tickerLink` + `open-ticker` handler | opus, medium | `src/web/static/index.html`, `src/web/static/app.js` (new code only), `src/web/static/style.css`, `tests/test_web_modules_contract.py` | dispatched |
-| 3 | Wire `tickerLink` into the six lists | sonnet | `src/web/static/app.js` (list renderers only) | waits on 2 |
+| 2 | Frontend sheet: dialog, chart + level plugin, info panel, motion, `tickerLink` + `open-ticker` handler | opus, medium | `src/web/static/index.html`, `src/web/static/app.js` (new code only), `src/web/static/style.css`, `tests/test_web_modules_contract.py` | done, reviewed, committed |
+| 3 | Wire `tickerLink` into the lists + shadow row ids | sonnet | `src/web/static/app.js` (list renderers only), `src/trading/shadow.py`, `tests/test_shadow.py` | dispatched |
+| 4 | Trading 212 price for held live tickers in the detail endpoint | sonnet | `src/web/routes.py`, `tests/test_ticker_detail.py` | dispatched |
 
 ## Decisions made during implementation
 
@@ -30,4 +31,12 @@ Baseline before work: `python -m pytest tests/ -q` → 693 passed, 1 failed (`te
 - Fixed: report label carries the verdict (`Latest analysis · HOLD`) so a non-buy verdict doesn't read as a buy line.
 - Fixed: report stop/take profit read from the `stop_loss` / `target_price` columns only (raw_signals has no top-level keys for them).
 - Timestamps are naive UTC; daily bars read like `T04:00`, not `T00:00`. Frontend must not assume midnight.
-- Open question to user: prefer Trading 212 `currentPrice` for held live tickers (follow-up, not started).
+- User said yes (2026-11-09): prefer Trading 212 `currentPrice` for held live tickers. This is unit 4.
+
+## Unit 2 review (ponytail)
+
+- Fixed: a range switch no longer blanks the sheet into the skeleton; only the first load per ticker does, so the chart animates to the new range.
+- Fixed: chart times parse server strings as UTC (`+ 'Z'`) and show local time; 1D axis was showing UTC.
+- Fixed: backend sends `info.closed_at` for shadow positions (frontend already read it).
+- Accepted shortcut: all trade dots shown (main + every shadow).
+- `node --test tests/js/` fails on Node 22 (directory arg) before and after; `node --test tests/js/features.test.mjs` passes.

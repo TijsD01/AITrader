@@ -1046,7 +1046,8 @@ async def get_ticker_detail(ticker: str, range: str = "3M"):
                 levels={"entry": sp.entry_price_native, "stop": sp.stop_loss_native,
                         "take_profit": sp.take_profit_native, "high": sp.highest_price_native},
                 info={"score": sp.consensus_score, "created_at": _iso(sp.opened_at),
-                      "exit_reason": sp.exit_reason, "pnl_pct": _r2(sp.realized_pnl_pct)}))
+                      "exit_reason": sp.exit_reason, "pnl_pct": _r2(sp.realized_pnl_pct),
+                      "closed_at": _iso(sp.closed_at)}))
         source = f"shadow:{sp.strategy}"
         if sp.opened_at and sp.opened_at >= since:
             trades.append({"side": "BUY", "price": _r2(sp.entry_price_native), "at": _iso(sp.opened_at), "source": source})

@@ -158,6 +158,7 @@ document.addEventListener('click', (e) => {
     case 'inspect': inspectReport(Number(el.dataset.idx)); break;
     case 'cancel-trigger': cancelTrigger(Number(el.dataset.id), ticker); break;
     case 'reset-shadow': resetShadow(el.dataset.key || ''); break;
+    case 'open-ticker': openTickerSheet(ticker, el.dataset.source || ''); break;
     default: break;
   }
 });
@@ -3145,3 +3146,314 @@ async function resetShadow(key) {
     showToast('Error resetting shadow portfolio.', true);
   }
 }
+
+// ------------------------------------------------------------------
+// Ticker detail sheet: price chart with trade levels for one ticker
+// (/api/ticker/{ticker}/detail). Opens from any data-action="open-ticker".
+// ------------------------------------------------------------------
+function tickerLink(ticker, source = '') {
+  return `<button type="button" class="ticker-link" data-action="open-ticker" data-ticker="${esc(ticker)}" data-source="${esc(source)}">${esc(ticker)}</button>`;
+}
+
+const TS_LEVELS = {
+  entry: { label: 'Entry', color: '--text-2' },
+  limit: { label: 'Limit', color: '--accent' },
+  stop: { label: 'Stop', color: '--loss' },
+  take_profit: { label: 'Take profit', color: '--gain' },
+  high: { label: 'High', color: '--text-3' },
+  breakeven_at: { label: 'Breakeven at', color: '--text-3' },
+};
+const tickerSheet = { ticker: '', source: '', range: '3M', data: null, selected: [], shown: '', chart: null, req: 0, backPending: false };
+const tsReducedMotion = () => window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+function tsLineDash(key, set) {
+  if (key === 'high' || key === 'breakeven_at') return [2, 3];
+  const solid = set.state === 'live' || (key === 'entry' && set.state === 'simulated');
+  return solid ? [] : [6, 4];
+}
+
+// Inline Chart.js plugin: horizontal level lines with a right-edge label
+const tsLevelPlugin = {
+  id: 'tsLevels',
+  beforeDatasetsDraw(chart, args, opts) { // under the price line, so trade markers stay visible
+    const lines = opts.lines || [];
+    if (!lines.length) return;
+    const { ctx, chartArea: a, scales: { y } } = chart;
+    ctx.save();
+    ctx.font = `600 11px ${cssVar('--font-sans') || 'sans-serif'}`;
+    const labels = [];
+    lines.forEach(l => {
+      const py = y.getPixelForValue(l.value);
+      ctx.strokeStyle = l.color;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash(l.dash);
+      ctx.beginPath(); ctx.moveTo(a.left, py); ctx.lineTo(a.right, py); ctx.stroke();
+      labels.push({ ...l, py });
+    });
+    ctx.setLineDash([]);
+    // Nudge labels apart so close levels stay readable
+    labels.sort((p, q) => p.py - q.py);
+    for (let i = 1; i < labels.length; i++) labels[i].py = Math.max(labels[i].py, labels[i - 1].py + 16);
+    const bg = cssVar('--surface');
+    labels.forEach(l => {
+      const w = ctx.measureText(l.text).width + 10;
+      const x = a.right - w;
+      ctx.fillStyle = bg;
+      ctx.fillRect(x, l.py - 8, w, 16);
+      ctx.fillStyle = l.color;
+      ctx.textBaseline = 'middle';
+      ctx.fillText(l.text, x + 5, l.py);
+    });
+    ctx.restore();
+  }
+};
+
+function openTickerSheet(ticker, source = '') {
+  const dlg = document.getElementById('tickerSheet');
+  if (!dlg || !ticker) return;
+  Object.assign(tickerSheet, { ticker, source, range: '3M', data: null, selected: [], shown: '' });
+  document.getElementById('tsTicker').textContent = ticker;
+  document.getElementById('tsName').textContent = '';
+  document.getElementById('tsPrice').textContent = '';
+  if (!dlg.open) {
+    dlg.classList.remove('is-closing');
+    dlg.showModal();
+    const push = () => history.pushState({ tickerSheet: true }, '');
+    // A history.back() from the previous close may still be in flight; push after it lands
+    if (tickerSheet.backPending) window.addEventListener('popstate', push, { once: true });
+    else push();
+  }
+  loadTickerSheet();
+}
+
+function closeTickerSheet() {
+  const dlg = document.getElementById('tickerSheet');
+  if (!dlg || !dlg.open || dlg.classList.contains('is-closing')) return;
+  dlg.classList.add('is-closing');
+  let done = false;
+  const finish = () => { if (done) return; done = true; dlg.classList.remove('is-closing'); dlg.close(); };
+  dlg.addEventListener('animationend', e => { if (e.target === dlg) finish(); }, { once: true });
+  setTimeout(finish, 250);
+}
+
+async function loadTickerSheet() {
+  const req = ++tickerSheet.req;
+  const { ticker, range } = tickerSheet;
+  const dlg = document.getElementById('tickerSheet');
+  // Skeleton only on first load; a range switch keeps the chart so it can animate to the new data
+  if (!tickerSheet.data || tickerSheet.data.ticker !== ticker) dlg.dataset.state = 'loading';
+  dlg.querySelectorAll('[data-range]').forEach(b => {
+    b.disabled = true;
+    b.classList.toggle('active-tab', b.dataset.range === range);
+    b.setAttribute('aria-pressed', String(b.dataset.range === range));
+  });
+  let data = null;
+  try {
+    const res = await fetch(`/api/ticker/${encodeURIComponent(ticker)}/detail?range=${encodeURIComponent(range)}`);
+    if (res.ok) data = await res.json();
+  } catch (e) { /* offline: error state below */ }
+  if (req !== tickerSheet.req) return; // a newer range or ticker was requested
+  dlg.querySelectorAll('[data-range]').forEach(b => { b.disabled = false; });
+  if (!data) { dlg.dataset.state = 'error'; return; }
+  dlg.dataset.state = 'ready';
+  const firstLoad = !tickerSheet.data || tickerSheet.data.ticker !== data.ticker;
+  tickerSheet.data = data;
+  if (firstLoad) tsPickDefaultSet();
+  document.getElementById('tsTicker').textContent = data.ticker || ticker;
+  document.getElementById('tsName').textContent = data.name || '';
+  document.getElementById('tsPrice').textContent = hasNum(data.current_price) ? `${num(data.current_price)} ${data.currency || ''}`.trim() : '';
+  renderTickerSheet(!firstLoad);
+}
+
+function tsPickDefaultSet() {
+  const sets = tickerSheet.data.level_sets || [];
+  const pick = sets.find(s => s.id === tickerSheet.source)
+    || sets.find(s => s.kind === 'position')
+    || sets.find(s => s.kind === 'trigger' && s.status === 'PENDING')
+    || sets.find(s => s.kind === 'report')
+    || sets[0];
+  tickerSheet.selected = pick ? [pick.id] : [];
+  tickerSheet.shown = pick ? pick.id : '';
+}
+
+function renderTickerSheet(animate = false) {
+  const d = tickerSheet.data;
+  const sets = d.level_sets || [];
+  const chosen = sets.filter(s => tickerSheet.selected.includes(s.id));
+  document.getElementById('tsSets').innerHTML = sets.length
+    ? sets.map(s => `<button type="button" class="ui-chip ts-chip" data-set="${esc(s.id)}" aria-pressed="${tickerSheet.selected.includes(s.id)}">${esc(s.label)}</button>`).join('')
+    : '<p class="text-sm ui-muted">No trigger, position or advice for this ticker yet.</p>';
+  renderTickerChart(chosen, animate);
+  renderTickerLegend(chosen);
+  renderTickerInfo(sets.find(s => s.id === tickerSheet.shown));
+}
+
+function renderTickerChart(chosen, animate) {
+  const d = tickerSheet.data;
+  const hist = Array.isArray(d.history) ? d.history : [];
+  const box = document.getElementById('tsChartBox');
+  const note = document.getElementById('tsChartNote');
+  const empty = !hist.length || typeof Chart === 'undefined';
+  box.classList.toggle('is-empty', empty);
+  note.hidden = !empty;
+  note.textContent = empty ? 'No price data for this range.' : '';
+  if (tickerSheet.chart && (empty || !animate)) { tickerSheet.chart.destroy(); tickerSheet.chart = null; }
+  if (empty) return;
+
+  const lines = [];
+  chosen.forEach(s => Object.keys(TS_LEVELS).forEach(k => {
+    const v = s.levels && s.levels[k];
+    if (!hasNum(v) || lines.some(l => l.key === k && l.value === Number(v))) return; // two sets often share a level
+    const color = cssVar(TS_LEVELS[k].color);
+    lines.push({ key: k, value: Number(v), color, dash: tsLineDash(k, s), text: `${TS_LEVELS[k].label} ${num(v)}` });
+  }));
+
+  const labels = hist.map(p => p[0]);
+  const closes = hist.map(p => Number(p[1]));
+  const t0 = Date.parse(labels[0] + 'Z'), t1 = Date.parse(labels[labels.length - 1] + 'Z');
+  const times = labels.map(l => Date.parse(l + 'Z'));
+  // shortcut: shows every trade (main and all shadows), not only the selected shadow's; match by strategy once trade.source carries the shadow set id
+  const trades = (d.trades || []).filter(t => hasNum(t.price) && Date.parse(t.at + 'Z') >= t0 && Date.parse(t.at + 'Z') <= t1).map(t => {
+    const at = Date.parse(t.at + 'Z');
+    let idx = times.findIndex(x => x >= at);
+    if (idx < 0) idx = times.length - 1;
+    return { x: labels[idx], y: Number(t.price), sell: String(t.side).toUpperCase() === 'SELL' };
+  });
+
+  const all = closes.concat(lines.map(l => l.value), trades.map(t => t.y)).filter(Number.isFinite);
+  const lo = Math.min(...all), hi = Math.max(...all);
+  const pad = Math.max((hi - lo) * 0.06, hi * 0.005);
+  const yMin = lo - pad, yMax = hi + pad;
+
+  const intraday = tickerSheet.range === '1D';
+  // Server times are naive UTC; show them in the viewer's time zone
+  const fmtX = l => intraday
+    ? new Date(l + 'Z').toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
+    : new Date(l + 'Z').toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+  const lineDs = {
+    data: closes, borderColor: cssVar('--text'), borderWidth: 1.75, pointRadius: 0, pointHoverRadius: 0, fill: false, tension: 0,
+  };
+  const tradeDs = {
+    data: trades, showLine: false, pointStyle: 'triangle', pointRadius: 6, pointHoverRadius: 6,
+    rotation: trades.map(t => t.sell ? 180 : 0),
+    backgroundColor: trades.map(t => cssVar(t.sell ? '--loss' : '--gain')),
+    borderColor: cssVar('--surface'), borderWidth: 1,
+  };
+  const anim = tsReducedMotion() ? false : { duration: 200 };
+
+  if (tickerSheet.chart) {
+    const c = tickerSheet.chart;
+    c.data.labels = labels;
+    c.data.datasets[0].data = closes;
+    Object.assign(c.data.datasets[1], tradeDs);
+    c.options.scales.y.suggestedMin = yMin; c.options.scales.y.suggestedMax = yMax;
+    c.options.scales.x.ticks.callback = function (v) { return fmtX(this.getLabelForValue(v)); };
+    c.options.plugins.tsLevels.lines = lines;
+    c.options.animation = anim;
+    c.update();
+    return;
+  }
+  tickerSheet.chart = new Chart(document.getElementById('tsChart'), {
+    type: 'line',
+    data: { labels, datasets: [lineDs, tradeDs] },
+    plugins: [tsLevelPlugin],
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: anim,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: { filter: i => i.datasetIndex === 0, callbacks: { title: items => fmtX(items[0].label), label: i => num(i.parsed.y) } },
+        tsLevels: { lines },
+      },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: cssVar('--text-3'), maxTicksLimit: 5, maxRotation: 0, callback: function (v) { return fmtX(this.getLabelForValue(v)); } } },
+        y: { suggestedMin: yMin, suggestedMax: yMax, position: 'left', grid: { color: cssVar('--line-soft') }, ticks: { color: cssVar('--text-3'), maxTicksLimit: 6 } },
+      },
+    },
+  });
+}
+
+function renderTickerLegend(chosen) {
+  const keys = Object.keys(TS_LEVELS).filter(k => chosen.some(s => s.levels && hasNum(s.levels[k])));
+  const el = document.getElementById('tsLegend');
+  if (!keys.length) { el.innerHTML = ''; return; }
+  const swatch = (color, dash) => `<span class="ts-swatch" style="border-top: 2px ${dash} ${color}"></span>`;
+  el.innerHTML = [
+    `<span>${swatch('var(--text-2)', 'solid')}Live</span>`,
+    `<span>${swatch('var(--text-2)', 'dashed')}Would be, simulated or past</span>`,
+    ...keys.map(k => `<span>${swatch(`var(${TS_LEVELS[k].color})`, k === 'high' || k === 'breakeven_at' ? 'dotted' : 'solid')}${esc(TS_LEVELS[k].label)}</span>`),
+  ].join('');
+}
+
+function renderTickerInfo(set) {
+  const el = document.getElementById('tsInfo');
+  if (!set) { el.innerHTML = ''; return; }
+  const price = Number(tickerSheet.data.current_price);
+  const lv = set.levels || {};
+  const info = set.info || {};
+  const dist = v => (hasNum(price) && price > 0) ? signedPct((Number(v) - price) / price * 100, 1) : '--';
+  const row = (k, v) => `<div class="ts-row"><dt>${k}</dt><dd class="ui-num">${v}</dd></div>`;
+  const badgeCls = { live: 'ui-badge-accent', unfunded: 'ui-badge-warn' }[set.state] || '';
+  const stateLabel = { live: 'Live', unfunded: 'Unfunded', would_be: 'Not armed', past: 'Past', simulated: 'Simulated' }[set.state] || set.state;
+  const notes = [];
+  if (set.state === 'unfunded') notes.push('Waiting for cash or a free slot.');
+  if (set.state === 'would_be' && set.kind === 'report') notes.push('Not armed. Lines show where the trigger would be.');
+  if (set.kind === 'position' && hasNum(lv.breakeven_at)) notes.push(`Stop moves to breakeven + 1% at ${num(lv.breakeven_at)} (${dist(lv.breakeven_at)}).`);
+  const rows = Object.keys(TS_LEVELS).filter(k => k !== 'breakeven_at' && hasNum(lv[k]))
+    .map(k => row(TS_LEVELS[k].label, `${num(lv[k])} <span class="ui-faint">${dist(lv[k])}</span>`));
+  if (hasNum(info.allocation_eur)) rows.push(row('Allocation', eur(info.allocation_eur)));
+  if (hasNum(info.planned_shares)) rows.push(row('Shares', num(info.planned_shares, 4).replace(/\.?0+$/, '')));
+  if (hasNum(info.score)) rows.push(row('Score', esc(info.score)));
+  if (hasNum(info.pnl_pct)) rows.push(row('P&amp;L', `<span class="${gainCls(info.pnl_pct)}">${signedPct(info.pnl_pct)}</span>`));
+  if (info.exit_reason) rows.push(row('Exit reason', esc(info.exit_reason)));
+  if (info.created_at) rows.push(row('Created', esc(String(info.created_at).replace('T', ' ').slice(0, 16))));
+  if (info.closed_at) rows.push(row('Closed', esc(String(info.closed_at).replace('T', ' ').slice(0, 16))));
+  el.innerHTML = `
+    <div class="flex flex-wrap items-center gap-2 mb-2">
+      <h3 class="ts-info-title">${esc(set.label)}</h3>
+      <span class="ui-badge ${badgeCls}">${esc(stateLabel)}</span>
+      ${set.status && set.kind.includes('trigger') ? triggerStatusBadge(set.status) : ''}
+      ${set.trigger_type ? `<span class="text-xs ui-muted">${esc(triggerTypeLabel(set.trigger_type))}</span>` : ''}
+    </div>
+    ${notes.map(n => `<p class="text-sm ui-muted mb-2">${esc(n)}</p>`).join('')}
+    <dl class="ts-rows">${rows.join('')}</dl>
+    ${info.rationale ? `<p class="ts-rationale">${esc(info.rationale)}</p>` : ''}`;
+}
+
+(function initTickerSheet() {
+  const dlg = document.getElementById('tickerSheet');
+  if (!dlg) return;
+  dlg.addEventListener('cancel', e => { e.preventDefault(); closeTickerSheet(); }); // Escape: animate out
+  dlg.addEventListener('click', e => {
+    if (e.target === dlg || e.target.closest('[data-ts-close]')) return closeTickerSheet(); // backdrop or X
+    const r = e.target.closest('[data-range]');
+    if (r && r.dataset.range !== tickerSheet.range) { tickerSheet.range = r.dataset.range; loadTickerSheet(); return; }
+    if (e.target.closest('[data-ts-retry]')) { loadTickerSheet(); return; }
+    const chip = e.target.closest('[data-set]');
+    if (chip) {
+      const id = chip.dataset.set;
+      const sel = tickerSheet.selected;
+      tickerSheet.selected = sel.includes(id) ? sel.filter(x => x !== id) : sel.concat(id);
+      if (tickerSheet.selected.includes(id)) tickerSheet.shown = id;
+      else if (tickerSheet.shown === id) tickerSheet.shown = tickerSheet.selected[tickerSheet.selected.length - 1] || '';
+      renderTickerSheet(true);
+    }
+  });
+  // Every close path ends here: drop our history entry if it is still on top
+  dlg.addEventListener('close', () => {
+    tickerSheet.req++; // ignore responses still in flight
+    if (history.state && history.state.tickerSheet) {
+      tickerSheet.backPending = true;
+      history.back();
+    }
+  });
+  window.addEventListener('popstate', () => {
+    if (tickerSheet.backPending) { tickerSheet.backPending = false; return; } // our own back() from 'close'
+    if (dlg.open) closeTickerSheet(); // browser back gesture
+  });
+  // Theme flip: re-read canvas colours by rebuilding the open chart
+  if (window.matchMedia) {
+    const q = matchMedia('(prefers-color-scheme: dark)');
+    if (q.addEventListener) q.addEventListener('change', () => { if (dlg.open && tickerSheet.data) renderTickerSheet(false); });
+  }
+})();
