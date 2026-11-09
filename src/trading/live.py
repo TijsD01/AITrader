@@ -1195,7 +1195,8 @@ class LiveBroker(BaseBroker):
         allocation_eur: float,
         consensus_score: int,
         ai_rationale: str,
-        report_id: Optional[int] = None
+        report_id: Optional[int] = None,
+        forced: bool = False
     ) -> Dict[str, Any]:
         """Creates an armed price trigger for live execution. report_id links it to its AnalysisReport."""
         target_price = round(target_price, 2)
@@ -1299,6 +1300,7 @@ class LiveBroker(BaseBroker):
                 consensus_score=consensus_score,
                 ai_rationale=f"[LIVE ARMED] {ai_rationale}",
                 report_id=report_id,
+                forced=forced,
                 status="PENDING",
                 is_live=True,
                 created_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)

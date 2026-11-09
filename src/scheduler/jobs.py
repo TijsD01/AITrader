@@ -76,8 +76,8 @@ class TradingScheduler:
         """
         Cancels the pending trigger(s) of the active mode for `ticker` when a fresh debate would no longer arm one
         (lower score, non-buy verdict or risk veto). An old high score must not buy on a stale verdict.
-        A soft block (HOLD, low score) only cancels when the score fell below the trigger's own score, so a
-        trigger the user forced against the same verdict stays. Hard blocks (veto, SELL, below minimum) always cancel.
+        Only a trigger the user forced against a soft block (HOLD, low score) survives a soft block, and only while
+        the score has not fallen below its armed score. Hard blocks (veto, SELL, below minimum) always cancel.
         Returns True when at least one trigger was cancelled.
         """
         verdict = evaluate_trigger_verdict(report, trigger_min_score)
@@ -86,13 +86,14 @@ class TradingScheduler:
         live = get_active_broker() is live_broker
         async with AsyncSessionLocal() as db_session:
             res = await db_session.execute(
-                select(OrderTrigger.id, OrderTrigger.consensus_score).where(
+                select(OrderTrigger.id, OrderTrigger.forced, OrderTrigger.consensus_score).where(
                     OrderTrigger.ticker == ticker, OrderTrigger.status == "PENDING", OrderTrigger.is_live == live
                 )
             )
             trigger_ids = [
-                trigger_id for trigger_id, armed_score in res.all()
-                if not verdict.overridable or armed_score is None or verdict.consensus_score < armed_score
+                trigger_id for trigger_id, forced, armed_score in res.all()
+                if not (forced and verdict.overridable and armed_score is not None
+                        and verdict.consensus_score >= armed_score)
             ]
         reason = f"New debate no longer supports this buy: {verdict.message}"
         cancelled = False
@@ -148,6 +149,10 @@ class TradingScheduler:
                 if await self._cancel_downgraded_triggers(ticker, report, trigger_min_score):
                     result["cancelled"].append(f"{ticker} ({report['consensus_score']}/100)")
                     continue
+                result["kept"].append(f"{ticker} ({report['consensus_score']}/100)")
+                # Only a passing verdict refreshes the score; a kept forced trigger keeps its armed score
+                if not evaluate_trigger_verdict(report, trigger_min_score).allowed:
+                    continue
                 async with AsyncSessionLocal() as db_session:
                     res = await db_session.execute(
                         select(OrderTrigger).where(
@@ -157,7 +162,6 @@ class TradingScheduler:
                     for trig in res.scalars().all():
                         trig.consensus_score = report["consensus_score"]
                     await db_session.commit()
-                result["kept"].append(f"{ticker} ({report['consensus_score']}/100)")
             except Exception as e:
                 # A failed debate (LLM timeout, data error) never cancels: the trigger keeps its last verdict
                 logger.error(f"Trigger re-debate failed for {ticker}: {e}", exc_info=True)

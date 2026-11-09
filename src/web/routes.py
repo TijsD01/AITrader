@@ -387,7 +387,8 @@ async def create_trigger(req: CreateTriggerRequest):
         take_profit=tp,
         allocation_eur=alloc_eur,
         consensus_score=report["consensus_score"],
-        ai_rationale=rationale
+        ai_rationale=rationale,
+        forced=gate.code == "OK_FORCED"
     )
     if not res.get("success"):
         raise HTTPException(status_code=400, detail=res.get("message"))
@@ -437,7 +438,8 @@ async def _arm_from_ai(req: CreateTriggerFromAIRequest, job: Dict[str, Any]):
         take_profit=tp,
         allocation_eur=alloc_eur,
         consensus_score=report["consensus_score"],
-        ai_rationale=rationale
+        ai_rationale=rationale,
+        forced=gate.code == "OK_FORCED"
     )
     if not res.get("success"):
         raise HTTPException(status_code=400, detail=res.get("message"))

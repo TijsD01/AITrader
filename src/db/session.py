@@ -48,6 +48,7 @@ def _run_migrations(connection):
         ("shadow_positions", "initial_stop_native", "FLOAT"),
         ("order_triggers", "cancel_reason", "VARCHAR(255)"),
         ("order_triggers", "report_id", "INTEGER"),
+        ("order_triggers", "forced", "BOOLEAN DEFAULT 0"),
         ("positions", "trigger_id", "INTEGER"),
     ]
     for table, col, col_type in migrations:

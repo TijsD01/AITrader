@@ -732,14 +732,14 @@ async def test_daily_redebate_cancels_downgraded_keeps_strong_forced_and_failed(
     from sqlalchemy import select, delete
     await init_db()
 
-    armed = {"RDDROP": 86, "RDKEEP": 86, "RDFRESH": 86, "RDFAIL": 86, "RDFORCED": 65}
+    armed = {"RDDROP": 86, "RDKEEP": 86, "RDFRESH": 86, "RDFAIL": 86, "RDFORCED": 65, "RDFLIP": 82}
     tickers = list(armed)
     async with AsyncSessionLocal() as session:
         for tk, score in armed.items():
             session.add(OrderTrigger(ticker=tk, name=tk, currency="EUR", trigger_type="LIMIT_PULLBACK",
                                      target_price=98.0, current_price_at_creation=100.0, stop_loss=95.0,
                                      take_profit=110.0, allocation_eur=500.0, consensus_score=score,
-                                     status="PENDING", is_live=False))
+                                     forced=tk == "RDFORCED", status="PENDING", is_live=False))
         # A manual analysis from last night: reused, no new debate, and its low score cancels the trigger
         session.add(AnalysisReport(ticker="RDFRESH", action="BUY", consensus_score=60))
         await session.commit()
@@ -750,7 +750,8 @@ async def test_daily_redebate_cancels_downgraded_keeps_strong_forced_and_failed(
     async def mock_eval(data, total_val):
         if data["ticker"] == "RDFAIL":
             raise RuntimeError("LLM down")
-        action, score = {"RDDROP": ("BUY", 75), "RDFORCED": ("HOLD", 65)}.get(data["ticker"], ("STRONG_BUY", 91))
+        action, score = {"RDDROP": ("BUY", 75), "RDFORCED": ("HOLD", 66), "RDFLIP": ("HOLD", 85)}.get(
+            data["ticker"], ("STRONG_BUY", 91))
         return {
             "ticker": data["ticker"], "action": action, "consensus_score": score,
             "risk": {"approved": True, "take_profit_price": 110.0, "stop_loss_price": 95.0, "risk_summary": "ok"},
@@ -774,10 +775,12 @@ async def test_daily_redebate_cancels_downgraded_keeps_strong_forced_and_failed(
         assert by["RDDROP"].status == "CANCELLED"          # BUY 75 < threshold 80 and below its armed 86
         assert by["RDFRESH"].status == "CANCELLED"         # reused report: 60 < armed 86
         assert by["RDKEEP"].status == "PENDING" and by["RDKEEP"].consensus_score == 91
-        assert by["RDFORCED"].status == "PENDING"          # forced at HOLD 65, still HOLD 65: user override stays
+        assert by["RDFORCED"].status == "PENDING"          # forced at HOLD 65, now HOLD 66: user override stays
+        assert by["RDFORCED"].consensus_score == 65        # a failing verdict never refreshes the score
+        assert by["RDFLIP"].status == "CANCELLED"          # not forced: HOLD cancels even with a higher score
         assert by["RDFAIL"].status == "PENDING"
         assert "RDFAIL" in result["failed"]
-        assert {c.args[0]["ticker"] for c in evaluate.await_args_list} == {"RDDROP", "RDKEEP", "RDFAIL", "RDFORCED"}
+        assert {c.args[0]["ticker"] for c in evaluate.await_args_list} == {"RDDROP", "RDKEEP", "RDFAIL", "RDFORCED", "RDFLIP"}
         send.assert_awaited_once()
         assert "RDDROP" in send.await_args.args[0] and "RDFRESH" in send.await_args.args[0]
     finally:
