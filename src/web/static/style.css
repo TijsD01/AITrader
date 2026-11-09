@@ -88,6 +88,8 @@
   --radius-xl: 20px;
   --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, "Segoe UI", sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* Numbers: Archivo has tabular figures and a width axis; the hero runs it wide */
+  --font-num: 'Archivo', var(--font-sans);
   --nav-h: 68px;
   --nav-gap: 12px;
   /* Layout: translucent bars and card frame (light: borderless cards, dark: hairline) */
@@ -223,7 +225,7 @@ button:active { transform: scale(0.97); }
 /* ------------------------------------------------------------------ */
 /* Building blocks (ui-*)                                              */
 /* ------------------------------------------------------------------ */
-.ui-num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+.ui-num { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
 .ui-gain { color: var(--gain) !important; }
 .ui-loss { color: var(--loss) !important; }
 .ui-muted { color: var(--text-2); }
@@ -472,11 +474,22 @@ button.ui-chip { cursor: pointer; }
 /* ------------------------------------------------------------------ */
 /* Home (Portfolio)                                                    */
 /* ------------------------------------------------------------------ */
-.hero-card { padding: 20px; }
-@media (min-width: 640px) { .hero-card { padding: 28px; } }
-.hero-label { font-size: 13px; font-weight: 500; color: var(--text-2); }
-.hero-value { font: 600 36px/1.1 var(--font-mono); font-variant-numeric: tabular-nums; letter-spacing: -0.04em; color: var(--text); }
-@media (min-width: 768px) { .hero-value { font-size: 44px; } }
+.hero { padding: 4px 4px 0; }
+.hero-label { font-size: 14px; font-weight: 500; color: var(--text-2); }
+.hero-value {
+  font: 600 52px/1 var(--font-num); font-stretch: 115%; font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em; color: var(--text);
+}
+@media (min-width: 768px) { .hero-value { font-size: 72px; } }
+.hero-chart { margin: 0; }
+.hero-chart-plot { position: relative; height: 120px; }
+@media (min-width: 768px) { .hero-chart-plot { height: 160px; } }
+.hero-chart-note { margin-top: 6px; font-size: 12px; color: var(--text-3); }
+.hero-chart.is-empty .hero-chart-plot { display: none; }
+.hero-chart.is-empty .hero-chart-note { font-size: 13px; color: var(--text-2); }
+.empty-state { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 32px 24px; text-align: center; }
+.empty-title { font-size: 15px; font-weight: 600; color: var(--text); }
+.empty-body { max-width: 34ch; font-size: 13px; line-height: 1.5; color: var(--text-2); margin-bottom: 4px; }
 .alloc-bar { display: flex; height: 10px; border-radius: 6px; overflow: hidden; gap: 2px; background: var(--surface-2); }
 .alloc-bar > span { display: block; min-width: 3px; }
 .alloc-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--text-2); }
@@ -521,7 +534,7 @@ button.ui-chip { cursor: pointer; }
 .home-kpis > * + * { border-left: 1px solid var(--line); }
 .kpi { padding: 2px 16px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .home-kpis > :first-child { padding-left: 4px; }
-.kpi .kpi-value { font: 600 20px/1.2 var(--font-mono); letter-spacing: -0.02em; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kpi .kpi-value { font: 600 20px/1.2 var(--font-num); font-variant-numeric: tabular-nums; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #learningRiskParams { white-space: normal; overflow: visible; }
 .kpi .kpi-sub, .trigger-link .kpi-sub { font-size: 12px; color: var(--text-3); line-height: 1.35; }
 
@@ -547,7 +560,7 @@ button.ui-chip { cursor: pointer; }
   width: 40px; height: 40px; border-radius: 12px; flex-shrink: 0;
   background: var(--surface-2);
   display: flex; align-items: center; justify-content: center;
-  font: 600 11px/1 var(--font-mono); letter-spacing: -0.02em; overflow: hidden;
+  font: 600 11px/1 var(--font-num); overflow: hidden;
 }
 .pos-detail { padding: 4px 14px 14px; background: var(--surface-inset); display: none; }
 .pos-row.open .pos-detail { display: block; }
@@ -559,7 +572,7 @@ button.ui-chip { cursor: pointer; }
 .pos-row.open .pos-chevron { transform: rotate(180deg); }
 .kv { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; }
 .kv > span:first-child { color: var(--text-3); }
-.kv > span:last-child { font-family: var(--font-mono); color: var(--text); }
+.kv > span:last-child { font-family: var(--font-num); font-variant-numeric: tabular-nums; color: var(--text); }
 
 /* Generic card hover (screener / advice cards) */
 .stock-card { transition: border-color .2s ease, box-shadow .2s ease; }
@@ -640,7 +653,7 @@ button.ui-chip { cursor: pointer; }
 .set-help { display: block; margin-top: 2px; font-size: 13px; line-height: 1.4; color: var(--text-2); }
 .set-value { font-size: 15px; font-weight: 600; color: var(--accent-strong); white-space: nowrap; }
 .set-range { display: block; width: 100%; margin-top: 8px; accent-color: var(--accent); cursor: pointer; }
-.set-ticks { display: flex; justify-content: space-between; font: 12px var(--font-mono); color: var(--text-3); }
+.set-ticks { display: flex; justify-content: space-between; font: 12px var(--font-num); color: var(--text-3); }
 .set-select {
   width: auto; min-width: 136px; padding-right: 38px; cursor: pointer;
   -webkit-appearance: none; appearance: none;
