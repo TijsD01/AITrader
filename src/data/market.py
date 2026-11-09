@@ -1,4 +1,5 @@
 import logging
+import math
 import time
 from typing import Dict, Any, Optional
 import pandas as pd
@@ -29,6 +30,100 @@ _HISTORY_RANGES: Dict[str, Dict[str, Any]] = {
     "1Y": {"period": "1y", "interval": "1d"},
 }
 
+def _ema_last(x: np.ndarray, span: int) -> float:
+    """Last value of pandas' ewm(span, adjust=False).mean(), as one dot product."""
+    alpha = 2.0 / (span + 1)
+    n = len(x) - 1
+    w = alpha * (1 - alpha) ** np.arange(n, -1, -1.0)
+    w[0] = (1 - alpha) ** n
+    return float(w @ x)
+
+
+def compute_technicals(hist: pd.DataFrame, current_price: float) -> Dict[str, Any]:
+    """
+    Technical profile from daily bars (oldest first, 20 or more). Only the last value of each indicator
+    is needed, so most of them read the tail of the NumPy columns instead of building a full series.
+    """
+    c = hist["Close"].to_numpy(dtype=float)
+    h = hist["High"].to_numpy(dtype=float)
+    l = hist["Low"].to_numpy(dtype=float)
+    v = np.nan_to_num(hist["Volume"].to_numpy(dtype=float))
+    ok = np.isfinite(c) & np.isfinite(h) & np.isfinite(l)
+    if not ok.all():  # Yahoo sometimes returns an empty row for a day without trades
+        c, h, l, v = c[ok], h[ok], l[ok], v[ok]
+    if len(c) < 20:
+        raise ValueError(f"only {len(c)} usable bars")
+
+    ema20, ema50 = _ema_last(c, 20), _ema_last(c, 50)
+    sma200 = float(c[-200:].mean())
+
+    # RSI 14 (simple average of the last 14 changes)
+    delta = np.diff(c[-15:])
+    gain, loss = float(np.clip(delta, 0, None).mean()), float(np.clip(-delta, 0, None).mean())
+    if gain == 0 and loss == 0:
+        rsi14 = 50.0
+    elif loss == 0:
+        rsi14 = 100.0  # no down days in the window
+    else:
+        rsi14 = 100 - (100 / (1 + (gain / loss)))
+
+    # MACD (12, 26, 9): the signal line needs the whole MACD series
+    closes = pd.Series(c)
+    macd_line = (closes.ewm(span=12, adjust=False).mean() - closes.ewm(span=26, adjust=False).mean()).to_numpy()
+    macd_val, signal_val = float(macd_line[-1]), _ema_last(macd_line, 9)
+
+    # True range, +DM and -DM per bar (from the second bar on)
+    prev_c = c[:-1]
+    tr = np.maximum(h[1:] - l[1:], np.maximum(np.abs(h[1:] - prev_c), np.abs(l[1:] - prev_c)))
+    atr14 = float(tr[-14:].mean())
+    if not atr14 > 0:
+        atr14 = current_price * 0.025  # 2.5% default estimate
+
+    # ADX 14 (Wilder): trend strength whatever the direction; below ~20 the price is ranging
+    up, down = h[1:] - h[:-1], l[:-1] - l[1:]
+    plus_dm = np.where((up > down) & (up > 0), up, 0.0)
+    minus_dm = np.where((down > up) & (down > 0), down, 0.0)
+    sm = pd.DataFrame({"tr": tr, "p": plus_dm, "m": minus_dm}).ewm(alpha=1 / 14, adjust=False).mean().to_numpy()
+    di_sum, di_diff = sm[:, 1] + sm[:, 2], np.abs(sm[:, 1] - sm[:, 2])
+    dx = np.divide(100.0 * di_diff, di_sum, out=np.zeros_like(di_sum), where=di_sum > 0)
+    adx14 = float(pd.Series(dx).ewm(alpha=1 / 14, adjust=False).mean().iloc[-1])
+
+    # 52-week high (George & Hwang 2004: nearness to it predicts returns better than past return)
+    high_52w = float(h.max())
+    pct_below_52w_high = ((high_52w - current_price) / high_52w) * 100 if high_52w > 0 else 0.0
+
+    avg_vol_20 = float(v[-20:].mean())
+
+    def ret(bars: int) -> float:
+        return float((c[-1] / c[-1 - bars] - 1) * 100) if len(c) > bars + 1 else 0.0
+
+    return {
+        "price": round(current_price, 2),
+        "ema20": round(ema20, 2),
+        "ema50": round(ema50, 2),
+        "sma200": round(sma200, 2),
+        "rsi14": round(rsi14, 2),
+        "macd": round(macd_val, 2),
+        "macd_signal": round(signal_val, 2),
+        "macd_hist": round(macd_val - signal_val, 2),
+        "atr14": round(atr14, 2),
+        "atr_pct": round(atr14 / current_price * 100, 2),
+        "adx14": round(adx14, 2),
+        # Support & Resistance (20-day swing low/high)
+        "support_20d": round(float(l[-20:].min()), 2),
+        "resistance_20d": round(float(h[-20:].max()), 2),
+        "high_52w": round(high_52w, 2),
+        "pct_below_52w_high": round(max(0.0, pct_below_52w_high), 2),
+        "volume_surge_ratio": round(float(v[-1]) / avg_vol_20, 2) if avg_vol_20 > 0 else 1.0,
+        "return_1d_pct": round(float((c[-1] / c[-2] - 1) * 100), 2),
+        "return_5d_pct": round(ret(5), 2),
+        "return_1m_pct": round(ret(21), 2),
+        "above_ema20": bool(current_price > ema20),
+        "above_ema50": bool(current_price > ema50),
+        "above_sma200": bool(current_price > sma200),
+    }
+
+
 class MarketDataProvider:
     @staticmethod
     def get_stock_data(ticker_symbol: str) -> Optional[Dict[str, Any]]:
@@ -40,7 +135,8 @@ class MarketDataProvider:
         now = time.time()
         if sym in _stock_cache:
             cached_time, cached_data = _stock_cache[sym]
-            if (now - cached_time) < _CACHE_TTL_OPEN:
+            # Judged now, not when cached: a quote cached while closed goes stale the moment the market opens
+            if (now - cached_time) < (_CACHE_TTL_OPEN if quotes_moving(sym) else _CACHE_TTL_CLOSED):
                 return cached_data
 
         try:
@@ -62,6 +158,10 @@ class MarketDataProvider:
                         current_price = float(ext.iloc[-1])
                 except Exception as e:
                     logger.debug(f"No extended-hours quote for {ticker_symbol}: {e}")
+            if not math.isfinite(current_price) or current_price <= 0:
+                # NaN compares False with every stop and target, so it must not reach the brokers as a price
+                logger.warning(f"Unusable quote for {ticker_symbol}: {current_price}")
+                return None
             currency = fast_info.get("currency", "USD")
 
             # Try to get comprehensive fundamental info
@@ -77,66 +177,7 @@ class MarketDataProvider:
                 if info:
                     _info_cache[sym] = (now, info)
 
-            # Calculate Technical Indicators
-            closes = hist["Close"]
-            highs = hist["High"]
-            lows = hist["Low"]
-            volumes = hist["Volume"]
-
-            # Moving Averages
-            ema20 = closes.ewm(span=20, adjust=False).mean().iloc[-1]
-            ema50 = closes.ewm(span=50, adjust=False).mean().iloc[-1]
-            sma200 = closes.rolling(window=min(len(closes), 200)).mean().iloc[-1]
-
-            # RSI 14
-            delta = closes.diff()
-            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            last_gain = gain.iloc[-1]
-            last_loss = loss.iloc[-1]
-            if np.isnan(last_gain) or np.isnan(last_loss) or (last_gain == 0 and last_loss == 0):
-                rsi14 = 50.0
-            elif last_loss == 0:
-                rsi14 = 100.0  # no down days in the window
-            else:
-                rsi14 = float(100 - (100 / (1 + (last_gain / last_loss))))
-
-            # MACD (12, 26, 9)
-            exp12 = closes.ewm(span=12, adjust=False).mean()
-            exp26 = closes.ewm(span=26, adjust=False).mean()
-            macd_line = exp12 - exp26
-            signal_line = macd_line.ewm(span=9, adjust=False).mean()
-            macd_val = float(macd_line.iloc[-1])
-            signal_val = float(signal_line.iloc[-1])
-            macd_hist = macd_val - signal_val
-
-            # ATR 14
-            tr1 = highs - lows
-            tr2 = (highs - closes.shift()).abs()
-            tr3 = (lows - closes.shift()).abs()
-            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-            atr14 = float(tr.rolling(14).mean().iloc[-1])
-            if np.isnan(atr14) or atr14 <= 0:
-                atr14 = current_price * 0.025  # 2.5% default estimate
-
-            # Support & Resistance (20-day swing low/high)
-            recent_20 = hist.tail(20)
-            support_20d = float(recent_20["Low"].min())
-            resistance_20d = float(recent_20["High"].max())
-
-            # 52-week high (George & Hwang 2004: nearness to it predicts returns better than past return)
-            high_52w = float(highs.max())
-            pct_below_52w_high = ((high_52w - current_price) / high_52w) * 100 if high_52w > 0 else 0.0
-
-            # Volume comparison
-            avg_vol_20 = float(volumes.tail(20).mean())
-            last_vol = float(volumes.iloc[-1])
-            volume_surge_ratio = round(last_vol / avg_vol_20, 2) if avg_vol_20 > 0 else 1.0
-
-            # Performance returns
-            ret_1d = float(((closes.iloc[-1] / closes.iloc[-2]) - 1) * 100) if len(closes) > 1 else 0.0
-            ret_5d = float(((closes.iloc[-1] / closes.iloc[-6]) - 1) * 100) if len(closes) > 6 else 0.0
-            ret_1m = float(((closes.iloc[-1] / closes.iloc[-22]) - 1) * 100) if len(closes) > 22 else 0.0
+            technicals = compute_technicals(hist, current_price)
 
             result = {
                 "ticker": ticker_symbol,
@@ -149,28 +190,7 @@ class MarketDataProvider:
                 "quote_type": info.get("quoteType"),  # EQUITY, ETF, INDEX, CURRENCY, ...
 
                 # Technical Profile
-                "technicals": {
-                    "price": round(current_price, 2),
-                    "ema20": round(float(ema20), 2),
-                    "ema50": round(float(ema50), 2),
-                    "sma200": round(float(sma200), 2),
-                    "rsi14": round(rsi14, 2),
-                    "macd": round(macd_val, 2),
-                    "macd_signal": round(signal_val, 2),
-                    "macd_hist": round(macd_hist, 2),
-                    "atr14": round(atr14, 2),
-                    "support_20d": round(support_20d, 2),
-                    "resistance_20d": round(resistance_20d, 2),
-                    "high_52w": round(high_52w, 2),
-                    "pct_below_52w_high": round(max(0.0, pct_below_52w_high), 2),
-                    "volume_surge_ratio": volume_surge_ratio,
-                    "return_1d_pct": round(ret_1d, 2),
-                    "return_5d_pct": round(ret_5d, 2),
-                    "return_1m_pct": round(ret_1m, 2),
-                    "above_ema20": bool(current_price > ema20),
-                    "above_ema50": bool(current_price > ema50),
-                    "above_sma200": bool(current_price > sma200),
-                },
+                "technicals": technicals,
 
                 # Fundamental Profile
                 "fundamentals": {

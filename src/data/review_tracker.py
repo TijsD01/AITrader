@@ -7,7 +7,7 @@ from sqlalchemy import select, desc
 
 from config.settings import settings
 from src.db.session import AsyncSessionLocal
-from src.db.models import MarketDigest, PortfolioSnapshot
+from src.db.models import MarketDigest
 from src.data.market import market_data_provider
 from src.data.market_hours import us_session_local
 

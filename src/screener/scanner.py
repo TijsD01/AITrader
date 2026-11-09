@@ -3,6 +3,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional
 from config.default_universe import EU_STOCKS, US_STOCKS
+from config.settings import settings
 from src.data.market import market_data_provider
 from src.data.market_hours import is_eu_ticker
 
@@ -64,6 +65,11 @@ class MarketScanner:
             if not data:
                 continue
 
+            chop = MarketScanner.chop_reason(data["technicals"])
+            if chop:
+                logger.debug(f"Scan skips {ticker}: {chop}")
+                continue
+
             score, setup_type, notes = MarketScanner._evaluate_technical_setup(data)
             if score >= _BASE_SCORE:  # Only pass setups with no net penalty
                 candidate = {
@@ -87,6 +93,18 @@ class MarketScanner:
         result = ranked_candidates[:limit]
         _scan_cache[cache_key] = (now, result)
         return result
+
+    @staticmethod
+    def chop_reason(t: Dict[str, Any]) -> Optional[str]:
+        """Why this ticker is not worth a committee debate (ranging or dead flat), or None. Unknown values pass."""
+        if not settings.CHOP_FILTER_ENABLED:
+            return None
+        adx, atr_pct = t.get("adx14"), t.get("atr_pct")
+        if atr_pct is not None and atr_pct < settings.CHOP_MIN_ATR_PCT:
+            return f"flat: ATR is {atr_pct}% of price (minimum {settings.CHOP_MIN_ATR_PCT}%)"
+        if adx is not None and adx < settings.CHOP_ADX_MIN:
+            return f"no trend: ADX {adx} (minimum {settings.CHOP_ADX_MIN})"
+        return None
 
     @staticmethod
     def _evaluate_technical_setup(data: Dict[str, Any]) -> tuple[int, str, str]:

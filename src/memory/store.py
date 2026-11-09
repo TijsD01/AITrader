@@ -562,18 +562,6 @@ class AgentMemoryStore:
             """, (page.page_id, page.team_id, page.title, page.content_md, json.dumps(page.tags), json.dumps(page.links), now))
             await db.commit()
 
-    async def get_wiki_page(self, page_id: str) -> Optional[Dict[str, Any]]:
-        await self.init_db()
-        async with self._get_conn() as db:
-            async with await db.execute("SELECT * FROM memory_wiki WHERE page_id = ?", (page_id,)) as cursor:
-                row = await cursor.fetchone()
-                if row:
-                    item = dict(row)
-                    item["tags"] = json.loads(item.get("tags_json") or "[]")
-                    item["links"] = json.loads(item.get("links_json") or "[]")
-                    return item
-                return None
-
     async def list_wiki_pages(self, team_id: str = "trading-team") -> List[Dict[str, Any]]:
         await self.init_db()
         async with self._get_conn() as db:

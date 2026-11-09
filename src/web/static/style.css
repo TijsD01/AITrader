@@ -216,12 +216,6 @@ p { text-wrap: pretty; }
 button { transition: transform var(--dur-press) var(--ease-out); }
 button:active { transform: scale(0.97); }
 
-.transition-all {
-  transition-property: all;
-  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
-  transition-duration: 150ms;
-}
-
 /* ------------------------------------------------------------------ */
 /* Building blocks (ui-*)                                              */
 /* ------------------------------------------------------------------ */
@@ -252,7 +246,6 @@ button:active { transform: scale(0.97); }
   font-size: 13px; line-height: 1.45; color: var(--text-2);
 }
 .ui-notice-danger { background: var(--danger-surface); border-color: var(--danger-line); }
-.ui-notice-warn { background: var(--warn-soft); border-color: var(--warn-line); }
 
 /* Page heading for each tab */
 .ui-page-head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px; }

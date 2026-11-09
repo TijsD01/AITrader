@@ -1,3 +1,4 @@
+import asyncio
 import time
 import logging
 from typing import Dict, Optional
@@ -31,6 +32,17 @@ class CurrencyService:
     def _refresh_rate(self, code: str, now: float):
         if now < self._next_attempt.get(code, 0.0):
             return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._fetch_rate(code, now)  # plain thread: fetch and wait, as before
+            return
+        # On the event loop: answer from the last known rate and fetch in a worker thread.
+        # Claim the slot first, so a burst of calls starts one fetch.
+        self._next_attempt[code] = now + self._fail_backoff
+        loop.run_in_executor(None, self._fetch_rate, code, now)
+
+    def _fetch_rate(self, code: str, now: float):
         try:
             # yfinance EUR<CCY>=X gives the rate for 1 EUR in <CCY>
             info = yf.Ticker(f"EUR{code}=X").fast_info

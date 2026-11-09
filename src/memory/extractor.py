@@ -1,10 +1,9 @@
 import re
 import time
-import json
 import logging
 from typing import Dict, Any, List, Optional
 
-from src.memory.models import L1Atom, L2Scenario, L3CoreProfile, SkillAsset, WikiPage
+from src.memory.models import L1Atom, L2Scenario, L3CoreProfile, SkillAsset
 from src.memory.store import memory_store
 
 logger = logging.getLogger(__name__)
@@ -48,7 +47,6 @@ class AssetExtractor:
         team_id: str = "trading-team",
         agent_id: str = "committee",
         sync_to_store: bool = True,
-        use_llm: bool = False,
         metadata: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
@@ -262,38 +260,6 @@ class AssetExtractor:
         # 5. Extract L3 Cumulative Wisdom
         if "veto" in text.lower() or "fee drag" in text.lower():
             l3_wisdom_notes.append("Enforce strict Risk Officer veto when broker commissions reduce trade profit below viable bounds.")
-
-        # 6. LLM-Assisted Extraction if available
-        try:
-            from src.agents.base import llm_client
-            if use_llm and llm_client.has_active_key() and len(text) > 100:
-                prompt_sys = (
-                    "You are the TencentDB Agent Memory Asset Extractor. "
-                    "Extract structured memory assets from the following agent session or trading event. "
-                    "Return a JSON object with: "
-                    "{'atoms': [{'type': 'episodic'|'persona'|'instruction', 'subject': str, 'predicate': str, 'object': str, 'content': str}], "
-                    " 'scenario_summary': str, 'wisdom_bullet': str}"
-                )
-                res = await llm_client.generate_json(prompt_sys, text[:2000])
-                if res and isinstance(res, dict):
-                    for a in res.get("atoms", []):
-                        if isinstance(a, dict) and a.get("subject") and a.get("content"):
-                            extracted_atoms.append(L1Atom(
-                                atom_id=f"atom_llm_{int(now*1000)}_{len(extracted_atoms)}",
-                                team_id=team_id,
-                                agent_id=agent_id,
-                                type=a.get("type", "episodic"),
-                                subject=a.get("subject", "Agent"),
-                                predicate=a.get("predicate", "observed"),
-                                object=a.get("object", "event"),
-                                content=a.get("content"),
-                                confidence=0.92,
-                                source_session_id=session_id
-                            ))
-                    if res.get("wisdom_bullet"):
-                        l3_wisdom_notes.append(res["wisdom_bullet"])
-        except Exception as e:
-            logger.debug(f"LLM extraction skipped or failed: {e}")
 
         # 7. Persist to store if sync_to_store is True
         if sync_to_store:

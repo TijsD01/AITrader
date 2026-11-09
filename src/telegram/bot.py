@@ -10,7 +10,7 @@ import httpx
 from config.settings import settings
 from src.data.market import market_data_provider
 from src.agents.committee import investment_committee
-from src.trading.broker import active_broker as paper_broker, get_active_broker, active_broker, live_broker
+from src.trading.broker import active_broker as paper_broker, get_active_broker, live_broker
 from src.trading.risk import derive_trigger_levels, entry_allocation_from_summary
 from src.trading.trigger_gate import (
     normalize_ticker, invalid_ticker_result, precheck_manual_trigger, evaluate_trigger_verdict,
@@ -85,31 +85,6 @@ class TelegramAssistant:
             logger.error(f"Error sending Telegram notification: {e}")
             return False
         return overall_success
-
-    async def notify_trade(self, trade_result: Dict[str, Any]):
-        """Broadcasts an automated trade execution alert."""
-        if not trade_result.get("success"):
-            return
-
-        ticker = trade_result.get("ticker")
-        shares = trade_result.get("shares")
-        price_native = trade_result.get("price_native")
-        price_eur = trade_result.get("price_eur")
-        cost_eur = trade_result.get("total_eur")
-        sl = trade_result.get("stop_loss")
-        tp = trade_result.get("take_profit")
-
-        msg = (
-            f"🚀 <b>AUTOMATED BUY ORDER EXECUTED</b>\n\n"
-            f"<b>Asset:</b> <code>{ticker}</code>\n"
-            f"<b>Position:</b> {shares} shares\n"
-            f"<b>Entry Price:</b> {price_native} (≈ €{price_eur:.2f})\n"
-            f"<b>Total Allocation:</b> €{cost_eur:.2f}\n"
-            f"<b>Stop Loss:</b> {sl}\n"
-            f"<b>Take Profit:</b> {tp}\n\n"
-            f"🛡️ <i>Risk controls active. Trailing stop-loss engaged.</i>"
-        )
-        await self.send_message(msg)
 
     @staticmethod
     def _planned_buy_line(trigger_info: Dict[str, Any]) -> str:

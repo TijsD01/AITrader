@@ -1,8 +1,7 @@
 import time
 import logging
-from typing import Dict, Any, List, Optional
-from fastapi import APIRouter, Request, Query, HTTPException
-from fastapi.responses import JSONResponse
+from typing import Dict, Any, Optional
+from fastapi import APIRouter
 
 from src.memory.models import (
     ApiResponse,
@@ -12,7 +11,7 @@ from src.memory.models import (
     UpdateCoreProfileRequest, L3CoreProfile,
     CreateSkillRequest, SearchSkillsRequest, SkillAsset,
     CreateWikiRequest, WikiPage,
-    ChatMemoryContextRequest, ColdStartLoadout,
+    ChatMemoryContextRequest,
     ExtractAssetsRequest
 )
 from src.memory.store import memory_store

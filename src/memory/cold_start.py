@@ -1,7 +1,7 @@
 import time
 import logging
 import datetime
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 from sqlalchemy import select, desc, func
 
 from src.memory.models import ColdStartLoadout

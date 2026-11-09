@@ -1,0 +1,8 @@
+{
+  "bars_to_signal_us": 2539.7,
+  "bars_to_signal_peak_kb": 67.6,
+  "risk_check_plus_payload_us": 21.7,
+  "order_payload_json_dumps_us": 2.0,
+  "db_write_us": 2820.2,
+  "db_read_us": 1058.0
+}
