@@ -1,9 +1,14 @@
 import logging
+import math
 from typing import Dict, Any, Tuple, Optional, List
 from config.settings import settings
 from src.data.market_hours import check_market_hours
 
 logger = logging.getLogger(__name__)
+
+def _bad(*numbers) -> bool:
+    """True when any given number is NaN or infinite (None is allowed). NaN passes every "x <= 0" guard."""
+    return any(n is not None and not math.isfinite(n) for n in numbers)
 
 def get_effective_deployable_cash(
     cash_eur: float,
@@ -16,7 +21,7 @@ def get_effective_deployable_cash(
     The EUR cap limits the total in the market: cash already invested (cost basis of open positions) counts against it.
     Returns (usable_cash, protected_reserve).
     """
-    if cash_eur <= 0.0:
+    if _bad(cash_eur) or cash_eur <= 0.0:
         return 0.0, 0.0
     usage_pct = max_capital_usage_pct if max_capital_usage_pct is not None else settings.MAX_CAPITAL_USAGE_PCT
     if usage_pct > 1.0:
@@ -55,7 +60,7 @@ def calculate_position_allocation(
     When full_budget_utilization is False:
       Uses the traditional conservative size percentage (e.g. 8% of equity).
     """
-    if available_cash <= 0.0:
+    if _bad(available_cash) or available_cash <= 0.0:
         return 0.0
 
     # Explicit user-requested allocation takes precedence (capped at available cash)
@@ -220,6 +225,11 @@ def validate_buy_order(
     if settings.KILL_SWITCH_ACTIVE:
         return False, "Emergency kill switch is ACTIVE. All new trading halted."
 
+    # A bad quote or balance must never be approved: NaN slips through every comparison below
+    if _bad(cash_eur, allocation_eur, available_cash_eur, price_native, stop_loss_native, take_profit_native) \
+            or (price_native is not None and price_native <= 0):
+        return False, f"Invalid number in order for {ticker} (price {price_native}, allocation {allocation_eur}); not buying."
+
     # 1. Market Hours Check (No trades when market is closed)
     if settings.ENFORCE_MARKET_HOURS:
         is_open, open_msg = check_market_hours(ticker)
@@ -311,6 +321,8 @@ def validate_trigger_levels(
     """Returns an error message when a trigger's type or price levels are inconsistent, else None."""
     if trigger_type not in VALID_TRIGGER_TYPES:
         return f"Unknown trigger type '{trigger_type}' (expected LIMIT_PULLBACK or BREAKOUT_BUY)."
+    if _bad(target_price, current_price, stop_loss, take_profit):
+        return f"Trigger levels must be finite numbers (target {target_price}, price {current_price}, stop {stop_loss}, target {take_profit})."
     if not target_price or target_price <= 0:
         return f"Trigger target price ({target_price}) must be positive."
     if trigger_type == "LIMIT_PULLBACK" and target_price >= current_price:
@@ -336,6 +348,9 @@ def evaluate_trigger_condition(
     setup no longer holds (price already through the stop or the target) and
     the trigger should be cancelled instead of bought.
     """
+    # A missing or broken quote neither buys nor cancels: wait for the next real price
+    if not curr_price or not target_price or _bad(curr_price, target_price) or curr_price <= 0 or target_price <= 0:
+        return False, None
     if trigger_type == "LIMIT_PULLBACK":
         if curr_price > target_price:
             return False, None
@@ -444,8 +459,12 @@ def plan_buy(
     use this same sequence, so they show the same budget and share count.
     """
     from src.data.currency import currency_service
-    budget = risk_capped_allocation(allocation_eur, price_native, stop_loss_native, portfolio_value_eur, max_eur) if automated else allocation_eur
-    price_eur = currency_service.to_eur(price_native, currency) if price_native else 0.0
+    valid = not _bad(allocation_eur, price_native, stop_loss_native, portfolio_value_eur, max_eur)
+    if not valid:
+        allocation_eur, budget = 0.0, 0.0  # a NaN here would become a NaN share count in the order
+    else:
+        budget = risk_capped_allocation(allocation_eur, price_native, stop_loss_native, portfolio_value_eur, max_eur) if automated else allocation_eur
+    price_eur = currency_service.to_eur(price_native, currency) if price_native and valid else 0.0
     if not budget or budget <= 0 or price_eur <= 0:
         shares = 0.0
     elif settings.WHOLE_SHARES_ONLY:
@@ -498,7 +517,7 @@ def compute_trailing_stop(
     With atr_mult > 0 it then trails at highest_price - atr_mult x ATR, so winners can run
     while a reversal still locks in most of the gain.
     """
-    if not entry_price or entry_price <= 0 or not highest_price:
+    if not entry_price or entry_price <= 0 or not highest_price or _bad(entry_price, highest_price):
         return current_stop
     if (highest_price / entry_price) - 1.0 < breakeven_trigger_pct:
         return current_stop
@@ -522,8 +541,7 @@ def whole_share_count(
     closer to the allocation, costs at most round_up_pct % above it and stays within max_eur
     (the cash that is actually there). Returns 0 when even one share does not fit.
     """
-    import math
-    if not allocation_eur or allocation_eur <= 0 or not price_eur or price_eur <= 0:
+    if not allocation_eur or allocation_eur <= 0 or not price_eur or price_eur <= 0 or _bad(allocation_eur, price_eur, max_eur):
         return 0
     pct = settings.WHOLE_SHARE_ROUND_UP_PCT if round_up_pct is None else round_up_pct
     ceiling = allocation_eur * (1.0 + max(0.0, pct) / 100.0)
@@ -546,7 +564,7 @@ def affordable_share_count(
     when the budget buys none and one share fits both the cash that is free for this buy and
     MAX_POSITION_PCT % of the portfolio (and MAX_SINGLE_ORDER_EUR). Returns 0 when no budget was given.
     """
-    if not budget_eur or budget_eur <= 0 or not price_eur or price_eur <= 0:
+    if not budget_eur or budget_eur <= 0 or not price_eur or price_eur <= 0 or _bad(budget_eur, price_eur, free_cash_eur):
         return 0
     free = max(0.0, free_cash_eur or 0.0)
     shares = whole_share_count(budget_eur, price_eur, max_eur=max(free, budget_eur))
@@ -575,7 +593,6 @@ def fit_allocation_to_share(
     so that reserving the allocation reserves the cash the buy will really spend. Returns the allocation
     unchanged, with 0 shares, when nothing fits. Whole-share mode only.
     """
-    import math
     from src.data.currency import currency_service
     plan = plan_buy(allocation_eur, price_native, currency, stop_loss_native, portfolio_value_eur, max_eur=free_cash_eur, automated=automated)
     shares = plan["shares"]
