@@ -570,7 +570,8 @@ class PaperBroker(BaseBroker):
         allocation_eur: float,
         consensus_score: int,
         ai_rationale: str,
-        report_id: Optional[int] = None
+        report_id: Optional[int] = None,
+        forced: bool = False
     ) -> Dict[str, Any]:
         """Creates an active pending price trigger (limit pullback or breakout order)."""
         async with AsyncSessionLocal() as session:
@@ -695,6 +696,7 @@ class PaperBroker(BaseBroker):
                 consensus_score=consensus_score,
                 ai_rationale=ai_rationale,
                 report_id=report_id,
+                forced=forced,
                 status="PENDING",
                 is_live=False,
                 created_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
@@ -770,7 +772,7 @@ class PaperBroker(BaseBroker):
             "risk_capped": plan["risk_capped"],
         }
 
-    async def cancel_price_trigger(self, trigger_id: int) -> Dict[str, Any]:
+    async def cancel_price_trigger(self, trigger_id: int, reason: str = "Cancelled by user") -> Dict[str, Any]:
         """Cancels a pending order trigger."""
         async with AsyncSessionLocal() as session:
             res = await session.execute(select(OrderTrigger).where(OrderTrigger.id == trigger_id))
@@ -781,9 +783,9 @@ class PaperBroker(BaseBroker):
                 return {"success": False, "message": f"Trigger #{trigger_id} is already {trigger.status}."}
             
             trigger.status = "CANCELLED"
-            trigger.cancel_reason = "Cancelled by user"
+            trigger.cancel_reason = reason[:255]
             await session.commit()
-            logger.info(f"Cancelled trigger #{trigger_id} for {trigger.ticker}")
+            logger.info(f"Cancelled trigger #{trigger_id} for {trigger.ticker}: {reason}")
             return {"success": True, "message": f"Trigger #{trigger_id} for {trigger.ticker} cancelled."}
 
     async def adjust_triggers_dynamically(self) -> List[Dict[str, Any]]:

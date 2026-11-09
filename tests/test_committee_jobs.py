@@ -102,7 +102,11 @@ async def test_forced_arm_reuses_the_report_of_the_blocked_run():
         job = await _wait(client, forced.json()["job_id"])
         assert job["status_code"] != 422 and job["body"].get("gate", {}).get("code") != "BLOCKED"
         assert committee.await_count == 1
-        async with AsyncSessionLocal() as session:  # the forced run armed a real paper trigger
+        async with AsyncSessionLocal() as session:  # the forced run armed a real paper trigger, marked as forced
+            from sqlalchemy import select
+            trig = (await session.execute(select(OrderTrigger).where(
+                OrderTrigger.ticker == "JOBX", OrderTrigger.status == "PENDING"))).scalars().first()
+            assert trig is not None and trig.forced is True
             await session.execute(delete(OrderTrigger).where(OrderTrigger.ticker == "JOBX"))
             await session.commit()
     await _run(_report(action="HOLD", score=72), calls)

@@ -58,13 +58,14 @@ class BaseBroker(ABC):
         allocation_eur: float,
         consensus_score: int,
         ai_rationale: str,
-        report_id: Optional[int] = None
+        report_id: Optional[int] = None,
+        forced: bool = False
     ) -> Dict[str, Any]:
         """Creates a pending limit pullback or breakout trigger. report_id links it to its AnalysisReport."""
         pass
 
     @abstractmethod
-    async def cancel_price_trigger(self, trigger_id: int) -> Dict[str, Any]:
+    async def cancel_price_trigger(self, trigger_id: int, reason: str = "Cancelled by user") -> Dict[str, Any]:
         """Cancels an armed price trigger."""
         pass
 

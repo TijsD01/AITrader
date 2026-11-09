@@ -258,6 +258,7 @@ class TelegramAssistant:
         return {
             "ALREADY_HELD": "💼 Zit al in de portefeuille, niet bijgekocht",
             "TRIGGER_PENDING": "⏳ Er stond al een koopopdracht klaar, die wacht nog",
+            "TRIGGER_CANCELLED": "🛑 Koopopdracht geannuleerd: nieuwe beoordeling steunt de aankoop niet meer",
             "INSUFFICIENT_CASH": "⏸️ Goed genoeg, maar geen vrij geld of vrije plek",
             "SHARE_TOO_EXPENSIVE": "💶 Goed genoeg, maar 1 aandeel kost meer dan het budget per positie",
             "REGIME_FILTER": "🌧️ Goed genoeg, maar de hele markt daalt (index onder 200-daags gemiddelde)",
@@ -506,7 +507,7 @@ class TelegramAssistant:
     async def _arm_trigger_from_report(
         self, ticker: str, data: Dict[str, Any], report: Dict[str, Any], available_cash: float,
         explicit_price: Optional[float] = None, plan: Optional[Dict[str, Any]] = None,
-        summary: Optional[Dict[str, Any]] = None
+        summary: Optional[Dict[str, Any]] = None, forced: bool = False
     ) -> Dict[str, Any]:
         """Arms the trigger for a committee report. Pass the plan from _plan_trigger when the gate already used it."""
         plan = plan or self._plan_trigger(data, report, available_cash, explicit_price, summary=summary)
@@ -522,7 +523,8 @@ class TelegramAssistant:
             take_profit=plan["take_profit"],
             allocation_eur=plan["alloc_eur"],
             consensus_score=report.get("consensus_score", 70),
-            ai_rationale=report.get("trigger_rationale", report.get("summary", ""))
+            ai_rationale=report.get("trigger_rationale", report.get("summary", "")),
+            forced=forced
         )
         res.update(plan)
         # Show the allocation the broker actually stored, not the planned one
@@ -926,7 +928,9 @@ class TelegramAssistant:
                     await self._reply_chat(chat_id, reply)
                     return
 
-                trig_res = await self._arm_trigger_from_report(target_ticker, data, report, available_cash, explicit_price, plan=plan)
+                trig_res = await self._arm_trigger_from_report(
+                    target_ticker, data, report, available_cash, explicit_price, plan=plan, forced=gate.code == "OK_FORCED"
+                )
 
                 if trig_res.get("success"):
                     dist_pct = round(((trig_res["target_price"] / data["price"]) - 1.0) * 100, 1)

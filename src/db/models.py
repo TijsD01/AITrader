@@ -188,6 +188,7 @@ class OrderTrigger(Base):
     executed_trade_id = Column(Integer, nullable=True)
     cancel_reason = Column(String(255), nullable=True)  # why the trigger was CANCELLED or EXPIRED
     report_id = Column(Integer, nullable=True)  # AnalysisReport that armed this trigger (NULL = manual/scanner)
+    forced = Column(Boolean, default=False)  # armed with force against a soft block (HOLD / low score)
 
 class TradeLesson(Base):
     __tablename__ = "trade_lessons"

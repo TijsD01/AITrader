@@ -665,3 +665,126 @@ async def test_paper_manual_cancel_records_reason():
     row = await _trigger_row(trigger_id)
     assert row.status == "CANCELLED"
     assert row.cancel_reason == "Cancelled by user"
+
+
+@pytest.mark.asyncio
+async def test_re_debate_cancels_pending_trigger_that_no_longer_qualifies():
+    """A pending trigger is cancelled when a new debate scores it below the trigger threshold; a still-strong one stays."""
+    from src.scheduler.jobs import trading_scheduler
+    from src.db.models import OrderTrigger
+    from sqlalchemy import select, delete
+    await init_db()
+
+    tickers = ["DROPX", "KEEPX"]
+    async with AsyncSessionLocal() as session:
+        for tk in tickers:
+            session.add(OrderTrigger(ticker=tk, name=tk, currency="EUR", trigger_type="LIMIT_PULLBACK",
+                                     target_price=98.0, current_price_at_creation=100.0, stop_loss=95.0,
+                                     take_profit=110.0, allocation_eur=500.0, consensus_score=86,
+                                     status="PENDING", is_live=False))
+        await session.commit()
+
+    def mock_stock(ticker):
+        return {"ticker": ticker, "name": ticker, "price": 100.0, "currency": "EUR",
+                "technicals": {"rsi14": 55, "volume_surge_ratio": 1.5, "atr14": 2.0}, "fundamentals": {}}
+
+    async def mock_eval(data, total_val):
+        score = 70 if data["ticker"] == "DROPX" else 88
+        return {
+            "ticker": data["ticker"], "name": data["name"], "price": data["price"], "currency": data["currency"],
+            "action": "BUY" if score < 80 else "STRONG_BUY", "consensus_score": score,
+            "entry_trigger_price": 98.0, "trigger_type": "LIMIT_PULLBACK", "trigger_rationale": "r",
+            "risk": {"approved": True, "take_profit_price": 110.0, "stop_loss_price": 95.0,
+                     "recommended_size_pct": 0.05, "risk_summary": "ok"},
+            "technical": {"analysis_summary": "t"}, "fundamental": {"analysis_summary": "f"},
+            "sentiment": {"sentiment_summary": "s"}, "summary": "s", "debate_transcript": "d",
+        }
+
+    try:
+        with patch("src.screener.scanner.market_scanner.scan_universe",
+                   return_value=[{"ticker": tk, "name": tk, "pre_score": 80} for tk in tickers]), \
+             patch("src.data.market.market_data_provider.get_stock_data", side_effect=mock_stock), \
+             patch("src.agents.committee.investment_committee.evaluate_ticker", side_effect=mock_eval), \
+             patch("src.scheduler.jobs.settings.TRIGGER_MIN_SCORE", 80), \
+             patch("src.telegram.bot.telegram_bot.send_message"), \
+             patch("src.telegram.bot.telegram_bot.notify_trigger_armed"):
+            await trading_scheduler.run_market_session(market="EU", session="OPEN")
+
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(select(OrderTrigger).where(OrderTrigger.ticker.in_(tickers)))).scalars().all()
+        by_ticker = {t.ticker: t for t in rows}
+        assert len(rows) == 2  # no re-arm of DROPX
+        assert by_ticker["DROPX"].status == "CANCELLED"
+        assert "New debate no longer supports this buy" in by_ticker["DROPX"].cancel_reason
+        assert by_ticker["KEEPX"].status == "PENDING"
+    finally:
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(OrderTrigger).where(OrderTrigger.ticker.in_(tickers)))
+            await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_daily_redebate_cancels_downgraded_keeps_strong_forced_and_failed():
+    """Daily job: cancel a downgrade, refresh a still-strong score, reuse a fresh report, keep a forced trigger, never cancel on error."""
+    from unittest.mock import AsyncMock
+    from src.scheduler.jobs import trading_scheduler
+    from src.db.models import OrderTrigger, AnalysisReport
+    from sqlalchemy import select, delete
+    await init_db()
+
+    armed = {"RDDROP": 86, "RDKEEP": 86, "RDFRESH": 86, "RDFAIL": 86, "RDFORCED": 65, "RDFLIP": 82}
+    tickers = list(armed)
+    async with AsyncSessionLocal() as session:
+        for tk, score in armed.items():
+            session.add(OrderTrigger(ticker=tk, name=tk, currency="EUR", trigger_type="LIMIT_PULLBACK",
+                                     target_price=98.0, current_price_at_creation=100.0, stop_loss=95.0,
+                                     take_profit=110.0, allocation_eur=500.0, consensus_score=score,
+                                     forced=tk == "RDFORCED", status="PENDING", is_live=False))
+        # A manual analysis from last night: reused, no new debate, and its low score cancels the trigger
+        session.add(AnalysisReport(ticker="RDFRESH", action="BUY", consensus_score=60))
+        await session.commit()
+
+    def mock_stock(ticker):
+        return {"ticker": ticker, "name": ticker, "price": 100.0, "currency": "EUR"}
+
+    async def mock_eval(data, total_val):
+        if data["ticker"] == "RDFAIL":
+            raise RuntimeError("LLM down")
+        action, score = {"RDDROP": ("BUY", 75), "RDFORCED": ("HOLD", 66), "RDFLIP": ("HOLD", 85)}.get(
+            data["ticker"], ("STRONG_BUY", 91))
+        return {
+            "ticker": data["ticker"], "action": action, "consensus_score": score,
+            "risk": {"approved": True, "take_profit_price": 110.0, "stop_loss_price": 95.0, "risk_summary": "ok"},
+            "technical": {"analysis_summary": "t"}, "fundamental": {"analysis_summary": "f"},
+            "sentiment": {"sentiment_summary": "s"}, "summary": "s", "debate_transcript": "d",
+        }
+
+    evaluate = AsyncMock(side_effect=mock_eval)
+    send = AsyncMock()
+    try:
+        with patch("src.scheduler.jobs.market_data_provider.get_stock_data", side_effect=mock_stock), \
+             patch("src.scheduler.jobs.investment_committee.evaluate_ticker", evaluate), \
+             patch("src.scheduler.jobs.get_trigger_min_score", AsyncMock(return_value=80)), \
+             patch("src.scheduler.jobs.settings.MIN_CONSENSUS_SCORE", 60), \
+             patch("src.scheduler.jobs.telegram_bot.send_message", send):
+            result = await trading_scheduler.refresh_pending_triggers()
+
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(select(OrderTrigger).where(OrderTrigger.ticker.in_(tickers)))).scalars().all()
+        by = {t.ticker: t for t in rows}
+        assert by["RDDROP"].status == "CANCELLED"          # BUY 75 < threshold 80 and below its armed 86
+        assert by["RDFRESH"].status == "CANCELLED"         # reused report: 60 < armed 86
+        assert by["RDKEEP"].status == "PENDING" and by["RDKEEP"].consensus_score == 91
+        assert by["RDFORCED"].status == "PENDING"          # forced at HOLD 65, now HOLD 66: user override stays
+        assert by["RDFORCED"].consensus_score == 65        # a failing verdict never refreshes the score
+        assert by["RDFLIP"].status == "CANCELLED"          # not forced: HOLD cancels even with a higher score
+        assert by["RDFAIL"].status == "PENDING"
+        assert "RDFAIL" in result["failed"]
+        assert {c.args[0]["ticker"] for c in evaluate.await_args_list} == {"RDDROP", "RDKEEP", "RDFAIL", "RDFORCED", "RDFLIP"}
+        send.assert_awaited_once()
+        assert "RDDROP" in send.await_args.args[0] and "RDFRESH" in send.await_args.args[0]
+    finally:
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(OrderTrigger).where(OrderTrigger.ticker.in_(tickers)))
+            await session.execute(delete(AnalysisReport).where(AnalysisReport.ticker.in_(tickers)))
+            await session.commit()

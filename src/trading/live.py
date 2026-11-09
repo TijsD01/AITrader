@@ -1195,7 +1195,8 @@ class LiveBroker(BaseBroker):
         allocation_eur: float,
         consensus_score: int,
         ai_rationale: str,
-        report_id: Optional[int] = None
+        report_id: Optional[int] = None,
+        forced: bool = False
     ) -> Dict[str, Any]:
         """Creates an armed price trigger for live execution. report_id links it to its AnalysisReport."""
         target_price = round(target_price, 2)
@@ -1299,6 +1300,7 @@ class LiveBroker(BaseBroker):
                 consensus_score=consensus_score,
                 ai_rationale=f"[LIVE ARMED] {ai_rationale}",
                 report_id=report_id,
+                forced=forced,
                 status="PENDING",
                 is_live=True,
                 created_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
@@ -1374,7 +1376,7 @@ class LiveBroker(BaseBroker):
             "risk_capped": plan["risk_capped"],
         }
 
-    async def cancel_price_trigger(self, trigger_id: int) -> Dict[str, Any]:
+    async def cancel_price_trigger(self, trigger_id: int, reason: str = "Cancelled by user") -> Dict[str, Any]:
         """Cancels a pending live trigger."""
         # Read and cancel under the T212 lock, so the resting-order sync cannot place or clear an order in between
         async with (self._t212_lock if settings.LIVE_BROKER.lower() == "trading212" else contextlib.nullcontext()):
@@ -1383,7 +1385,7 @@ class LiveBroker(BaseBroker):
                 trigger = res.scalars().first()
                 if not trigger:
                     return {"success": False, "message": f"Trigger #{trigger_id} not found."}
-                return await self._cancel_trigger_locked(session, trigger)
+                return await self._cancel_trigger_locked(session, trigger, reason[:255])
 
     async def _cancel_trigger_locked(self, session: Any, trigger: OrderTrigger, reason: str = "Cancelled by user") -> Dict[str, Any]:
         """Cancels a pending live trigger and its resting T212 entry order. The caller holds _t212_lock (Trading 212)."""
