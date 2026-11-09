@@ -53,3 +53,9 @@ Fix findings, re-verify, then final commit.
 - Unit 3: 13 tickerLink sites + Chart buttons in holdings/positions. Fixed: Chart buttons got `aria-label="Chart for <TICKER>"`.
 - Unit 4: T212 price gated on LIVE_BROKER=trading212 + client; any failure falls back to Yahoo; cached history copied before appending. Response adds `price_source`. Accepted: one T212 positions call per sheet load (shortcut comment).
 - Full suite after units 3+4: 704 passed, 1 failed (pre-existing antigravity test).
+
+## Final gate results
+
+- Fresh ponytail review: (1) trade dots one bar late / today's trades dropped, (2) T212 called for every ticker incl. paper mode, (3) stale history entry after reload. (2) fixed in d7a50c1 (T212 only for user holdings or open live positions). (1) and (3) go into the fix worker.
+- Fresh design review (unslop + ui-animation): must-fix focus loss on chip/range, `.ticker-link` row growth on mobile (global 44px button rule), chips/range < 44px. Plus label overlap, touch affordance, duplicate badges, spacing, Chart button weight, motion tokens, header alignment, legend keys, ticker normalisation.
+- One fix worker (opus, medium) applies items A–N to app.js + style.css. Skipped by decision: "More" toggle for clamped rationale.
