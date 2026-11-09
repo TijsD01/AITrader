@@ -1951,8 +1951,8 @@ class LiveBroker(BaseBroker):
                     self._last_pnl_refresh = now
                     return
 
-                # Resting mode: the broker's own price drives exits; Yahoo is the fallback
-                client, t212_prices = (trading212.get_client() if self.resting_orders_on() else None), {}
+                # Trading 212 holds the shares, so its own price is the true one; Yahoo is the fallback
+                client, t212_prices = (trading212.get_client() if settings.LIVE_BROKER.lower() == "trading212" else None), {}
                 if client:
                     try:
                         held = {bp["instrument"]["ticker"]: bp.get("currentPrice") for bp in await client.positions()}

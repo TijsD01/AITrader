@@ -78,8 +78,21 @@ async def refresh_holding_prices(session) -> None:
     """Update row prices in place; the caller commits."""
     if not holdings_enabled():
         return
+    # Trading 212's own price first: it holds the shares and quotes them in its extended hours
+    t212_prices = {}
+    client = trading212.get_client()
+    if client:
+        try:
+            t212_prices = {bp["instrument"]["ticker"]: bp.get("currentPrice") for bp in await client.positions()}
+        except Exception as e:
+            logger.warning(f"Trading 212 positions for holding prices failed, using Yahoo: {e}")
     res = await session.execute(select(UserHolding))
     for h in res.scalars().all():
+        price = float(t212_prices.get(h.t212_ticker) or 0)
+        if price > 0:
+            h.current_price_native = price
+            h.current_price_eur = currency_service.to_eur(price, h.currency)
+            continue
         if not quotes_moving(h.ticker) and h.current_price_native and h.current_price_native > 0:
             continue
         data = await asyncio.to_thread(market_data_provider.get_stock_data, h.ticker)

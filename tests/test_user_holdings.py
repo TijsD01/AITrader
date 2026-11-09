@@ -56,10 +56,11 @@ async def test_mine_tickers_and_value_when_live_t212(monkeypatch):
         await _clean()
 
 
-async def _refresh(monkeypatch, is_open, live=True):
+async def _refresh(monkeypatch, is_open, live=True, t212=None):
     if live:  # refresh only runs for live Trading 212
         _live(monkeypatch)
         monkeypatch.setattr(settings, "LIVE_BROKER", "trading212")
+        monkeypatch.setattr(trading212, "get_client", lambda: t212)
     monkeypatch.setattr(holdings_mod, "quotes_moving", lambda t: is_open)
     monkeypatch.setattr(holdings_mod.market_data_provider, "get_stock_data", lambda t: {"price": 70.0})
     async with db_session.AsyncSessionLocal() as s:
@@ -85,6 +86,17 @@ async def test_refresh_holding_prices_skips_when_market_closed(monkeypatch):
     try:
         h = await _refresh(monkeypatch, False)
         assert (h.current_price_native, h.current_price_eur) == (62.10, 62.10)
+    finally:
+        await _clean()
+
+
+async def test_refresh_holding_prices_prefers_trading212_price(monkeypatch):
+    """T212 holds the shares: its price wins over Yahoo, also outside market hours."""
+    fake = FakeT212()
+    fake.positions_answers = [[{"instrument": {"ticker": "KOHOLD_T212", "currency": "EUR"}, "quantity": 24, "currentPrice": 66.6}]]
+    try:
+        h = await _refresh(monkeypatch, False, t212=fake)
+        assert (h.current_price_native, h.current_price_eur) == (66.6, 66.6)
     finally:
         await _clean()
 
