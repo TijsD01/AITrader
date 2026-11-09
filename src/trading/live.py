@@ -13,7 +13,7 @@ from src.db.session import AsyncSessionLocal
 from src.data.currency import currency_service
 from src.data.market import market_data_provider
 from src.trading.risk import risk_guardrail, get_effective_deployable_cash, allocate_pending_triggers, evaluate_trigger_condition, is_trigger_expired, validate_trigger_levels, compute_trailing_stop, check_market_regime, affordable_share_count, fit_allocation_to_share, new_entry_allocation, risk_capped_allocation, plan_pending_triggers
-from src.data.market_hours import check_market_hours
+from src.data.market_hours import check_market_hours, quotes_moving
 from src.trading.base import BaseBroker
 from src.trading.cash_flows import scan_live_cash_flows, net_cash_flows_eur, live_history_start
 from src.trading import trading212
@@ -1962,11 +1962,11 @@ class LiveBroker(BaseBroker):
 
                 for p in positions:
                     is_open, _ = check_market_hours(p.ticker)
-                    if not is_open and p.current_price_native and p.current_price_native > 0:
-                        continue
-
+                    # T212's own price is free and moves in its extended hours; Yahoo only while quotes move
                     curr_price = t212_prices.get(p.ticker)
                     if not curr_price:
+                        if not quotes_moving(p.ticker) and p.current_price_native and p.current_price_native > 0:
+                            continue
                         data = await asyncio.to_thread(market_data_provider.get_stock_data, p.ticker)
                         curr_price = data["price"] if data else None
 
@@ -1974,7 +1974,8 @@ class LiveBroker(BaseBroker):
                         curr_price = float(curr_price)
                         p.current_price_native = curr_price
                         p.current_price_eur = currency_service.to_eur(curr_price, p.currency)
-                        if curr_price > (p.highest_price_native or 0.0):
+                        # Trail on regular-session prices only: a thin after-hours spike must not move the broker stop
+                        if is_open and curr_price > (p.highest_price_native or 0.0):
                             p.highest_price_native = curr_price
                             # Trailing stop (same as paper): past breakeven_trigger_pct the stop moves to breakeven + 1%,
                             # then trails by N x ATR. The broker's stop order follows, see _move_broker_stop.

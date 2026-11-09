@@ -91,6 +91,23 @@ def check_market_hours(ticker: str, now: datetime.datetime = None) -> Tuple[bool
         f"New York time."
     )
 
+# Trading 212 and Yahoo quote US stocks outside the regular session (pre-market from 04:00, after-hours to 20:00 NY)
+US_EXTENDED_OPEN_LOCAL = datetime.time(4, 0)
+US_EXTENDED_CLOSE_LOCAL = datetime.time(20, 0)
+
+
+def quotes_moving(ticker: str, now: datetime.datetime = None) -> bool:
+    """True while the ticker's price can move: the regular session, plus pre/after-market for US stocks."""
+    if check_market_hours(ticker, now)[0]:
+        return True
+    if is_eu_ticker(ticker):
+        return False
+    tz = ZoneInfo(settings.TIMEZONE)
+    now = now or datetime.datetime.now(tz)
+    ny = (now if now.tzinfo else now.replace(tzinfo=tz)).astimezone(ZoneInfo(US_EXCHANGE_TZ))
+    return ny.weekday() < 5 and US_EXTENDED_OPEN_LOCAL <= ny.time() <= US_EXTENDED_CLOSE_LOCAL
+
+
 def get_market_statuses(now: datetime.datetime = None) -> Dict[str, Any]:
     """Returns the live status of European and US markets."""
     tz = ZoneInfo(settings.TIMEZONE)

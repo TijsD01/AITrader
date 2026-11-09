@@ -11,7 +11,7 @@ from src.db.session import AsyncSessionLocal
 from src.data.currency import currency_service
 from src.data.market import market_data_provider
 from src.trading.risk import risk_guardrail, get_effective_deployable_cash, allocate_pending_triggers, evaluate_trigger_condition, is_trigger_expired, validate_trigger_levels, compute_trailing_stop, check_market_regime, affordable_share_count, fit_allocation_to_share, new_entry_allocation, risk_capped_allocation, plan_pending_triggers
-from src.data.market_hours import check_market_hours
+from src.data.market_hours import check_market_hours, quotes_moving
 from src.trading.base import BaseBroker
 
 logger = logging.getLogger(__name__)
@@ -506,7 +506,7 @@ class PaperBroker(BaseBroker):
                 for p in positions:
                     # Skip expensive remote quote fetches if market is currently closed and price is already recorded
                     is_open, _ = check_market_hours(p.ticker)
-                    if not is_open and p.current_price_native and p.current_price_native > 0:
+                    if not quotes_moving(p.ticker) and p.current_price_native and p.current_price_native > 0:
                         continue
 
                     data = await asyncio.to_thread(market_data_provider.get_stock_data, p.ticker)
@@ -514,7 +514,8 @@ class PaperBroker(BaseBroker):
                         curr_price = data["price"]
                         p.current_price_native = curr_price
                         p.current_price_eur = currency_service.to_eur(curr_price, p.currency)
-                        if curr_price > p.highest_price_native:
+                        # Trail on regular-session prices only, same as live
+                        if is_open and curr_price > p.highest_price_native:
                             p.highest_price_native = curr_price
                             # Trailing stop: past breakeven_trigger_pct the stop moves to breakeven + 1%, then trails by N x ATR
                             new_stop = compute_trailing_stop(

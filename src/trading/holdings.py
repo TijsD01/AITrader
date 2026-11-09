@@ -10,7 +10,7 @@ from sqlalchemy import desc, select
 from config.settings import settings
 from src.data.currency import currency_service
 from src.data.market import market_data_provider
-from src.data.market_hours import check_market_hours
+from src.data.market_hours import quotes_moving
 from src.db import session as db_session
 from src.db.models import PortfolioSnapshot, Position, SystemConfig, Trade, UserHolding
 from src.trading import trading212
@@ -80,8 +80,7 @@ async def refresh_holding_prices(session) -> None:
         return
     res = await session.execute(select(UserHolding))
     for h in res.scalars().all():
-        is_open, _ = check_market_hours(h.ticker)
-        if not is_open and h.current_price_native and h.current_price_native > 0:
+        if not quotes_moving(h.ticker) and h.current_price_native and h.current_price_native > 0:
             continue
         data = await asyncio.to_thread(market_data_provider.get_stock_data, h.ticker)
         price = data["price"] if data else None

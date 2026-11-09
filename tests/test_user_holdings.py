@@ -60,7 +60,7 @@ async def _refresh(monkeypatch, is_open, live=True):
     if live:  # refresh only runs for live Trading 212
         _live(monkeypatch)
         monkeypatch.setattr(settings, "LIVE_BROKER", "trading212")
-    monkeypatch.setattr(holdings_mod, "check_market_hours", lambda t: (is_open, ""))
+    monkeypatch.setattr(holdings_mod, "quotes_moving", lambda t: is_open)
     monkeypatch.setattr(holdings_mod.market_data_provider, "get_stock_data", lambda t: {"price": 70.0})
     async with db_session.AsyncSessionLocal() as s:
         s.add(_row("KOHOLD", 24, 62.10, 1390.0))

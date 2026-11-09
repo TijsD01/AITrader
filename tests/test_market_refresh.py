@@ -273,3 +273,36 @@ async def test_live_cash_sync_adds_no_snapshot_when_cash_is_unchanged():
         async with AsyncSessionLocal() as session:
             await session.execute(delete(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True, PortfolioSnapshot.cash_eur == 6543.21))
             await session.commit()
+
+
+def test_quotes_moving_covers_us_extended_hours_only():
+    from zoneinfo import ZoneInfo
+    from src.data.market_hours import quotes_moving
+    ny = ZoneInfo("America/New_York")
+    tue = lambda h, m=0: datetime.datetime(2026, 11, 10, h, m, tzinfo=ny)
+    assert quotes_moving("AAPL", tue(7))          # pre-market
+    assert quotes_moving("AAPL", tue(18))         # after-hours
+    assert not quotes_moving("AAPL", tue(21))     # overnight: Yahoo has no quote
+    assert not quotes_moving("AAPL", datetime.datetime(2026, 11, 14, 12, tzinfo=ny))  # Saturday
+    assert not quotes_moving("ASML.AS", tue(13))  # 19:00 Amsterdam: EU closed, no extended session
+
+
+def test_after_hours_quote_replaces_regular_close():
+    calls = []
+    base = _fake_yf_ticker(calls)
+
+    class ExtTicker(base):
+        def history(self, period, interval="1d", prepost=False):
+            if prepost:
+                return pd.DataFrame({"Close": [101.0, 104.5]})
+            return super().history(period)
+
+    market_data_provider.invalidate(["EXTTEST"])
+    with patch("src.data.market.yf.Ticker", ExtTicker), \
+         patch("src.data.market.quotes_moving", return_value=True), \
+         patch("src.data.market.check_market_hours", return_value=(False, "")):
+        assert market_data_provider.get_stock_data("EXTTEST")["price"] == 104.5
+    market_data_provider.invalidate(["EXTTEST2"])
+    with patch("src.data.market.yf.Ticker", ExtTicker), \
+         patch("src.data.market.check_market_hours", return_value=(True, "")):
+        assert market_data_provider.get_stock_data("EXTTEST2")["price"] == 101.0  # regular session: lastPrice
