@@ -483,6 +483,8 @@ button.ui-chip { cursor: pointer; }
 @media (min-width: 768px) { .hero-value { font-size: 72px; } }
 .hero-chart { margin: 0; }
 .hero-chart-plot { position: relative; height: 120px; }
+/* Line charts: a horizontal drag scrubs the crosshair, a vertical drag still scrolls the page */
+#valueChart, #tsChart, canvas[id^="shadowChart-"] { touch-action: pan-y; }
 @media (min-width: 768px) { .hero-chart-plot { height: 160px; } }
 .hero-chart-note { margin-top: 6px; font-size: 12px; color: var(--text-3); }
 .hero-chart.is-empty .hero-chart-plot { display: none; }

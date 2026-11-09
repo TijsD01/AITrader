@@ -469,6 +469,31 @@ function readAllocColors() {
 }
 readAllocColors();
 
+// Line charts: a vertical crosshair at the hovered point. Drawn under the datasets so the
+// price line and hover dot stay on top. Hover state tracks the pointer directly: the
+// tooltip and hover dot do not tween, so they never trail the cursor.
+const crosshairPlugin = {
+  id: 'crosshair',
+  beforeDatasetsDraw(chart) {
+    if (chart.config.type !== 'line') return;
+    const active = chart.getActiveElements();
+    if (!active.length) return;
+    const x = Math.round(active[0].element.x) + 0.5; // half pixel keeps a 1px line crisp
+    const { ctx, chartArea: a } = chart;
+    if (x < a.left || x > a.right) return;
+    ctx.save();
+    ctx.strokeStyle = cssVar('--text-3');
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x, a.top); ctx.lineTo(x, a.bottom); ctx.stroke();
+    ctx.restore();
+  }
+};
+if (typeof Chart !== 'undefined') {
+  Chart.register(crosshairPlugin);
+  Chart.defaults.plugins.tooltip.animation = false;
+  Chart.defaults.transitions.active.animation.duration = 0;
+}
+
 function styleShadowChart(chart) {
   const [shadow, main] = chart.data.datasets;
   shadow.borderColor = shadow.backgroundColor = cssVar('--accent');
@@ -3348,7 +3373,8 @@ function renderTickerChart(chosen, animate) {
     ? new Date(l + 'Z').toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
     : new Date(l + 'Z').toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
   const lineDs = {
-    data: closes, borderColor: cssVar('--text'), borderWidth: 1.75, pointRadius: 0, pointHoverRadius: 0, fill: false, tension: 0,
+    data: closes, borderColor: cssVar('--text'), borderWidth: 1.75, pointRadius: 0, pointHoverRadius: 4,
+    pointHoverBackgroundColor: cssVar('--text'), pointHoverBorderColor: cssVar('--surface'), pointHoverBorderWidth: 2, fill: false, tension: 0,
   };
   const tradeDs = {
     data: trades, showLine: false, pointStyle: 'triangle', pointRadius: 6, pointHoverRadius: 6,
