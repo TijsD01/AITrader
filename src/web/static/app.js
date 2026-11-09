@@ -469,11 +469,58 @@ function readAllocColors() {
 }
 readAllocColors();
 
+// Line charts: a vertical crosshair at the hovered point. Drawn under the datasets so the
+// price line and hover dot stay on top. Hover state tracks the pointer directly: the
+// tooltip and hover dot do not tween, so they never trail the cursor.
+const crosshairPlugin = {
+  id: 'crosshair',
+  beforeDatasetsDraw(chart) {
+    if (chart.config.type !== 'line') return;
+    const active = chart.getActiveElements();
+    if (!active.length) return;
+    const x = Math.round(active[0].element.x) + 0.5; // half pixel keeps a 1px line crisp
+    const { ctx, chartArea: a } = chart;
+    ctx.save();
+    ctx.strokeStyle = cssVar('--text-3');
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x, a.top); ctx.lineTo(x, a.bottom); ctx.stroke();
+    ctx.restore();
+  },
+  // chart.$readout(index | null): called when the hovered point changes, null on leave
+  afterEvent(chart) {
+    if (!chart.$readout) return;
+    const hit = chart.getActiveElements().find(e => e.datasetIndex === 0);
+    const i = hit ? hit.index : null;
+    if (i === chart.$hover) return;
+    chart.$hover = i;
+    chart.$readout(i);
+  }
+};
+
+// Swap an element's text for a hovered value; null puts the resting text back
+function setReadout(el, text) {
+  if (text === null) {
+    if ('rest' in el.dataset) { el.textContent = el.dataset.rest; delete el.dataset.rest; }
+    return;
+  }
+  if (!('rest' in el.dataset)) el.dataset.rest = el.textContent;
+  el.textContent = text;
+}
+// A data refresh while hovering updates the resting text, not the readout
+function setRestingText(el, text) {
+  if ('rest' in el.dataset) el.dataset.rest = text;
+  else el.textContent = text;
+}
+if (typeof Chart !== 'undefined') {
+  Chart.register(crosshairPlugin);
+  Chart.defaults.plugins.tooltip.animation = false;
+  Chart.defaults.transitions.active.animation.duration = 0;
+}
+
 function styleShadowChart(chart) {
   const [shadow, main] = chart.data.datasets;
   shadow.borderColor = shadow.backgroundColor = cssVar('--accent');
   main.borderColor = main.backgroundColor = cssVar('--text-2');
-  chart.options.plugins.legend.labels.color = cssVar('--text-2');
   chart.options.scales.x.ticks.color = cssVar('--text-3');
   chart.options.scales.y.ticks.color = cssVar('--text-3');
   chart.options.scales.y.grid.color = cssVar('--line-soft');
@@ -678,7 +725,7 @@ async function loadValueHistory() {
     note.textContent = 'The value line appears once the bot has recorded a few portfolio changes.';
     return;
   }
-  note.textContent = 'Last 30 days';
+  setRestingText(note, 'Last 30 days');
   const labels = points.map(p => p[0]);
   const data = points.map(p => p[1]);
   if (!valueChart) {
@@ -692,17 +739,17 @@ async function loadValueHistory() {
         interaction: { mode: 'index', intersect: false },
         plugins: {
           legend: { display: false },
-          tooltip: {
-            displayColors: false,
-            callbacks: {
-              title: items => new Date(items[0].label + 'Z').toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }),
-              label: c => eur(c.parsed.y)
-            }
-          }
+          tooltip: { enabled: false } // hovered value shows in the hero figure instead
         },
         scales: { x: { display: false }, y: { display: false, grace: '5%' } }
       }
     });
+    const total = document.getElementById('metricTotalVal');
+    valueChart.$readout = i => {
+      const c = valueChart;
+      setReadout(total, i === null ? null : eur(c.data.datasets[0].data[i]));
+      setReadout(note, i === null ? null : new Date(c.data.labels[i] + 'Z').toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }));
+    };
   } else {
     valueChart.data.labels = labels;
     valueChart.data.datasets[0].data = data;
@@ -751,7 +798,7 @@ async function loadPortfolio() {
     const maxUsagePct = summary.max_capital_usage_pct ?? 100;
     const maxCapEur = summary.max_deployable_capital_eur;
 
-    document.getElementById('metricTotalVal').textContent = eur(totalVal);
+    setRestingText(document.getElementById('metricTotalVal'), eur(totalVal));
     document.getElementById('metricCash').textContent = eur(deployableCash);
     document.getElementById('metricEquity').textContent = eur(equityVal);
     const mineWrap = document.getElementById('metricMineWrap');
@@ -3065,7 +3112,14 @@ function renderShadowStrategy(s, mainLabel) {
         <div class="ui-card kpi"><span class="ui-label">Shadow-only trades</span><span class="kpi-value">${esc(s.shadow_only_trades)}</span><span class="kpi-sub">The main bot skipped these</span></div>
       </div>
 
-      <div class="relative h-44 ${(s.history && s.history.shadow && s.history.shadow.length > 1) ? '' : 'hidden'}"><canvas id="shadowChart-${esc(s.key)}"></canvas></div>
+      <div class="space-y-2 ${(s.history && s.history.shadow && s.history.shadow.length > 1) ? '' : 'hidden'}">
+        <div id="shadowReadout-${esc(s.key)}" class="ts-legend">
+          <span><span class="ts-swatch" style="border-top: 2px solid var(--accent)"></span>${esc(s.label)} <b class="ui-num" data-v="0"></b></span>
+          <span><span class="ts-swatch" style="border-top: 2px dashed var(--text-2)"></span>${esc(mainLabel)} <b class="ui-num" data-v="1"></b></span>
+          <span class="ui-num ml-auto" data-v="at"></span>
+        </div>
+        <div class="relative h-44"><canvas id="shadowChart-${esc(s.key)}"></canvas></div>
+      </div>
 
       ${list('Open positions', positions, 'No open shadow positions.')}
       ${list('Pending entries', pending, 'No pending shadow entries.')}
@@ -3095,8 +3149,8 @@ function drawShadowChart(s, mainLabel) {
       maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       plugins: {
-        legend: { position: 'bottom', labels: { boxWidth: 12 } },
-        tooltip: { callbacks: { label: c => `${c.dataset.label}: ${signedPct(c.parsed.y)}` } }
+        legend: { display: false },
+        tooltip: { enabled: false } // values show in the legend row above the chart
       },
       scales: {
         x: { ticks: { maxTicksLimit: 4, maxRotation: 0, callback(v) { return String(this.getLabelForValue(v)).slice(0, 5); } }, grid: { display: false } },
@@ -3104,8 +3158,21 @@ function drawShadowChart(s, mainLabel) {
       }
     }
   });
-  styleShadowChart(shadowCharts[s.key]);
-  shadowCharts[s.key].update('none');
+  // Legend row doubles as the readout: latest values at rest, hovered values and time while hovering
+  const readout = document.getElementById(`shadowReadout-${s.key}`);
+  const chart = shadowCharts[s.key];
+  chart.$readout = i => {
+    const at = i === null ? labels.length - 1 : i;
+    chart.data.datasets.forEach((ds, d) => {
+      const v = ds.data[at];
+      readout.querySelector(`[data-v="${d}"]`).textContent = v == null ? '--' : signedPct(v);
+    });
+    readout.querySelector('[data-v="at"]').textContent = i === null ? 'Latest'
+      : new Date(hist.shadow[i][0].replace(' ', 'T') + 'Z').toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  };
+  chart.$readout(null);
+  styleShadowChart(chart);
+  chart.update('none');
 }
 
 async function loadShadow() {
@@ -3222,8 +3289,7 @@ function openTickerSheet(ticker, source = '') {
   if (!dlg || !ticker) return;
   Object.assign(tickerSheet, { ticker, source, range: '3M', data: null, selected: [], shown: '' });
   document.getElementById('tsTicker').textContent = ticker;
-  document.getElementById('tsName').textContent = '';
-  document.getElementById('tsPrice').textContent = '';
+  ['tsName', 'tsPrice'].forEach(id => { const el = document.getElementById(id); delete el.dataset.rest; el.textContent = ''; }); // Esc while hovering skips the restore
   if (!dlg.open) {
     dlg.classList.remove('is-closing');
     dlg.showModal();
@@ -3271,8 +3337,8 @@ async function loadTickerSheet() {
   if (data.ticker) tickerSheet.ticker = data.ticker; // server may normalise it; keeps range switches off the skeleton
   if (firstLoad) tsPickDefaultSet();
   document.getElementById('tsTicker').textContent = data.ticker || ticker;
-  document.getElementById('tsName').textContent = data.name || '';
-  document.getElementById('tsPrice').textContent = hasNum(data.current_price) ? `${num(data.current_price)} ${data.currency || ''}`.trim() : '';
+  setRestingText(document.getElementById('tsName'), data.name || '');
+  setRestingText(document.getElementById('tsPrice'), hasNum(data.current_price) ? `${num(data.current_price)} ${data.currency || ''}`.trim() : '');
   renderTickerSheet(!firstLoad);
 }
 
@@ -3348,7 +3414,8 @@ function renderTickerChart(chosen, animate) {
     ? new Date(l + 'Z').toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
     : new Date(l + 'Z').toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
   const lineDs = {
-    data: closes, borderColor: cssVar('--text'), borderWidth: 1.75, pointRadius: 0, pointHoverRadius: 0, fill: false, tension: 0,
+    data: closes, borderColor: cssVar('--text'), borderWidth: 1.75, pointRadius: 0, pointHoverRadius: 4,
+    pointHoverBackgroundColor: cssVar('--text'), pointHoverBorderColor: cssVar('--surface'), pointHoverBorderWidth: 2, fill: false, tension: 0,
   };
   const tradeDs = {
     data: trades, showLine: false, pointStyle: 'triangle', pointRadius: 6, pointHoverRadius: 6,
@@ -3379,7 +3446,7 @@ function renderTickerChart(chosen, animate) {
       interaction: { mode: 'index', intersect: false },
       plugins: {
         legend: { display: false },
-        tooltip: { filter: i => i.datasetIndex === 0, callbacks: { title: items => fmtX(items[0].label), label: i => num(i.parsed.y) } },
+        tooltip: { enabled: false }, // hovered close and time show in the sheet header instead
         tsLevels: { lines },
       },
       scales: {
@@ -3388,6 +3455,14 @@ function renderTickerChart(chosen, animate) {
       },
     },
   });
+  tickerSheet.chart.$readout = i => {
+    const c = tickerSheet.chart;
+    const at = i === null ? null : new Date(c.data.labels[i] + 'Z').toLocaleString('en-GB', tickerSheet.range === '1D'
+      ? { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }
+      : { day: 'numeric', month: 'short', year: 'numeric' });
+    setReadout(document.getElementById('tsPrice'), i === null ? null : `${num(c.data.datasets[0].data[i])} ${tickerSheet.data.currency || ''}`.trim());
+    setReadout(document.getElementById('tsName'), at);
+  };
   return lines;
 }
 
