@@ -615,3 +615,53 @@ async def test_dynamic_trigger_adjustment_based_on_cash_and_positions():
             await session.execute(delete(OrderTrigger).where(OrderTrigger.ticker == test_ticker))
             await session.commit()
 
+
+
+async def _make_paper_trigger(ticker, stop_loss=45.0, target=50.0):
+    res = await paper_broker.create_price_trigger(
+        ticker=ticker, name=ticker, currency="USD", trigger_type="LIMIT_PULLBACK",
+        target_price=target, current_price_at_creation=55.0, stop_loss=stop_loss, take_profit=65.0,
+        allocation_eur=500.0, consensus_score=80, ai_rationale="cancel reason test",
+    )
+    assert res["success"] is True
+    return res["trigger_id"]
+
+
+async def _trigger_row(trigger_id):
+    async with AsyncSessionLocal() as session:
+        return await session.get(OrderTrigger, trigger_id)
+
+
+@pytest.mark.asyncio
+async def test_paper_trigger_expiry_records_reason():
+    await init_db()
+    trigger_id = await _make_paper_trigger(f"EXPR_{int(datetime.datetime.now().timestamp() * 1000)}")
+    with patch("src.trading.paper.is_trigger_expired", return_value=True):
+        await paper_broker.check_and_execute_triggers()
+    row = await _trigger_row(trigger_id)
+    assert row.status == "EXPIRED"
+    assert row.cancel_reason.startswith("Expired after")
+
+
+@pytest.mark.asyncio
+async def test_paper_trigger_below_stop_records_reason():
+    await init_db()
+    ticker = f"BSTOP_{int(datetime.datetime.now().timestamp() * 1000)}"
+    trigger_id = await _make_paper_trigger(ticker)
+    data = {"ticker": ticker, "price": 40.0, "currency": "USD", "name": ticker}
+    with patch("src.trading.paper.check_market_hours", return_value=(True, "open")), \
+         patch("src.trading.paper.market_data_provider.get_stock_data", side_effect=lambda s: data if s == ticker else None):
+        await paper_broker.check_and_execute_triggers()
+    row = await _trigger_row(trigger_id)
+    assert row.status == "CANCELLED"
+    assert "stop-loss" in row.cancel_reason
+
+
+@pytest.mark.asyncio
+async def test_paper_manual_cancel_records_reason():
+    await init_db()
+    trigger_id = await _make_paper_trigger(f"MCAN_{int(datetime.datetime.now().timestamp() * 1000)}")
+    await paper_broker.cancel_price_trigger(trigger_id)
+    row = await _trigger_row(trigger_id)
+    assert row.status == "CANCELLED"
+    assert row.cancel_reason == "Cancelled by user"

@@ -67,3 +67,6 @@ logs/
 !.claude/settings.json
 !.claude/skills/
 .claude/settings.local.json
+
+# Agent plan scratch
+.superpowers/

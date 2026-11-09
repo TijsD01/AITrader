@@ -726,7 +726,8 @@ class LiveBroker(BaseBroker):
             result = await self._book_live_fill(
                 ticker=ticker, name=name, currency=currency, shares=filled, price_native=fill_price,
                 stop_loss_native=stop_loss_native, take_profit_native=take_profit_native,
-                rationale=rationale, consensus_score=consensus_score, broker_order_id=broker_order_id
+                rationale=rationale, consensus_score=consensus_score, broker_order_id=broker_order_id,
+                trigger_id=trigger_id
             )
         await self.adjust_triggers_dynamically()
 
@@ -911,7 +912,8 @@ class LiveBroker(BaseBroker):
         take_profit_native: Optional[float],
         rationale: str,
         consensus_score: int,
-        broker_order_id: str
+        broker_order_id: str,
+        trigger_id: Optional[int] = None
     ) -> Dict[str, Any]:
         """Record a filled live BUY: position, trade and snapshot. Callers hold _t212_lock (Trading 212)."""
         from src.trading.fees import calculate_broker_fee
@@ -959,6 +961,7 @@ class LiveBroker(BaseBroker):
                 status="OPEN",
                 is_live=True,
                 broker_order_id=broker_order_id,
+                trigger_id=trigger_id,
                 opened_at=utc_now
             )
             session.add(new_pos)
@@ -1191,9 +1194,10 @@ class LiveBroker(BaseBroker):
         take_profit: Optional[float],
         allocation_eur: float,
         consensus_score: int,
-        ai_rationale: str
+        ai_rationale: str,
+        report_id: Optional[int] = None
     ) -> Dict[str, Any]:
-        """Creates an armed price trigger for live execution."""
+        """Creates an armed price trigger for live execution. report_id links it to its AnalysisReport."""
         target_price = round(target_price, 2)
         current_price_at_creation = round(current_price_at_creation, 2)
         stop_loss = round(stop_loss, 2) if stop_loss else None
@@ -1294,6 +1298,7 @@ class LiveBroker(BaseBroker):
                 allocation_eur=round(allocation_eur, 2),
                 consensus_score=consensus_score,
                 ai_rationale=f"[LIVE ARMED] {ai_rationale}",
+                report_id=report_id,
                 status="PENDING",
                 is_live=True,
                 created_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
@@ -1380,7 +1385,7 @@ class LiveBroker(BaseBroker):
                     return {"success": False, "message": f"Trigger #{trigger_id} not found."}
                 return await self._cancel_trigger_locked(session, trigger)
 
-    async def _cancel_trigger_locked(self, session: Any, trigger: OrderTrigger) -> Dict[str, Any]:
+    async def _cancel_trigger_locked(self, session: Any, trigger: OrderTrigger, reason: str = "Cancelled by user") -> Dict[str, Any]:
         """Cancels a pending live trigger and its resting T212 entry order. The caller holds _t212_lock (Trading 212)."""
         if trigger.status != "PENDING":
             return {"success": False, "message": f"Trigger #{trigger.id} is already {trigger.status}."}
@@ -1392,6 +1397,7 @@ class LiveBroker(BaseBroker):
             if trigger.broker_order_id:
                 return {"success": False, "message": f"Trigger #{trigger.id}: resting order could not be cancelled; still pending."}
         trigger.status = "CANCELLED"
+        trigger.cancel_reason = reason
         await session.commit()
         return {"success": True, "message": f"Trigger #{trigger.id} for {trigger.ticker} cancelled."}
 
@@ -1427,7 +1433,7 @@ class LiveBroker(BaseBroker):
                     OrderTrigger.ticker == ticker, OrderTrigger.status == "PENDING", OrderTrigger.is_live == True))).scalars().all()
                 for trigger in triggers:
                     try:
-                        res = await self._cancel_trigger_locked(session, trigger)
+                        res = await self._cancel_trigger_locked(session, trigger, "Ticker released to user")
                     except Exception as e:
                         logger.error(f"Release of {ticker}: cancel of trigger #{trigger.id} failed: {e}")
                         return buy_error
@@ -1680,6 +1686,7 @@ class LiveBroker(BaseBroker):
                 if is_trigger_expired(t.created_at):
                     logger.info(f"Trigger #{t.id} for {t.ticker} expired (older than {settings.TRIGGER_EXPIRY_DAYS} days).")
                     t.status = "EXPIRED"
+                    t.cancel_reason = f"Expired after {settings.TRIGGER_EXPIRY_DAYS} days"
                     await session.commit()
                     continue
 
@@ -1708,6 +1715,7 @@ class LiveBroker(BaseBroker):
                 if invalid_reason:
                     logger.info(f"Cancelling trigger #{t.id} for {t.ticker}: {invalid_reason}")
                     t.status = "CANCELLED"
+                    t.cancel_reason = str(invalid_reason)[:255]
                     await session.commit()
                     continue
 
@@ -1740,6 +1748,7 @@ class LiveBroker(BaseBroker):
                         # Not even one whole share fits: release the reserved cash for other triggers
                         logger.info(f"Cancelling live trigger #{t.id} for {t.ticker}: {trade_res.get('message')}")
                         t.status = "CANCELLED"
+                        t.cancel_reason = ("Unaffordable: " + str(trade_res.get("message") or ""))[:255]
                         await session.commit()
 
             return executed
@@ -1783,6 +1792,7 @@ class LiveBroker(BaseBroker):
             price_native=price, stop_loss_native=trigger.stop_loss, take_profit_native=trigger.take_profit,
             rationale=f"Resting order #{trigger.id} filled ({trigger.trigger_type} @ {trigger.target_price})",
             consensus_score=trigger.consensus_score or 80, broker_order_id=trigger.broker_order_id,
+            trigger_id=trigger.id,
         )
         return [dict(res, trigger_id=trigger.id)]
 
@@ -1836,12 +1846,14 @@ class LiveBroker(BaseBroker):
                             booked += fills
                             if not fills and t.broker_order_id is None and (expired or invalid):
                                 t.status = "EXPIRED" if expired else "CANCELLED"
+                                t.cancel_reason = f"Expired after {settings.TRIGGER_EXPIRY_DAYS} days" if expired else str(invalid)[:255]
                             await session.commit()
                             continue
 
                         if expired or invalid:
                             logger.info(f"Live trigger #{t.id} for {t.ticker} {'expired' if expired else f'cancelled: {invalid}'}.")
                             t.status = "EXPIRED" if expired else "CANCELLED"
+                            t.cancel_reason = f"Expired after {settings.TRIGGER_EXPIRY_DAYS} days" if expired else str(invalid)[:255]
                             await session.commit()
                             continue
                         # Yahoo lags EU quotes ~15 min: no placement until the market has been open 20 min
@@ -1871,6 +1883,7 @@ class LiveBroker(BaseBroker):
                                 if plan.get("unaffordable"):
                                     # Not even one whole share fits: release the reserved cash for other triggers
                                     t.status = "CANCELLED"
+                                    t.cancel_reason = ("Unaffordable: " + str(plan.get("message", "")))[:255]
                                     await session.commit()
                                 continue
                             await session.refresh(t)

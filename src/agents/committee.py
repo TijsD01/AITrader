@@ -55,16 +55,13 @@ class InvestmentCommittee:
         price = stock_data["price"]
         curr = stock_data.get("currency", "USD")
 
-        # 1. Fetch TencentDB Agent Memory Cold Start & trade learning context
+        # 1. Numeric track record of closed trades (with sample sizes) & trade learning context
         memory_context = ""
         try:
-            from src.memory.client import agent_memory_client
-            cold_start = await agent_memory_client.get_cold_start_loadout(
-                query=ticker, char_budget=2400, include_lessons=False
-            )
-            memory_context = cold_start.full_prompt_context
+            from src.trading import trade_stats
+            memory_context = await trade_stats.track_record_block()
         except Exception as e:
-            logger.debug(f"Memory client context load note: {e}")
+            logger.debug(f"Track record load note: {e}")
 
         try:
             from src.trading.learner import trade_learner
@@ -103,9 +100,9 @@ class InvestmentCommittee:
         system_prompt = (
             "You are the Lead Portfolio Manager presiding over the Investment Committee of a top hedge fund. "
             "You have received specialized reports from Technical, Fundamental, Sentiment, and Risk analysts, "
-            "along with historical lessons learned from previous winning and losing trades and full memory loadout. "
-            "Simulate an authentic, insightful debate between these agents discussing trade-offs, factoring in "
-            "where previous trades went wrong or succeeded, and render your final verdict."
+            "along with a numeric track record of closed bot trades with sample sizes; treat any stat marked "
+            "\"too few to judge\" as no evidence, and never invent past trades or lessons. "
+            "Simulate an authentic, insightful debate between these agents discussing trade-offs, and render your final verdict."
         )
 
         user_prompt = f"""

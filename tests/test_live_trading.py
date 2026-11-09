@@ -442,3 +442,65 @@ async def test_broker_switch_starts_a_new_history_for_loss_and_return():
             await session.execute(delete(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True))
             await session.execute(delete(CashFlow).where(CashFlow.is_live == True))
             await session.commit()
+
+
+async def _live_trigger(ticker, broker_order_id=None):
+    from src.db.models import OrderTrigger
+    async with AsyncSessionLocal() as session:
+        await session.execute(delete(OrderTrigger).where(OrderTrigger.ticker == ticker))
+        t = OrderTrigger(
+            ticker=ticker, name=ticker, currency="EUR", trigger_type="LIMIT_PULLBACK",
+            target_price=90.0, current_price_at_creation=100.0, stop_loss=85.0, take_profit=110.0,
+            allocation_eur=500.0, consensus_score=85, status="PENDING", is_live=True,
+            broker_order_id=broker_order_id,
+        )
+        session.add(t)
+        await session.commit()
+        return t.id
+
+
+@pytest.mark.asyncio
+async def test_live_cancel_unconfirmed_leaves_trigger_pending_without_reason():
+    from unittest.mock import AsyncMock, MagicMock
+    from src.db.models import OrderTrigger
+    await init_db()
+    ticker = "CANCEL_UNCONF_TEST"
+    trigger_id = await _live_trigger(ticker, broker_order_id="t212_999")
+    try:
+        # _t212_cancel_entry returns no fills and keeps broker_order_id when the cancel is not confirmed
+        with patch("src.trading.live.trading212.get_client", return_value=MagicMock()), \
+             patch.object(live_broker, "_t212_cancel_entry", AsyncMock(return_value=[])):
+            async with AsyncSessionLocal() as session:
+                trigger = await session.get(OrderTrigger, trigger_id)
+                res = await live_broker._cancel_trigger_locked(session, trigger)
+        assert res["success"] is False
+        async with AsyncSessionLocal() as session:
+            row = await session.get(OrderTrigger, trigger_id)
+        assert row.status == "PENDING"
+        assert row.broker_order_id == "t212_999"
+        assert row.cancel_reason is None
+    finally:
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(OrderTrigger).where(OrderTrigger.ticker == ticker))
+            await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_live_cancel_records_reason():
+    from src.db.models import OrderTrigger
+    await init_db()
+    ticker = "CANCEL_REASON_TEST"
+    try:
+        for reason_kwargs, expected in (({}, "Cancelled by user"), ({"reason": "Ticker released to user"}, "Ticker released to user")):
+            trigger_id = await _live_trigger(ticker)
+            async with AsyncSessionLocal() as session:
+                trigger = await session.get(OrderTrigger, trigger_id)
+                res = await live_broker._cancel_trigger_locked(session, trigger, **reason_kwargs)
+            assert res["success"] is True
+            async with AsyncSessionLocal() as session:
+                row = await session.get(OrderTrigger, trigger_id)
+            assert (row.status, row.cancel_reason) == ("CANCELLED", expected)
+    finally:
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(OrderTrigger).where(OrderTrigger.ticker == ticker))
+            await session.commit()

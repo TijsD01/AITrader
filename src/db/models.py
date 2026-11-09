@@ -49,6 +49,7 @@ class Position(Base):
     status = Column(String(20), default="OPEN")  # OPEN, CLOSED
     is_live = Column(Boolean, default=False)
     broker_order_id = Column(String(100), nullable=True)
+    trigger_id = Column(Integer, nullable=True)  # OrderTrigger that opened this position (NULL = manual/direct buy)
     opened_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
@@ -185,6 +186,8 @@ class OrderTrigger(Base):
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     triggered_at = Column(DateTime, nullable=True)
     executed_trade_id = Column(Integer, nullable=True)
+    cancel_reason = Column(String(255), nullable=True)  # why the trigger was CANCELLED or EXPIRED
+    report_id = Column(Integer, nullable=True)  # AnalysisReport that armed this trigger (NULL = manual/scanner)
 
 class TradeLesson(Base):
     __tablename__ = "trade_lessons"
@@ -254,6 +257,7 @@ class ShadowPosition(Base):
     current_price_native = Column(Float, nullable=False)
     highest_price_native = Column(Float, nullable=False)
     stop_loss_native = Column(Float, nullable=True)
+    initial_stop_native = Column(Float, nullable=True)  # Stop at entry, before any ratchet
     take_profit_native = Column(Float, nullable=True)
     entry_price_eur = Column(Float, nullable=False)
     current_price_eur = Column(Float, nullable=False)
