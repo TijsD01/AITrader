@@ -480,7 +480,6 @@ const crosshairPlugin = {
     if (!active.length) return;
     const x = Math.round(active[0].element.x) + 0.5; // half pixel keeps a 1px line crisp
     const { ctx, chartArea: a } = chart;
-    if (x < a.left || x > a.right) return;
     ctx.save();
     ctx.strokeStyle = cssVar('--text-3');
     ctx.lineWidth = 1;
