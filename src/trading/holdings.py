@@ -10,7 +10,7 @@ from sqlalchemy import desc, select
 from config.settings import settings
 from src.data.currency import currency_service
 from src.data.market import market_data_provider
-from src.data.market_hours import check_market_hours
+from src.data.market_hours import quotes_moving
 from src.db import session as db_session
 from src.db.models import PortfolioSnapshot, Position, SystemConfig, Trade, UserHolding
 from src.trading import trading212
@@ -78,10 +78,22 @@ async def refresh_holding_prices(session) -> None:
     """Update row prices in place; the caller commits."""
     if not holdings_enabled():
         return
+    # Trading 212's own price first: it holds the shares and quotes them in its extended hours
+    t212_prices = {}
+    client = trading212.get_client()
+    if client:
+        try:
+            t212_prices = {bp["instrument"]["ticker"]: bp.get("currentPrice") for bp in await client.positions()}
+        except Exception as e:
+            logger.warning(f"Trading 212 positions for holding prices failed, using Yahoo: {e}")
     res = await session.execute(select(UserHolding))
     for h in res.scalars().all():
-        is_open, _ = check_market_hours(h.ticker)
-        if not is_open and h.current_price_native and h.current_price_native > 0:
+        price = float(t212_prices.get(h.t212_ticker) or 0)
+        if price > 0:
+            h.current_price_native = price
+            h.current_price_eur = currency_service.to_eur(price, h.currency)
+            continue
+        if not quotes_moving(h.ticker) and h.current_price_native and h.current_price_native > 0:
             continue
         data = await asyncio.to_thread(market_data_provider.get_stock_data, h.ticker)
         price = data["price"] if data else None

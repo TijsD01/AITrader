@@ -5,6 +5,8 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 
+from src.data.market_hours import check_market_hours, quotes_moving
+
 logger = logging.getLogger(__name__)
 
 # ponytail: in-memory TTL cache, Redis if multi-worker needed
@@ -42,6 +44,14 @@ class MarketDataProvider:
             # Extract info/fast_info
             fast_info = ticker.fast_info
             current_price = float(fast_info.get("lastPrice") or hist["Close"].iloc[-1])
+            # lastPrice is the regular-session close; Trading 212 trades on in pre/after-market, so quote that
+            if quotes_moving(sym) and not check_market_hours(sym)[0]:
+                try:
+                    ext = ticker.history(period="1d", interval="1m", prepost=True)["Close"].dropna()
+                    if not ext.empty and ext.iloc[-1] > 0:
+                        current_price = float(ext.iloc[-1])
+                except Exception as e:
+                    logger.debug(f"No extended-hours quote for {ticker_symbol}: {e}")
             currency = fast_info.get("currency", "USD")
 
             # Try to get comprehensive fundamental info
