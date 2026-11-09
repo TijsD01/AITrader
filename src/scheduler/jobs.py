@@ -374,10 +374,6 @@ class TradingScheduler:
         except Exception as e:
             logger.error(f"Error checking startup market sessions: {e}")
 
-    async def run_opening_review(self, market: str = "EU"):
-        """Explicit on-demand runner for Opening Market Review."""
-        return await self.run_market_session(market=market, session="OPEN")
-
     async def run_market_session(self, market: str, session: str, target_chat_id: Optional[Union[int, str]] = None):
         """
         Runs candidate scanning, invokes agent committee, executes auto-buys if high conviction,

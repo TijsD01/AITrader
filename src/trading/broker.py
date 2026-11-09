@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any
 from config.settings import settings
 from src.trading.base import BaseBroker
 from src.trading.paper import paper_broker, PaperBroker

@@ -11,7 +11,7 @@ from sqlalchemy import select, desc, func
 
 from config.settings import settings, update_env_file
 from src.db.session import AsyncSessionLocal, set_kill_switch
-from src.db.models import UserHolding, Position, Trade, PortfolioSnapshot, AnalysisReport, WatchlistItem, SystemConfig, MarketDigest, TradeLesson
+from src.db.models import UserHolding, Position, Trade, PortfolioSnapshot, AnalysisReport, WatchlistItem, SystemConfig, MarketDigest
 from src.trading.broker import active_broker as paper_broker, get_active_broker, active_broker, live_broker, check_broker_status
 from src.trading import trading212
 from src.trading.holdings import holdings_enabled, list_holdings
@@ -776,12 +776,6 @@ async def get_reviews_comparison(market: str = "EU", session: str = "OPEN", days
     from src.data.review_tracker import review_tracker
     return await review_tracker.compare_past_week_reviews(current_market=market, current_session=session, days=days)
 
-@router.get("/api/reviews/next-session")
-async def get_next_scheduled_session():
-    """Returns the upcoming chronological market session schedule."""
-    from src.data.review_tracker import review_tracker
-    return review_tracker.get_next_session_info()
-
 @router.post("/api/market-session/run")
 async def run_market_session_endpoint(req: MarketSessionRequest):
     """Allows manual/on-demand execution of Opening Market Review or Closing Session."""
@@ -813,16 +807,6 @@ async def toggle_killswitch(active: bool):
         "trading_mode": settings.TRADING_MODE,
         "live_trading_enabled": settings.LIVE_TRADING_ENABLED
     }
-
-@router.post("/api/sync")
-async def sync_account():
-    """Syncs live positions and settled cash balance with the broker."""
-    broker = get_active_broker()
-    summary = await broker.sync_account_state()
-    return {"success": True, "portfolio": summary}
-
-
-
 # Deposits and withdrawals on the live account (kept out of the portfolio gain)
 class CashFlowRequest(BaseModel):
     amount_eur: float  # Positive = deposit, negative = withdrawal

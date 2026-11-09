@@ -154,7 +154,6 @@ class Settings(BaseSettings):
     # Alpaca Config (Supports US equities)
     ALPACA_API_KEY: Optional[str] = None
     ALPACA_SECRET_KEY: Optional[str] = None
-    ALPACA_BASE_URL: str = "https://api.alpaca.markets"
 
     # Markets & Schedule (Times in CET / Europe/Amsterdam)
     TIMEZONE: str = "Europe/Amsterdam"

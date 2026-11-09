@@ -108,6 +108,18 @@ def bench_risk() -> dict:
     }
 
 
+def bench_intel() -> dict:
+    """(d) what a strategy pays to read the committee's last verdict, and to gate a ticker on chop."""
+    import time as _t
+    from src.agents import committee
+    committee._report_cache["BENCH.AS"] = (_t.monotonic(), {"action": "BUY", "consensus_score": 85})
+    technicals = {"adx14": 31.0, "atr_pct": 2.1}
+    return {
+        "intel_cache_read_us": _median_us(lambda: committee.investment_committee.cached_report("BENCH.AS", 7200), 20000),
+        "chop_gate_us": _median_us(lambda: MarketScanner.chop_reason(technicals), 20000),
+    }
+
+
 def bench_db() -> dict:
     """(c) one state write (commit) and one state read on a fresh SQLite file."""
     from sqlalchemy import select
@@ -136,7 +148,7 @@ def bench_db() -> dict:
 
 
 if __name__ == "__main__":
-    results = {**bench_signal(), **bench_risk(), **bench_db()}
+    results = {**bench_signal(), **bench_risk(), **bench_intel(), **bench_db()}
     print(json.dumps(results, indent=2))
     if len(sys.argv) > 1:
         Path(sys.argv[1]).write_text(json.dumps(results, indent=2) + "\n")

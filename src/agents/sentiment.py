@@ -1,7 +1,7 @@
 import asyncio
 import re
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any
 from config.settings import settings
 from src.agents.base import llm_client, merge_llm_report
 from src.data.news import news_service

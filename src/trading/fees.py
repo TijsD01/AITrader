@@ -5,7 +5,7 @@ from destroying portfolio returns on small accounts.
 """
 
 import logging
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional
 from config.settings import settings
 from src.data.currency import currency_service
 

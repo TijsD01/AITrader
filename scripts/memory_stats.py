@@ -3,7 +3,6 @@
 Usage: python3 scripts/memory_stats.py [data_dir]   (default: data)
 Reads through SQLite, so rows still in the -wal file are included.
 """
-import json
 import sqlite3
 import statistics
 import sys

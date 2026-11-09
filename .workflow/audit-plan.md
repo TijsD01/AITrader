@@ -21,9 +21,8 @@ V = read in code. G = guess, not run. Nothing here is timed unless it says so.
 | 5 | HIGH | risk.py:501 `compute_trailing_stop` | NaN high moves the stop to entry x 1.01. | Bad number: stop unchanged. |
 | 6 | HIGH | live.py:1927, paper.py:548, shadow.py:636 | NaN price: stop never fires, silently. | Guard at the quote source: `get_stock_data` returns None for a non-finite price. |
 | 7 | HIGH | currency.py:36 `to_eur` | Sync Yahoo call on the event loop every 15 min, on the stop path. Freezes API, Telegram, all jobs while it hangs. | Inside a running loop: refresh in a thread, serve the cached rate. |
-| 8 | HIGH | paper.py:452 | Paper sell awaits the LLM post-mortem under `_monitor_lock`. Later stop-outs wait minutes. | `create_task`. |
 | 9 | HIGH | jobs.py:40 | No `misfire_grace_time`: a > 1 s loop stall silently skips a stop check (G for effect). | `job_defaults` grace 60 s + coalesce. |
-| 10 | MED | market.py:43 | Closed-market TTL constant defined, never used: full 1-year refetch every 60 s all night. Failed lookups never cached. | Use the closed TTL; cache failures 10 min. |
+| 10 | MED | market.py:43 | Closed-market TTL constant defined, never used: full 1-year refetch every 60 s all night. | Use the closed TTL. Failed lookups stay uncached on purpose: a cached failure would hide a held position's price from the stop check. |
 | 11 | MED | committee, scanner | No per-ticker trend/volatility gate. LLM runs on flat chop. | ADX14 + ATR% in technicals; scanner drops chop before the committee. |
 | 12 | MED | jobs.py:740 | Opportunity scanner re-debates the same tickers every 30 min. | In-memory TTL cache of committee reports. |
 | 13 | MED | market.py:87-134 | Indicators: 5 pandas `ewm` + 3 `rolling` over the full series for one last value. | NumPy on the tail; measure. |
@@ -48,6 +47,8 @@ V = read in code. G = guess, not run. Nothing here is timed unless it says so.
 - paper.py vs live.py duplicates (~150 LOC, `get_trigger_plan` etc). Real-money path: own PR with the money-path test list.
 
 ## Not now — real, but bigger than this pass
+
+- Paper sell awaits the LLM post-mortem under `_monitor_lock` (paper.py:452). The sell result returns the lesson text, so a background task changes the contract. Paper only.
 
 - Lock design: stop check shares `_monitor_lock` with trigger buys and broker sync (jobs.py:565-609). `_t212_lock` held through Yahoo fetches and 2.1 s sleeps (live.py:1815). Split locks.
 - Telegram polling awaits each handler inline: `/analyze` (up to 300 s) delays `/killswitch` (bot.py:465).
