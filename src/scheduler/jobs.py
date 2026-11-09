@@ -363,7 +363,8 @@ class TradingScheduler:
                                     take_profit=tp,
                                     allocation_eur=alloc_eur,
                                     consensus_score=report["consensus_score"],
-                                    ai_rationale=report.get("trigger_rationale", report["summary"])
+                                    ai_rationale=report.get("trigger_rationale", report["summary"]),
+                                    report_id=rep_entry.id
                                 )
                                 if trig_res.get("success"):
                                     pending_tickers.add(ticker)

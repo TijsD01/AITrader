@@ -9,7 +9,7 @@ from src.trading.learner import trade_learner
 from src.trading.paper import paper_broker
 from src.telegram.bot import telegram_bot
 from src.scheduler.jobs import trading_scheduler
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, delete
 
 @pytest.mark.asyncio
 async def test_trade_post_mortem_win_and_loss():
@@ -121,10 +121,23 @@ async def test_autonomous_parameter_calibration(monkeypatch):
 @pytest.mark.asyncio
 async def test_learning_context_for_agents():
     await init_db()
-    context = await trade_learner.get_learning_context_for_agents()
+    # A stored lesson must not reach the prompt: single-trade stories anchor the LLM
+    async with AsyncSessionLocal() as session:
+        lesson = TradeLesson(trade_id=-1, ticker="LESSON_CTX", outcome="WIN", lesson="Stale single-trade story")
+        session.add(lesson)
+        await session.commit()
+        lesson_id = lesson.id
+    try:
+        context = await trade_learner.get_learning_context_for_agents()
+    finally:
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(TradeLesson).where(TradeLesson.id == lesson_id))
+            await session.commit()
     assert "HISTORICAL TRADE LEARNING" in context
     assert "Active Adapted Min Score" in context
     assert "Active Risk Sizing" in context
+    assert "Key Lessons" not in context
+    assert "Stale single-trade story" not in context
 
 @pytest.mark.asyncio
 async def test_telegram_learning_and_review_commands():

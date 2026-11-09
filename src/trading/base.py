@@ -57,9 +57,10 @@ class BaseBroker(ABC):
         take_profit: Optional[float],
         allocation_eur: float,
         consensus_score: int,
-        ai_rationale: str
+        ai_rationale: str,
+        report_id: Optional[int] = None
     ) -> Dict[str, Any]:
-        """Creates a pending limit pullback or breakout trigger."""
+        """Creates a pending limit pullback or breakout trigger. report_id links it to its AnalysisReport."""
         pass
 
     @abstractmethod

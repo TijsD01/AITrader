@@ -180,6 +180,7 @@ async def test_filled_order_is_booked_with_stop(rest, asml):
     assert len(booked) == 1 and booked[0]["trigger_id"] == tid
     pos = await _positions()
     assert len(pos) == 1 and (pos[0].shares, pos[0].entry_price_native, pos[0].stop_loss_native) == (0.5, 598.0, 570.0)
+    assert pos[0].trigger_id == tid
     async with AsyncSessionLocal() as s:
         trades = (await s.execute(select(Trade).where(Trade.ticker == "ASML.AS", Trade.order_type == "BUY"))).scalars().all()
     assert len(trades) == 1 and trades[0].broker_order_id == "t212_1"
@@ -187,6 +188,19 @@ async def test_filled_order_is_booked_with_stop(rest, asml):
     assert t.status == "TRIGGERED" and t.triggered_at is not None
     assert ("stop", "ASMLa_EQ", -0.5, 570.0) in rest.posts
     assert rest.cancelled == []
+
+
+async def test_execute_buy_links_position_to_its_trigger(rest, asml, monkeypatch):
+    monkeypatch.setattr(LiveBroker, "_plan_live_buy", AsyncMock(return_value={"success": True, "shares": 0.5}))
+    monkeypatch.setattr(LiveBroker, "_dispatch_real_order", AsyncMock(return_value=("t212_7", 0.5, 600.0)))
+    monkeypatch.setattr(LiveBroker, "adjust_triggers_dynamically", AsyncMock())
+    async with AsyncSessionLocal() as s:
+        s.add(PortfolioSnapshot(cash_eur=1000.0, equity_eur=0.0, total_value_eur=1000.0, is_live=True))
+        await s.commit()
+    res = await LiveBroker().execute_buy("ASML.AS", "ASML", 600.0, "EUR", 570.0, 700.0, 300.0, 85, "test", trigger_id=42)
+    assert res["success"]
+    pos = await _positions()
+    assert len(pos) == 1 and pos[0].trigger_id == 42
 
 
 async def test_partial_fill_cancels_rest_and_books(rest, asml):

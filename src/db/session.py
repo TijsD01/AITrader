@@ -47,6 +47,8 @@ def _run_migrations(connection):
         ("shadow_accounts", "cash_flows_eur", "FLOAT DEFAULT 0.0"),
         ("shadow_positions", "initial_stop_native", "FLOAT"),
         ("order_triggers", "cancel_reason", "VARCHAR(255)"),
+        ("order_triggers", "report_id", "INTEGER"),
+        ("positions", "trigger_id", "INTEGER"),
     ]
     for table, col, col_type in migrations:
         try:

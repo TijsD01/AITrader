@@ -269,6 +269,7 @@ class PaperBroker(BaseBroker):
                 unrealized_pnl_eur=0.0,
                 unrealized_pnl_pct=0.0,
                 status="OPEN",
+                trigger_id=trigger_id,
                 opened_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
             )
             session.add(new_pos)
@@ -568,7 +569,8 @@ class PaperBroker(BaseBroker):
         take_profit: Optional[float],
         allocation_eur: float,
         consensus_score: int,
-        ai_rationale: str
+        ai_rationale: str,
+        report_id: Optional[int] = None
     ) -> Dict[str, Any]:
         """Creates an active pending price trigger (limit pullback or breakout order)."""
         async with AsyncSessionLocal() as session:
@@ -692,6 +694,7 @@ class PaperBroker(BaseBroker):
                 allocation_eur=round(allocation_eur, 2),
                 consensus_score=consensus_score,
                 ai_rationale=ai_rationale,
+                report_id=report_id,
                 status="PENDING",
                 is_live=False,
                 created_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)

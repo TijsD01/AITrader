@@ -55,16 +55,13 @@ class InvestmentCommittee:
         price = stock_data["price"]
         curr = stock_data.get("currency", "USD")
 
-        # 1. Fetch TencentDB Agent Memory Cold Start & trade learning context
+        # 1. Numeric track record of closed trades (with sample sizes) & trade learning context
         memory_context = ""
         try:
-            from src.memory.client import agent_memory_client
-            cold_start = await agent_memory_client.get_cold_start_loadout(
-                query=ticker, char_budget=2400, include_lessons=False
-            )
-            memory_context = cold_start.full_prompt_context
+            from src.trading import trade_stats
+            memory_context = await trade_stats.track_record_block()
         except Exception as e:
-            logger.debug(f"Memory client context load note: {e}")
+            logger.debug(f"Track record load note: {e}")
 
         try:
             from src.trading.learner import trade_learner

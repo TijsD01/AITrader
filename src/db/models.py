@@ -49,6 +49,7 @@ class Position(Base):
     status = Column(String(20), default="OPEN")  # OPEN, CLOSED
     is_live = Column(Boolean, default=False)
     broker_order_id = Column(String(100), nullable=True)
+    trigger_id = Column(Integer, nullable=True)  # OrderTrigger that opened this position (NULL = manual/direct buy)
     opened_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
@@ -186,6 +187,7 @@ class OrderTrigger(Base):
     triggered_at = Column(DateTime, nullable=True)
     executed_trade_id = Column(Integer, nullable=True)
     cancel_reason = Column(String(255), nullable=True)  # why the trigger was CANCELLED or EXPIRED
+    report_id = Column(Integer, nullable=True)  # AnalysisReport that armed this trigger (NULL = manual/scanner)
 
 class TradeLesson(Base):
     __tablename__ = "trade_lessons"

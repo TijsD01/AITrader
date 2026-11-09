@@ -602,16 +602,11 @@ Return valid JSON with exactly these keys:
 
     async def get_learning_context_for_agents(self) -> str:
         """
-        Formats historical performance metrics and top lessons learned
-        for direct prompt injection into InvestmentCommittee and RiskManagerAgent.
+        Formats the active adapted parameters for direct prompt injection into InvestmentCommittee and
+        RiskManagerAgent. Single-trade lessons are left out: they anchor the LLM (the track record block
+        in trade_stats carries the outcome numbers instead).
         """
         async with AsyncSessionLocal() as session:
-            # Fetch recent lessons
-            res = await session.execute(
-                select(TradeLesson).order_by(desc(TradeLesson.created_at)).limit(4)
-            )
-            lessons = res.scalars().all()
-
             # Fetch active calibrated configs
             cfg_res = await session.execute(select(SystemConfig))
             configs = {c.key: c.value for c in cfg_res.scalars().all()}
@@ -630,13 +625,6 @@ Return valid JSON with exactly these keys:
                 f"• Active Risk Sizing: {float(size_pct)*100:.1f}% | Stop ATR Multiplier: {atr_mult}x | TP R:R: {tp_rr}:1",
                 f"• Trailing Breakeven Trigger: +{float(be_pct)*100:.1f}% | Committee Risk Weight: {float(w_risk)*100:.0f}%",
             ]
-
-            if lessons:
-                lines.append("• Key Lessons Learned from Past Trades:")
-                for l in lessons:
-                    lines.append(f"  - [{l.outcome} on {l.ticker} ({l.realized_pnl_pct:+.1f}%)]: {l.lesson}")
-            else:
-                lines.append("• Trade learning engine is active and will ingest closed trades as they occur.")
 
             return "\n".join(lines)
 
