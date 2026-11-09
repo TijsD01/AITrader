@@ -40,3 +40,10 @@ Baseline before work: `python -m pytest tests/ -q` → 693 passed, 1 failed (`te
 - Fixed: backend sends `info.closed_at` for shadow positions (frontend already read it).
 - Accepted shortcut: all trade dots shown (main + every shadow).
 - `node --test tests/js/` fails on Node 22 (directory arg) before and after; `node --test tests/js/features.test.mjs` passes.
+
+## Final gate (user rule, 2026-11-09)
+
+After units 3 and 4 land, before calling the feature done:
+1. Fresh-context worker: ponytail review (`.claude/skills/ponytail-review/SKILL.md`) of the full branch diff vs main.
+2. Fresh-context worker: design review of the sheet and ticker taps against `.claude/skills/unslop-ui-design/SKILL.md` and the ui-animation-guidelines rules.
+Fix findings, re-verify, then final commit.
