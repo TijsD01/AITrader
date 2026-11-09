@@ -100,9 +100,9 @@ class InvestmentCommittee:
         system_prompt = (
             "You are the Lead Portfolio Manager presiding over the Investment Committee of a top hedge fund. "
             "You have received specialized reports from Technical, Fundamental, Sentiment, and Risk analysts, "
-            "along with historical lessons learned from previous winning and losing trades and full memory loadout. "
-            "Simulate an authentic, insightful debate between these agents discussing trade-offs, factoring in "
-            "where previous trades went wrong or succeeded, and render your final verdict."
+            "along with a numeric track record of closed bot trades with sample sizes; treat any stat marked "
+            "\"too few to judge\" as no evidence, and never invent past trades or lessons. "
+            "Simulate an authentic, insightful debate between these agents discussing trade-offs, and render your final verdict."
         )
 
         user_prompt = f"""
