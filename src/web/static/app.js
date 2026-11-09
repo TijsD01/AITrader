@@ -485,8 +485,32 @@ const crosshairPlugin = {
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(x, a.top); ctx.lineTo(x, a.bottom); ctx.stroke();
     ctx.restore();
+  },
+  // chart.$readout(index | null): called when the hovered point changes, null on leave
+  afterEvent(chart) {
+    if (!chart.$readout) return;
+    const hit = chart.getActiveElements().find(e => e.datasetIndex === 0);
+    const i = hit ? hit.index : null;
+    if (i === chart.$hover) return;
+    chart.$hover = i;
+    chart.$readout(i);
   }
 };
+
+// Swap an element's text for a hovered value; null puts the resting text back
+function setReadout(el, text) {
+  if (text === null) {
+    if ('rest' in el.dataset) { el.textContent = el.dataset.rest; delete el.dataset.rest; }
+    return;
+  }
+  if (!('rest' in el.dataset)) el.dataset.rest = el.textContent;
+  el.textContent = text;
+}
+// A data refresh while hovering updates the resting text, not the readout
+function setRestingText(el, text) {
+  if ('rest' in el.dataset) el.dataset.rest = text;
+  else el.textContent = text;
+}
 if (typeof Chart !== 'undefined') {
   Chart.register(crosshairPlugin);
   Chart.defaults.plugins.tooltip.animation = false;
@@ -702,7 +726,7 @@ async function loadValueHistory() {
     note.textContent = 'The value line appears once the bot has recorded a few portfolio changes.';
     return;
   }
-  note.textContent = 'Last 30 days';
+  setRestingText(note, 'Last 30 days');
   const labels = points.map(p => p[0]);
   const data = points.map(p => p[1]);
   if (!valueChart) {
@@ -716,17 +740,17 @@ async function loadValueHistory() {
         interaction: { mode: 'index', intersect: false },
         plugins: {
           legend: { display: false },
-          tooltip: {
-            displayColors: false,
-            callbacks: {
-              title: items => new Date(items[0].label + 'Z').toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }),
-              label: c => eur(c.parsed.y)
-            }
-          }
+          tooltip: { enabled: false } // hovered value shows in the hero figure instead
         },
         scales: { x: { display: false }, y: { display: false, grace: '5%' } }
       }
     });
+    const total = document.getElementById('metricTotalVal');
+    valueChart.$readout = i => {
+      const c = valueChart;
+      setReadout(total, i === null ? null : eur(c.data.datasets[0].data[i]));
+      setReadout(note, i === null ? null : new Date(c.data.labels[i] + 'Z').toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }));
+    };
   } else {
     valueChart.data.labels = labels;
     valueChart.data.datasets[0].data = data;
@@ -775,7 +799,7 @@ async function loadPortfolio() {
     const maxUsagePct = summary.max_capital_usage_pct ?? 100;
     const maxCapEur = summary.max_deployable_capital_eur;
 
-    document.getElementById('metricTotalVal').textContent = eur(totalVal);
+    setRestingText(document.getElementById('metricTotalVal'), eur(totalVal));
     document.getElementById('metricCash').textContent = eur(deployableCash);
     document.getElementById('metricEquity').textContent = eur(equityVal);
     const mineWrap = document.getElementById('metricMineWrap');
@@ -3246,8 +3270,7 @@ function openTickerSheet(ticker, source = '') {
   if (!dlg || !ticker) return;
   Object.assign(tickerSheet, { ticker, source, range: '3M', data: null, selected: [], shown: '' });
   document.getElementById('tsTicker').textContent = ticker;
-  document.getElementById('tsName').textContent = '';
-  document.getElementById('tsPrice').textContent = '';
+  ['tsName', 'tsPrice'].forEach(id => { const el = document.getElementById(id); delete el.dataset.rest; el.textContent = ''; }); // Esc while hovering skips the restore
   if (!dlg.open) {
     dlg.classList.remove('is-closing');
     dlg.showModal();
@@ -3295,8 +3318,8 @@ async function loadTickerSheet() {
   if (data.ticker) tickerSheet.ticker = data.ticker; // server may normalise it; keeps range switches off the skeleton
   if (firstLoad) tsPickDefaultSet();
   document.getElementById('tsTicker').textContent = data.ticker || ticker;
-  document.getElementById('tsName').textContent = data.name || '';
-  document.getElementById('tsPrice').textContent = hasNum(data.current_price) ? `${num(data.current_price)} ${data.currency || ''}`.trim() : '';
+  setRestingText(document.getElementById('tsName'), data.name || '');
+  setRestingText(document.getElementById('tsPrice'), hasNum(data.current_price) ? `${num(data.current_price)} ${data.currency || ''}`.trim() : '');
   renderTickerSheet(!firstLoad);
 }
 
@@ -3404,7 +3427,7 @@ function renderTickerChart(chosen, animate) {
       interaction: { mode: 'index', intersect: false },
       plugins: {
         legend: { display: false },
-        tooltip: { filter: i => i.datasetIndex === 0, callbacks: { title: items => fmtX(items[0].label), label: i => num(i.parsed.y) } },
+        tooltip: { enabled: false }, // hovered close and time show in the sheet header instead
         tsLevels: { lines },
       },
       scales: {
@@ -3413,6 +3436,14 @@ function renderTickerChart(chosen, animate) {
       },
     },
   });
+  tickerSheet.chart.$readout = i => {
+    const c = tickerSheet.chart;
+    const at = i === null ? null : new Date(c.data.labels[i] + 'Z').toLocaleString('en-GB', tickerSheet.range === '1D'
+      ? { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }
+      : { day: 'numeric', month: 'short', year: 'numeric' });
+    setReadout(document.getElementById('tsPrice'), i === null ? null : `${num(c.data.datasets[0].data[i])} ${tickerSheet.data.currency || ''}`.trim());
+    setReadout(document.getElementById('tsName'), at);
+  };
   return lines;
 }
 
