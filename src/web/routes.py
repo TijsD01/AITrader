@@ -11,8 +11,9 @@ from sqlalchemy import select, desc, func
 
 from config.settings import settings, update_env_file
 from src.db.session import AsyncSessionLocal, set_kill_switch
-from src.db.models import Position, Trade, PortfolioSnapshot, AnalysisReport, WatchlistItem, SystemConfig, MarketDigest, TradeLesson
+from src.db.models import UserHolding, Position, Trade, PortfolioSnapshot, AnalysisReport, WatchlistItem, SystemConfig, MarketDigest, TradeLesson
 from src.trading.broker import active_broker as paper_broker, get_active_broker, active_broker, live_broker, check_broker_status
+from src.trading import trading212
 from src.trading.holdings import holdings_enabled, list_holdings
 from src.trading.risk import derive_trigger_levels, entry_allocation_from_summary
 from src.trading.trigger_gate import (
@@ -911,3 +912,194 @@ async def set_holding_owner(ticker: str, body: OwnerRequest):
     if not result["success"]:
         raise HTTPException(status_code=409, detail=result["message"])
     return {"ok": True, "message": result["message"]}
+
+
+# 10. Ticker detail sheet: price history plus every set of levels the app knows for one ticker
+# shortcut: trade-dot window approximates the yfinance period by days, use the first history point if dots fall off the chart edge
+_DETAIL_RANGE_DAYS = {"1D": 1, "1M": 31, "3M": 92, "1Y": 366}
+
+
+def _r2(v):
+    return round(float(v), 2) if v is not None else None
+
+
+def _level_set(id_, kind, label, state, status=None, trigger_type=None, levels=None, info=None):
+    lv = {k: None for k in ("entry", "limit", "stop", "take_profit", "high", "breakeven_at")}
+    lv.update({k: _r2(v) for k, v in (levels or {}).items()})
+    inf = {k: None for k in ("allocation_eur", "planned_shares", "score", "rationale", "created_at", "exit_reason", "pnl_pct")}
+    inf.update(info or {})
+    return {"id": id_, "kind": kind, "label": label, "state": state, "status": status,
+            "trigger_type": trigger_type, "levels": lv, "info": inf}
+
+
+def _iso(ts):
+    return ts.isoformat(timespec="minutes") if ts else None
+
+
+@router.get("/api/ticker/{ticker}/detail")
+async def get_ticker_detail(ticker: str, range: str = "3M"):
+    """Read-only: chart history, level sets (positions, triggers, report, shadows) and trade dots for one ticker.
+
+    Only side effect: active_broker.get_triggers() may re-adjust pending triggers, as the Triggers tab does.
+    """
+    from src.db.models import ShadowPosition, ShadowTrigger
+    from src.trading.shadow import PRESETS, get_strategies
+
+    sym = normalize_ticker(ticker)
+    if not sym:
+        raise HTTPException(status_code=400, detail=invalid_ticker_result(ticker).message)
+    range_key = range.upper() if range and range.upper() in _DETAIL_RANGE_DAYS else "3M"
+    since = datetime.datetime.utcnow() - datetime.timedelta(days=_DETAIL_RANGE_DAYS[range_key])
+    live = get_active_broker() is live_broker
+
+    history, stock = await asyncio.gather(
+        asyncio.to_thread(market_data_provider.get_price_history, sym, range_key),
+        asyncio.to_thread(market_data_provider.get_stock_data, sym),
+        return_exceptions=True,
+    )
+    history = history if isinstance(history, list) else []
+    stock = stock if isinstance(stock, dict) else {}
+
+    level_sets: List[Dict[str, Any]] = []
+    trades: List[Dict[str, Any]] = []
+    fallback_name = fallback_currency = None
+    shadow_labels = {**{k: p.label for k, p in PRESETS.items()}, **{s.key: s.label for s in get_strategies()}}
+
+    async with AsyncSessionLocal() as session:
+        be_row = (await session.execute(
+            select(SystemConfig).where(SystemConfig.key == "BREAKEVEN_TRIGGER_PCT"))).scalars().first()
+        be_pct = float(be_row.value) if be_row else 0.025
+
+        positions = (await session.execute(
+            select(Position).where(Position.ticker == sym, Position.status == "OPEN", Position.is_live == live)
+            .order_by(desc(Position.opened_at)))).scalars().all()
+        for p in positions:
+            fallback_name, fallback_currency = fallback_name or p.name, fallback_currency or p.currency
+            entry, stop = p.entry_price_native, p.stop_loss_native
+            # breakeven_at only matters until the stop has ratcheted up to entry
+            breakeven = round(entry * (1 + be_pct), 2) if entry and (stop is None or stop < entry) else None
+            level_sets.append(_level_set(
+                f"position:{p.id}", "position", "Open position", "live", status=p.status,
+                levels={"entry": entry, "stop": stop, "take_profit": p.take_profit_native,
+                        "high": p.highest_price_native, "breakeven_at": breakeven},
+                info={"created_at": _iso(p.opened_at), "pnl_pct": _r2(p.unrealized_pnl_pct)}))
+
+        report = (await session.execute(
+            select(AnalysisReport).where(AnalysisReport.ticker == sym)
+            .order_by(desc(AnalysisReport.created_at)).limit(1))).scalars().first()
+
+        # shortcut: loads every shadow position for the ticker to pick OPEN + last 3 CLOSED, add a limit if a ticker gets hundreds
+        shadow_positions = (await session.execute(
+            select(ShadowPosition).where(ShadowPosition.ticker == sym)
+            .order_by(desc(ShadowPosition.opened_at)))).scalars().all()
+        shadow_triggers = (await session.execute(
+            select(ShadowTrigger).where(ShadowTrigger.ticker == sym, ShadowTrigger.status == "PENDING")
+            .order_by(desc(ShadowTrigger.created_at)))).scalars().all()
+
+        main_trades = (await session.execute(
+            select(Trade).where(Trade.ticker == sym, Trade.is_live == live, Trade.executed_at >= since)
+            .order_by(Trade.executed_at))).scalars().all()
+
+    triggers = [t for t in await active_broker.get_triggers() if t.get("ticker") == sym]
+    past_count = 0
+    for t in triggers:
+        fallback_name, fallback_currency = fallback_name or t.get("name"), fallback_currency or t.get("currency")
+        if t.get("status") == "PENDING":
+            state = "live" if (t.get("allocation_eur") or 0) > 0 else "unfunded"
+            label = "Pending trigger" if state == "live" else "Pending trigger (no budget)"
+        else:
+            if past_count >= 5:
+                continue
+            past_count += 1
+            state, label = "past", f"Trigger ({str(t.get('status', '')).lower()})"
+        level_sets.append(_level_set(
+            f"trigger:{t['id']}", "trigger", label, state, status=t.get("status"), trigger_type=t.get("trigger_type"),
+            levels={"limit": t.get("target_price"), "stop": t.get("stop_loss"), "take_profit": t.get("take_profit")},
+            info={"allocation_eur": t.get("allocation_eur"), "planned_shares": t.get("planned_shares"),
+                  "score": t.get("consensus_score"), "rationale": t.get("ai_rationale"),
+                  "created_at": t.get("created_at")}))
+
+    if report is not None:
+        raw = report.raw_signals if isinstance(report.raw_signals, dict) else {}
+        limit = raw.get("entry_trigger_price")
+        stop, target = report.stop_loss, report.target_price
+        if limit is not None or stop is not None or target is not None:
+            level_sets.append(_level_set(
+                f"report:{sym}", "report", f"Latest analysis · {report.action}", "would_be", status=report.action,
+                trigger_type=raw.get("trigger_type"),
+                levels={"limit": limit, "stop": stop, "take_profit": target},
+                info={"score": report.consensus_score, "rationale": raw.get("trigger_rationale") or report.summary,
+                      "created_at": _iso(report.created_at)}))
+
+    closed_count = 0
+    for sp in shadow_positions:
+        label = f"Shadow · {shadow_labels.get(sp.strategy, sp.strategy)}"
+        if sp.status == "OPEN":
+            state = "simulated"
+        elif closed_count < 3:
+            closed_count += 1
+            state = "past"
+        else:
+            state = None
+        if state:
+            level_sets.append(_level_set(
+                f"shadow_position:{sp.id}", "shadow_position", label, state, status=sp.status,
+                levels={"entry": sp.entry_price_native, "stop": sp.stop_loss_native,
+                        "take_profit": sp.take_profit_native, "high": sp.highest_price_native},
+                info={"score": sp.consensus_score, "created_at": _iso(sp.opened_at),
+                      "exit_reason": sp.exit_reason, "pnl_pct": _r2(sp.realized_pnl_pct),
+                      "closed_at": _iso(sp.closed_at)}))
+        source = f"shadow:{sp.strategy}"
+        if sp.opened_at and sp.opened_at >= since:
+            trades.append({"side": "BUY", "price": _r2(sp.entry_price_native), "at": _iso(sp.opened_at), "source": source})
+        if sp.closed_at and sp.closed_at >= since and sp.exit_price_native is not None:
+            trades.append({"side": "SELL", "price": _r2(sp.exit_price_native), "at": _iso(sp.closed_at), "source": source})
+
+    for st in shadow_triggers:
+        level_sets.append(_level_set(
+            f"shadow_trigger:{st.id}", "shadow_trigger", f"Shadow trigger · {shadow_labels.get(st.strategy, st.strategy)}",
+            "would_be", status=st.status, trigger_type=st.trigger_type,
+            levels={"limit": st.target_price, "stop": st.stop_loss, "take_profit": st.take_profit},
+            info={"score": st.consensus_score, "rationale": st.note, "created_at": _iso(st.created_at)}))
+
+    trades.extend({"side": t.order_type, "price": _r2(t.price_native), "at": _iso(t.executed_at), "source": "main"}
+                  for t in main_trades)
+    trades.sort(key=lambda t: t["at"] or "")
+
+    currency = stock.get("currency") or fallback_currency
+    current_price = stock.get("price") or (history[-1][1] if history else None)
+    price_source = "yahoo"
+    # Trading 212 holds the shares, so its own price is the most accurate; Yahoo stays the fallback
+    client = trading212.get_client() if settings.LIVE_BROKER.lower() == "trading212" else None
+    if client:
+        try:
+            # Only tickers the account holds (a user holding or an open live bot position): no T212 calls otherwise
+            async with AsyncSessionLocal() as session:
+                t212_ticker = (await session.execute(
+                    select(UserHolding.t212_ticker).where(UserHolding.ticker == sym))).scalars().first()
+                live_held = (await session.execute(select(Position.id).where(
+                    Position.ticker == sym, Position.status == "OPEN", Position.is_live == True))).first()
+            if not t212_ticker and live_held:
+                t212_ticker = await client.resolve_ticker(sym, currency)
+            if t212_ticker:
+                # shortcut: one positions call per sheet load, cache if T212 starts returning 429
+                held = {bp["instrument"]["ticker"]: bp.get("currentPrice") for bp in await client.positions()}
+                t212_price = float(held.get(t212_ticker) or 0)
+                if t212_price > 0:
+                    current_price, price_source = t212_price, "trading212"
+                    now = datetime.datetime.utcnow().isoformat(timespec="minutes")
+                    if history and history[-1][0] < now:
+                        history = list(history) + [[now, t212_price]]  # copy: the provider returns its cached list
+        except Exception as e:
+            logger.warning(f"Trading 212 price for {sym} failed, using Yahoo: {e}")
+    return {
+        "ticker": sym,
+        "name": stock.get("name") or fallback_name or sym,
+        "currency": currency,
+        "current_price": _r2(current_price),
+        "price_source": price_source,
+        "range": range_key,
+        "history": history,
+        "level_sets": level_sets,
+        "trades": trades,
+    }

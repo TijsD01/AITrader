@@ -71,3 +71,11 @@ def test_theme_follows_system():
     assert '<meta name="color-scheme" content="light dark">' in html
     assert "@media (prefers-color-scheme: dark)" in css
     assert "rgb(var(--rgb-" in html  # Tailwind colors read CSS vars
+
+
+def test_ticker_detail_sheet_wired():
+    html = _html()
+    js = _client().get("/static/app.js").text
+    assert 'id="tickerSheet"' in html
+    assert "'open-ticker'" in js
+    assert "/api/ticker/" in js

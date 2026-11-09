@@ -815,6 +815,7 @@ class ShadowPortfolios:
                         **self._trade_stats(main_pnls),
                     },
                     "open_positions": [{
+                        "id": p.id,
                         "ticker": p.ticker,
                         "name": p.name,
                         "currency": p.currency,
@@ -829,6 +830,7 @@ class ShadowPortfolios:
                         "opened_at": p.opened_at.strftime("%Y-%m-%d %H:%M") if p.opened_at else "",
                     } for p in open_positions],
                     "pending_triggers": [{
+                        "id": t.id,
                         "ticker": t.ticker,
                         "trigger_type": t.trigger_type,
                         "target_price": t.target_price,
@@ -839,6 +841,7 @@ class ShadowPortfolios:
                         "created_at": t.created_at.strftime("%Y-%m-%d %H:%M") if t.created_at else "",
                     } for t in pending],
                     "recent_closed": [{
+                        "id": p.id,
                         "ticker": p.ticker,
                         "realized_pnl_eur": p.realized_pnl_eur,
                         "realized_pnl_pct": p.realized_pnl_pct,

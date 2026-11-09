@@ -1052,6 +1052,39 @@
     <span id="toastMsg">Action executed.</span>
   </div>
 
+  <!-- Ticker detail sheet (app.js openTickerSheet) -->
+  <dialog id="tickerSheet" class="ticker-sheet" aria-labelledby="tsTicker" data-state="loading">
+    <div class="ts-panel">
+      <header class="ts-head">
+        <div class="min-w-0">
+          <h2 id="tsTicker" class="ts-ticker"></h2>
+          <p id="tsName" class="text-sm ui-muted truncate"></p>
+        </div>
+        <span id="tsPrice" class="ts-price ui-num"></span>
+        <button type="button" class="ui-btn ui-btn-quiet ui-icon-btn" data-ts-close aria-label="Close"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
+      </header>
+      <div class="seg-nav ts-range" role="group" aria-label="Chart range">
+        <button type="button" class="seg-btn" data-range="1D">1D</button>
+        <button type="button" class="seg-btn" data-range="1M">1M</button>
+        <button type="button" class="seg-btn active-tab" data-range="3M">3M</button>
+        <button type="button" class="seg-btn" data-range="1Y">1Y</button>
+      </div>
+      <div class="ts-error ui-notice ui-notice-danger">
+        <p class="mb-2">Could not load this ticker.</p>
+        <button type="button" class="ui-btn ui-btn-sm" data-ts-retry>Retry</button>
+      </div>
+      <div class="ts-body">
+        <div id="tsChartBox" class="ts-chart">
+          <canvas id="tsChart"></canvas>
+          <p id="tsChartNote" class="ts-chart-note" hidden></p>
+        </div>
+        <div id="tsLegend" class="ts-legend"></div>
+        <div id="tsSets" class="ts-sets" role="group" aria-label="Level sets"></div>
+        <div id="tsInfo"></div>
+      </div>
+    </div>
+  </dialog>
+
   <script src="/static/features.js"></script>
   <script src="/static/app.js"></script>
 </body>
