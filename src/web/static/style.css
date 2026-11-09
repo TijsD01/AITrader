@@ -800,12 +800,15 @@ details[data-fold][open] > :not(summary), .adv-details[open] > :not(summary) { a
   position: relative;
   font: inherit; color: inherit; background: none; border: 0; padding: 0;
   cursor: pointer; text-align: inherit;
+  text-decoration: underline dotted var(--line-strong); text-underline-offset: 3px;
 }
+/* Text, not a control: keep the row height (the global mobile 44px rule would grow it) */
+button.ticker-link { min-height: 0; vertical-align: baseline; }
 /* 44px hit area without moving the layout */
 .ticker-link::after { content: ""; position: absolute; inset: 50% -6px auto; height: 44px; min-width: 44px; transform: translateY(-50%); }
-.ticker-link:hover, .ticker-link:focus-visible { text-decoration: underline; text-underline-offset: 3px; }
+.ticker-link:hover, .ticker-link:focus-visible { text-decoration: underline; }
 .ticker-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
-button.ticker-link:active { transform: none; }
+button.ticker-link:active { transform: none; opacity: .6; }
 
 .ticker-sheet {
   width: 100%; max-width: none; height: 100dvh; max-height: none;
@@ -826,13 +829,14 @@ button.ticker-link:active { transform: none; }
   display: flex; flex-direction: column; gap: 14px;
 }
 .ts-panel > * { flex-shrink: 0; }
-.ts-head { display: flex; align-items: center; gap: 12px; }
+.ts-head { display: flex; align-items: flex-start; gap: 12px; }
 .ts-head > .min-w-0 { flex: 1; }
+.ts-head [data-ts-close] { margin-top: -6px; } /* centre the 44px button on the ticker line */
 .ts-ticker { margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
-.ts-price { font-size: 17px; font-weight: 600; white-space: nowrap; }
+.ts-price { font-size: 17px; font-weight: 600; line-height: 33px; white-space: nowrap; } /* = .ts-ticker line (22px x 1.5) */
 .ts-range { align-self: flex-start; }
-.ts-range .seg-btn:disabled { opacity: .55; cursor: default; }
 .ts-chart { position: relative; height: 280px; }
+.ts-chart[aria-busy="true"] canvas { opacity: .6; transition: opacity var(--dur-in) var(--ease-out); }
 @media (min-width: 768px) { .ts-chart { height: 340px; } }
 .ts-chart-note { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; margin: 0; font-size: 14px; color: var(--text-2); }
 .ts-chart.is-empty canvas { display: none; }
@@ -842,7 +846,11 @@ button.ticker-link:active { transform: none; }
 .ts-swatch { display: inline-block; width: 18px; height: 0; }
 .ts-sets { display: flex; flex-wrap: wrap; gap: 8px; }
 .ts-chip[aria-pressed="true"], button.ts-chip[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-strong); font-weight: 600; }
-.ts-chip { min-height: 36px; }
+@media (max-width: 767px) { .ts-range button.seg-btn, button.ts-chip { min-height: 44px; } }
+/* Legend sits close under the chart; chips and info get room */
+.ts-body { display: flex; flex-direction: column; gap: 16px; }
+.ts-body > .ts-legend { margin-top: -8px; }
+#tsInfo { margin-top: 8px; }
 .ts-info-title { margin: 0; font-size: 15px; font-weight: 600; }
 .ts-rows { display: grid; grid-template-columns: 1fr; margin: 0; }
 .ts-row { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--line-soft); font-size: 14px; }
@@ -867,10 +875,10 @@ button.ticker-link:active { transform: none; }
 /* Motion: up from the bottom, quicker exit */
 @keyframes tsIn { from { transform: translateY(100%); } }
 @keyframes tsOut { to { transform: translateY(100%); } }
-.ticker-sheet[open] { animation: tsIn 220ms cubic-bezier(0.22, 1, 0.36, 1); }
-.ticker-sheet[open]::backdrop { animation: fadeIn 220ms var(--ease-out); }
-.ticker-sheet.is-closing { animation: tsOut 170ms var(--ease-in) forwards; }
-.ticker-sheet.is-closing::backdrop { animation: fadeOut 170ms var(--ease-in) forwards; }
+.ticker-sheet[open] { animation: tsIn var(--dur-in) var(--ease-out); }
+.ticker-sheet[open]::backdrop { animation: fadeIn var(--dur-in) var(--ease-out); }
+.ticker-sheet.is-closing { animation: tsOut var(--dur-out) var(--ease-in) forwards; }
+.ticker-sheet.is-closing::backdrop { animation: fadeOut var(--dur-out) var(--ease-in) forwards; }
 @media (prefers-reduced-motion: reduce) {
   .ticker-sheet[open] { animation-name: fadeIn; }
   .ticker-sheet.is-closing { animation-name: fadeOut; }

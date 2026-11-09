@@ -59,3 +59,6 @@ Fix findings, re-verify, then final commit.
 - Fresh ponytail review: (1) trade dots one bar late / today's trades dropped, (2) T212 called for every ticker incl. paper mode, (3) stale history entry after reload. (2) fixed in d7a50c1 (T212 only for user holdings or open live positions). (1) and (3) go into the fix worker.
 - Fresh design review (unslop + ui-animation): must-fix focus loss on chip/range, `.ticker-link` row growth on mobile (global 44px button rule), chips/range < 44px. Plus label overlap, touch affordance, duplicate badges, spacing, Chart button weight, motion tokens, header alignment, legend keys, ticker normalisation.
 - One fix worker (opus, medium) applies items A–N to app.js + style.css. Skipped by decision: "More" toggle for clamped rationale.
+- Fix worker applied A–N. Deviations: legend margin moved into a `.ts-body` flex column (16px gap, legend -8px) by the orchestrator; close button nudged -6px to align after `align-items: flex-start`; JS close fallback stays 250ms.
+- Known limits: market-review pick link hit area is 26px tall (parent `truncate` clips the ::after); `findLastIndex` needs Safari 15.4+.
+- Final full suite: 705 passed, 1 failed (pre-existing antigravity test). Status: feature complete.

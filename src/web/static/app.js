@@ -646,7 +646,7 @@ async function renderHoldings(req, show) {
             <div class="kv col-span-2"><span>P&amp;L</span><span class="${tone}">${signedEur(pnl)}</span></div>
           </div>
           ${ownerSwitchHtml(h.ticker, 'mine')}
-          <button type="button" class="ui-btn w-full mt-3" data-action="open-ticker" data-ticker="${esc(h.ticker)}" data-source="" aria-label="Chart for ${esc(h.ticker)}"><i class="fa-solid fa-chart-line" aria-hidden="true"></i> Chart</button>
+          <button type="button" class="ui-btn ui-btn-quiet ui-btn-sm w-full mt-2" data-action="open-ticker" data-ticker="${esc(h.ticker)}" data-source="" aria-label="Chart for ${esc(h.ticker)}"><i class="fa-solid fa-chart-line" aria-hidden="true"></i> Chart</button>
         </div>
       </div>`;
   }).join('');
@@ -896,7 +896,7 @@ async function loadPortfolio() {
               <div class="kv col-span-2"><span>P&amp;L</span><span class="${tone}">${signedEur(pnl)}</span></div>
             </div>
             ${ownerSlider ? ownerSwitchHtml(pos.ticker, 'bot') : ''}
-            <button type="button" class="ui-btn w-full mt-3" data-action="open-ticker" data-ticker="${esc(pos.ticker)}" data-source="" aria-label="Chart for ${esc(pos.ticker)}"><i class="fa-solid fa-chart-line" aria-hidden="true"></i> Chart</button>
+            <button type="button" class="ui-btn ui-btn-quiet ui-btn-sm w-full mt-2" data-action="open-ticker" data-ticker="${esc(pos.ticker)}" data-source="" aria-label="Chart for ${esc(pos.ticker)}"><i class="fa-solid fa-chart-line" aria-hidden="true"></i> Chart</button>
             <button type="button" data-action="close-position" data-ticker="${esc(pos.ticker)}" class="ui-btn ui-btn-danger w-full mt-3" aria-label="Sell position ${esc(pos.ticker)}">
               <i class="fa-solid fa-arrow-right-from-bracket"></i> Sell position
             </button>
@@ -2099,7 +2099,7 @@ async function loadTriggers() {
             <div class="ui-card ui-card-pad flex flex-col gap-3">
               <div class="flex items-start justify-between gap-3">
                 <div class="min-w-0">
-                  <div class="text-base font-bold truncate" style="color:var(--text)">${tickerLink(t.ticker, `trigger:${t.id}`)}</div>
+                  <div class="text-base font-bold" style="color:var(--text)">${tickerLink(t.ticker, `trigger:${t.id}`)}</div>
                   <div class="text-[13px] ui-muted truncate">${esc(subParts.join(' · '))}${t.name ? ` · ${esc(t.name)}` : ''}</div>
                 </div>
                 <span class="ui-badge ${distCls} shrink-0">${esc(distLabel)}</span>
@@ -3177,25 +3177,32 @@ function tsLineDash(key, set) {
 // Inline Chart.js plugin: horizontal level lines with a right-edge label
 const tsLevelPlugin = {
   id: 'tsLevels',
-  beforeDatasetsDraw(chart, args, opts) { // under the price line, so trade markers stay visible
+  beforeDatasetsDraw(chart, args, opts) { // lines under the price line, so trade markers stay visible
     const lines = opts.lines || [];
     if (!lines.length) return;
     const { ctx, chartArea: a, scales: { y } } = chart;
     ctx.save();
-    ctx.font = `600 11px ${cssVar('--font-sans') || 'sans-serif'}`;
-    const labels = [];
     lines.forEach(l => {
       const py = y.getPixelForValue(l.value);
       ctx.strokeStyle = l.color;
       ctx.lineWidth = 1.5;
       ctx.setLineDash(l.dash);
       ctx.beginPath(); ctx.moveTo(a.left, py); ctx.lineTo(a.right, py); ctx.stroke();
-      labels.push({ ...l, py });
     });
-    ctx.setLineDash([]);
-    // Nudge labels apart so close levels stay readable
+    ctx.restore();
+  },
+  afterDatasetsDraw(chart, args, opts) { // labels on top, so the price line never crosses them
+    const lines = opts.lines || [];
+    if (!lines.length) return;
+    const { ctx, chartArea: a, scales: { y } } = chart;
+    ctx.save();
+    ctx.font = `600 12px ${cssVar('--font-num')}`;
+    const labels = lines.map(l => ({ ...l, py: y.getPixelForValue(l.value) }));
+    // Nudge labels apart both ways so close levels stay readable, then keep them inside the plot
     labels.sort((p, q) => p.py - q.py);
     for (let i = 1; i < labels.length; i++) labels[i].py = Math.max(labels[i].py, labels[i - 1].py + 16);
+    for (let i = labels.length - 2; i >= 0; i--) labels[i].py = Math.min(labels[i].py, labels[i + 1].py - 16);
+    labels.forEach(l => { l.py = Math.min(Math.max(l.py, a.top + 8), a.bottom - 8); });
     const bg = cssVar('--surface');
     labels.forEach(l => {
       const w = ctx.measureText(l.text).width + 10;
@@ -3245,21 +3252,23 @@ async function loadTickerSheet() {
   // Skeleton only on first load; a range switch keeps the chart so it can animate to the new data
   if (!tickerSheet.data || tickerSheet.data.ticker !== ticker) dlg.dataset.state = 'loading';
   dlg.querySelectorAll('[data-range]').forEach(b => {
-    b.disabled = true;
     b.classList.toggle('active-tab', b.dataset.range === range);
     b.setAttribute('aria-pressed', String(b.dataset.range === range));
   });
+  const box = document.getElementById('tsChartBox');
+  box.setAttribute('aria-busy', 'true');
   let data = null;
   try {
     const res = await fetch(`/api/ticker/${encodeURIComponent(ticker)}/detail?range=${encodeURIComponent(range)}`);
     if (res.ok) data = await res.json();
   } catch (e) { /* offline: error state below */ }
   if (req !== tickerSheet.req) return; // a newer range or ticker was requested
-  dlg.querySelectorAll('[data-range]').forEach(b => { b.disabled = false; });
+  box.removeAttribute('aria-busy');
   if (!data) { dlg.dataset.state = 'error'; return; }
   dlg.dataset.state = 'ready';
   const firstLoad = !tickerSheet.data || tickerSheet.data.ticker !== data.ticker;
   tickerSheet.data = data;
+  if (data.ticker) tickerSheet.ticker = data.ticker; // server may normalise it; keeps range switches off the skeleton
   if (firstLoad) tsPickDefaultSet();
   document.getElementById('tsTicker').textContent = data.ticker || ticker;
   document.getElementById('tsName').textContent = data.name || '';
@@ -3282,11 +3291,17 @@ function renderTickerSheet(animate = false) {
   const d = tickerSheet.data;
   const sets = d.level_sets || [];
   const chosen = sets.filter(s => tickerSheet.selected.includes(s.id));
-  document.getElementById('tsSets').innerHTML = sets.length
-    ? sets.map(s => `<button type="button" class="ui-chip ts-chip" data-set="${esc(s.id)}" aria-pressed="${tickerSheet.selected.includes(s.id)}">${esc(s.label)}</button>`).join('')
-    : '<p class="text-sm ui-muted">No trigger, position or advice for this ticker yet.</p>';
-  renderTickerChart(chosen, animate);
-  renderTickerLegend(chosen);
+  const setsEl = document.getElementById('tsSets');
+  const setsKey = JSON.stringify(sets.map(s => [s.id, s.label]));
+  if (setsEl.dataset.key !== setsKey) { // rebuild only when the list changes, so a pressed chip keeps focus
+    setsEl.dataset.key = setsKey;
+    setsEl.innerHTML = sets.length
+      ? sets.map(s => `<button type="button" class="ui-chip ts-chip" data-set="${esc(s.id)}" aria-pressed="${tickerSheet.selected.includes(s.id)}">${esc(s.label)}</button>`).join('')
+      : '<p class="text-sm ui-muted">No trigger, position or advice for this ticker yet.</p>';
+  } else {
+    setsEl.querySelectorAll('[data-set]').forEach(b => b.setAttribute('aria-pressed', String(tickerSheet.selected.includes(b.dataset.set))));
+  }
+  renderTickerLegend(renderTickerChart(chosen, animate));
   renderTickerInfo(sets.find(s => s.id === tickerSheet.shown));
 }
 
@@ -3300,7 +3315,7 @@ function renderTickerChart(chosen, animate) {
   note.hidden = !empty;
   note.textContent = empty ? 'No price data for this range.' : '';
   if (tickerSheet.chart && (empty || !animate)) { tickerSheet.chart.destroy(); tickerSheet.chart = null; }
-  if (empty) return;
+  if (empty) return [];
 
   const lines = [];
   chosen.forEach(s => Object.keys(TS_LEVELS).forEach(k => {
@@ -3312,13 +3327,13 @@ function renderTickerChart(chosen, animate) {
 
   const labels = hist.map(p => p[0]);
   const closes = hist.map(p => Number(p[1]));
-  const t0 = Date.parse(labels[0] + 'Z'), t1 = Date.parse(labels[labels.length - 1] + 'Z');
+  const t0 = Date.parse(labels[0] + 'Z');
   const times = labels.map(l => Date.parse(l + 'Z'));
   // shortcut: shows every trade (main and all shadows), not only the selected shadow's; match by strategy once trade.source carries the shadow set id
-  const trades = (d.trades || []).filter(t => hasNum(t.price) && Date.parse(t.at + 'Z') >= t0 && Date.parse(t.at + 'Z') <= t1).map(t => {
+  const trades = (d.trades || []).filter(t => hasNum(t.price) && Date.parse(t.at + 'Z') >= t0).map(t => {
     const at = Date.parse(t.at + 'Z');
-    let idx = times.findIndex(x => x >= at);
-    if (idx < 0) idx = times.length - 1;
+    // Bars are stamped at their start: a trade belongs to the last bar at or before it; later trades clamp to the last bar
+    const idx = Math.max(0, times.findLastIndex(x => x <= at));
     return { x: labels[idx], y: Number(t.price), sell: String(t.side).toUpperCase() === 'SELL' };
   });
 
@@ -3353,7 +3368,7 @@ function renderTickerChart(chosen, animate) {
     c.options.plugins.tsLevels.lines = lines;
     c.options.animation = anim;
     c.update();
-    return;
+    return lines;
   }
   tickerSheet.chart = new Chart(document.getElementById('tsChart'), {
     type: 'line',
@@ -3373,16 +3388,18 @@ function renderTickerChart(chosen, animate) {
       },
     },
   });
+  return lines;
 }
 
-function renderTickerLegend(chosen) {
-  const keys = Object.keys(TS_LEVELS).filter(k => chosen.some(s => s.levels && hasNum(s.levels[k])));
+function renderTickerLegend(lines) {
+  const keys = Object.keys(TS_LEVELS).filter(k => lines.some(l => l.key === k));
   const el = document.getElementById('tsLegend');
   if (!keys.length) { el.innerHTML = ''; return; }
+  const dotted = l => l.key === 'high' || l.key === 'breakeven_at';
   const swatch = (color, dash) => `<span class="ts-swatch" style="border-top: 2px ${dash} ${color}"></span>`;
   el.innerHTML = [
-    `<span>${swatch('var(--text-2)', 'solid')}Live</span>`,
-    `<span>${swatch('var(--text-2)', 'dashed')}Would be, simulated or past</span>`,
+    lines.some(l => !dotted(l) && !l.dash.length) ? `<span>${swatch('var(--text-2)', 'solid')}Live</span>` : '',
+    lines.some(l => !dotted(l) && l.dash.length) ? `<span>${swatch('var(--text-2)', 'dashed')}Would be, simulated or past</span>` : '',
     ...keys.map(k => `<span>${swatch(`var(${TS_LEVELS[k].color})`, k === 'high' || k === 'breakeven_at' ? 'dotted' : 'solid')}${esc(TS_LEVELS[k].label)}</span>`),
   ].join('');
 }
@@ -3399,7 +3416,7 @@ function renderTickerInfo(set) {
   const stateLabel = { live: 'Live', unfunded: 'Unfunded', would_be: 'Not armed', past: 'Past', simulated: 'Simulated' }[set.state] || set.state;
   const notes = [];
   if (set.state === 'unfunded') notes.push('Waiting for cash or a free slot.');
-  if (set.state === 'would_be' && set.kind === 'report') notes.push('Not armed. Lines show where the trigger would be.');
+  if (set.state === 'would_be' && set.kind === 'report') notes.push('Lines show where the trigger would be.');
   if (set.kind === 'position' && hasNum(lv.breakeven_at)) notes.push(`Stop moves to breakeven + 1% at ${num(lv.breakeven_at)} (${dist(lv.breakeven_at)}).`);
   const rows = Object.keys(TS_LEVELS).filter(k => k !== 'breakeven_at' && hasNum(lv[k]))
     .map(k => row(TS_LEVELS[k].label, `${num(lv[k])} <span class="ui-faint">${dist(lv[k])}</span>`));
@@ -3413,8 +3430,7 @@ function renderTickerInfo(set) {
   el.innerHTML = `
     <div class="flex flex-wrap items-center gap-2 mb-2">
       <h3 class="ts-info-title">${esc(set.label)}</h3>
-      <span class="ui-badge ${badgeCls}">${esc(stateLabel)}</span>
-      ${set.status && set.kind.includes('trigger') ? triggerStatusBadge(set.status) : ''}
+      ${set.status && set.kind.includes('trigger') ? triggerStatusBadge(set.status) : `<span class="ui-badge ${badgeCls}">${esc(stateLabel)}</span>`}
       ${set.trigger_type ? `<span class="text-xs ui-muted">${esc(triggerTypeLabel(set.trigger_type))}</span>` : ''}
     </div>
     ${notes.map(n => `<p class="text-sm ui-muted mb-2">${esc(n)}</p>`).join('')}
@@ -3425,6 +3441,7 @@ function renderTickerInfo(set) {
 (function initTickerSheet() {
   const dlg = document.getElementById('tickerSheet');
   if (!dlg) return;
+  if (history.state && history.state.tickerSheet) history.replaceState(null, ''); // left over from a reload with the sheet open
   dlg.addEventListener('cancel', e => { e.preventDefault(); closeTickerSheet(); }); // Escape: animate out
   dlg.addEventListener('click', e => {
     if (e.target === dlg || e.target.closest('[data-ts-close]')) return closeTickerSheet(); // backdrop or X
