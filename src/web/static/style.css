@@ -4,8 +4,9 @@
 /* prefers-color-scheme block below swaps in the dark one. No JS        */
 /* needed. Gains are green, losses are red/coral; both also carry a     */
 /* sign or arrow so colour is never the only signal. Graphite greys    */
-/* (one neutral palette) carry the interactive accent; colour is kept  */
-/* for gain, loss and warnings only.                                    */
+/* are the neutrals. One cobalt accent marks interaction (buttons,     */
+/* focus, active tab); it is not green, red or amber, so it never      */
+/* reads as gain, loss or warning.                                      */
 /* --rgb-* triplets feed the Tailwind config in index.html, so classes  */
 /* like text-slate-400 or bg-cardBg follow the theme too. In light mode */
 /* the slate scale is inverted: low numbers stay "foreground".          */
@@ -22,12 +23,12 @@
   --text: #212529;
   --text-2: #495057;
   --text-3: #686F77; /* palette #6C757D, nudged darker to reach 4.5:1 on --bg */
-  --accent: #212529;
-  --accent-strong: #212529;
-  --accent-soft: #E9ECEF;
-  --accent-pill: #DEE2E6;
-  --accent-tint: #F8F9FA;
-  --accent-line: #CED4DA;
+  --accent: #2B54D6;
+  --accent-strong: #1E3FA8;
+  --accent-soft: #E5ECFD;
+  --accent-pill: #CCD8FA;
+  --accent-tint: #F3F6FE;
+  --accent-line: #AFC2F5;
   --accent-ink: #FFFFFF;
   --gain: #0A7A47;
   --loss: #C8283F;
@@ -45,9 +46,9 @@
   --rgb-bg: 248 249 250;
   --rgb-surface: 255 255 255;
   --rgb-line: 222 226 230;
-  --rgb-accent: 33 37 41;
-  --rgb-accent-strong: 33 37 41;
-  --rgb-accent-soft: 233 236 239;
+  --rgb-accent: 43 84 214;
+  --rgb-accent-strong: 30 63 168;
+  --rgb-accent-soft: 229 236 253;
   --rgb-gain: 10 122 71;
   --rgb-loss: 200 40 63;
   --rgb-warn: 154 88 0;
@@ -114,13 +115,13 @@
     --text: #F8F9FA;
     --text-2: #CED4DA;
     --text-3: #ADB5BD;
-    --accent: #F8F9FA;
-    --accent-strong: #FFFFFF;
-    --accent-soft: #343A40;
-    --accent-pill: #495057;
-    --accent-tint: #1A1D20;
-    --accent-line: #495057;
-    --accent-ink: #212529;
+    --accent: #7C9CFF;
+    --accent-strong: #A9BEFF;
+    --accent-soft: #1B2547;
+    --accent-pill: #26346A;
+    --accent-tint: #10162B;
+    --accent-line: #34478A;
+    --accent-ink: #0B1736;
     --gain: #4ADE9B;
     --loss: #FF7A8A;
     --danger-surface: #1E1418;
@@ -137,9 +138,9 @@
     --rgb-bg: 0 0 0;
     --rgb-surface: 33 37 41;
     --rgb-line: 52 58 64;
-    --rgb-accent: 248 249 250;
-    --rgb-accent-strong: 255 255 255;
-    --rgb-accent-soft: 52 58 64;
+    --rgb-accent: 124 156 255;
+    --rgb-accent-strong: 169 190 255;
+    --rgb-accent-soft: 27 37 71;
     --rgb-gain: 74 222 155;
     --rgb-loss: 255 122 138;
     --rgb-warn: 245 180 84;
@@ -197,6 +198,8 @@ html, body { max-width: 100%; overflow-x: hidden; }
 @supports (overflow-x: clip) { html, body { overflow-x: clip; } }
 img, canvas, svg { max-width: 100%; }
 pre, code { white-space: pre-wrap; overflow-wrap: anywhere; }
+h1, h2, h3, h4 { text-wrap: balance; }
+p { text-wrap: pretty; }
 
 /* Scrollbars */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -256,7 +259,7 @@ button:active { transform: scale(0.97); }
 .ui-section-title { margin: 0; font-size: 13px; font-weight: 600; color: var(--text-2); display: flex; align-items: center; gap: 8px; }
 .ui-section-title .ui-count { color: var(--text-3); font-weight: 500; }
 .ui-label { font-size: 12px; font-weight: 500; color: var(--text-2); }
-.ui-eyebrow { font-size: 12px; font-weight: 600; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.06em; }
+.ui-eyebrow { font-size: 13px; font-weight: 600; color: var(--text-3); }
 
 /* Buttons. Each button rule also names `button.x` so it outranks Tailwind's
    preflight reset ([type='button'] { background-color: transparent }), which
@@ -296,7 +299,7 @@ button.ui-chip { cursor: pointer; }
 .ui-badge {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 3px 8px; border-radius: 8px;
-  font: 600 12px/1.2 var(--font-mono);
+  font: 600 12px/1.2 var(--font-sans);
   background: var(--surface-2); color: var(--text-2);
 }
 .ui-badge-accent { background: var(--accent-soft); color: var(--accent-strong); }
@@ -352,10 +355,10 @@ button.ui-chip { cursor: pointer; }
   background: transparent; border: 0; color: var(--text-2); cursor: pointer;
 }
 .status-pill-btn:hover { color: var(--text); }
-.mode-tag { font: 600 11px/1 var(--font-mono); letter-spacing: .06em; color: var(--gain); }
+.mode-tag { font: 700 11px/1 var(--font-sans); letter-spacing: .04em; color: var(--gain); }
 .mode-tag.is-live { color: var(--loss); }
 /* Kill switch engaged: visible on every tab, tap goes to the Home control */
-.halted-chip { display: inline-flex; align-items: center; gap: 4px; min-height: 24px; padding: 0 8px; border: 0; border-radius: 999px; background: var(--danger-surface); color: var(--danger-text); font: 600 11px/1 var(--font-mono); letter-spacing: .04em; cursor: pointer; }
+.halted-chip { display: inline-flex; align-items: center; gap: 4px; min-height: 24px; padding: 0 8px; border: 0; border-radius: 999px; background: var(--danger-surface); color: var(--danger-text); font: 700 11px/1 var(--font-sans); letter-spacing: .04em; cursor: pointer; }
 .halted-chip.hidden { display: none; }
 
 /* Desktop nav: centered segmented control. `display` stays on the plain
@@ -606,8 +609,7 @@ button.ui-chip { cursor: pointer; }
   }
   .responsive-table td::before {
     content: attr(data-label); flex: 0 0 auto;
-    color: var(--text-3); font-size: 0.75rem; font-weight: 600;
-    text-transform: uppercase; letter-spacing: 0.04em; text-align: left;
+    color: var(--text-3); font-size: 0.8125rem; font-weight: 600; text-align: left;
   }
   .responsive-table td[colspan] { display: block; text-align: center; }
   .responsive-table td[colspan]::before { content: none; }

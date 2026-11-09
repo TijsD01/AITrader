@@ -24,12 +24,6 @@
             mono: ['"IBM Plex Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace']
           },
           colors: {
-            brand: {
-              50: '#ecfdf5',
-              500: '#10b981',
-              600: '#059669',
-              700: '#047857'
-            },
             // Design tokens (see style.css :root). Every colour reads a CSS variable,
             // so existing class names follow the light/dark theme.
             accent: { DEFAULT: 'rgb(var(--rgb-accent) / <alpha-value>)', strong: 'rgb(var(--rgb-accent-strong) / <alpha-value>)', soft: 'rgb(var(--rgb-accent-soft) / <alpha-value>)' },
@@ -108,7 +102,7 @@
   <div id="mobileDropdownMenu" class="hidden md:hidden fixed z-[35] p-4" role="dialog" aria-label="More sections">
     <div class="flex items-center justify-between px-1 pb-3">
       <span class="text-base font-bold text-slate-50">More</span>
-      <span class="text-xs text-slate-500 font-mono">EUR &euro;</span>
+      <span class="text-xs text-slate-500">EUR &euro;</span>
     </div>
     <div class="grid grid-cols-2 gap-2.5">
       <button type="button" onclick="switchTab('screener')" class="mobile-dropdown-item more-tile" data-tab="screener" data-module="screener">
