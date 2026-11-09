@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import logging
 import time
 import uuid
@@ -102,6 +103,27 @@ async def reconnect_broker():
 @router.get("/api/portfolio")
 async def get_portfolio():
     return await active_broker.get_portfolio_summary()
+
+@router.get("/api/portfolio/history")
+async def get_portfolio_history(days: int = 30):
+    """Total value over time for the Home chart: [[iso_time, value_eur], ...], at most ~200 points.
+
+    Raw account value, so a deposit shows as a step up. The all-time return next to it excludes deposits.
+    """
+    days = max(1, min(days, 365))
+    since = datetime.datetime.utcnow() - datetime.timedelta(days=days)
+    live = get_active_broker() is live_broker
+    q = select(PortfolioSnapshot.timestamp, PortfolioSnapshot.total_value_eur).where(
+        PortfolioSnapshot.is_live == live, PortfolioSnapshot.timestamp >= since)
+    if live:  # a broker switch starts a new history
+        q = q.where(PortfolioSnapshot.broker == (settings.LIVE_BROKER or "").lower())
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(q.order_by(PortfolioSnapshot.timestamp))).all()
+    step = max(1, len(rows) // 200)
+    points = rows[::step]
+    if rows and (len(rows) - 1) % step:
+        points.append(rows[-1])  # always end on the latest value
+    return [[ts.isoformat(timespec="minutes"), round(v, 2)] for ts, v in points]
 
 @router.api_route("/api/portfolio/sync", methods=["GET", "POST"])
 async def sync_portfolio():

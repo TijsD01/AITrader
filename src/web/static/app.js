@@ -1,5 +1,6 @@
 // Global State
 let allocationChart = null;
+let valueChart = null; // Home value line (loadValueHistory)
 let currentScreenerMarket = 'ALL';
 let currentAccountCash = 10000.0;
 let killSwitchActive = false;        // last known kill-switch state
@@ -490,6 +491,7 @@ function applyTheme() {
     allocationChart.update('none');
   }
   Object.values(shadowCharts).forEach(c => { styleShadowChart(c); c.update('none'); });
+  if (valueChart) { styleValueChart(); valueChart.update('none'); }
 }
 if (window.matchMedia) {
   const themeQuery = matchMedia('(prefers-color-scheme: dark)');
@@ -649,7 +651,66 @@ async function renderHoldings(req, show) {
 }
 
 // 2. Load Portfolio & Positions
+// Home value line: 30 days of portfolio snapshots, green when the period is up, red when down
+function styleValueChart() {
+  const ds = valueChart.data.datasets[0];
+  const vals = ds.data;
+  const up = vals.length < 2 || vals[vals.length - 1] >= vals[0];
+  ds.borderColor = cssVar(up ? '--gain' : '--loss');
+  ds.backgroundColor = cssVar(up ? '--gain-soft' : '--loss-soft');
+}
+
+async function loadValueHistory() {
+  const fig = document.querySelector('.hero-chart');
+  const canvas = document.getElementById('valueChart');
+  const note = document.getElementById('valueChartNote');
+  if (!fig || !canvas || !note) return;
+  let points = [];
+  try {
+    const res = await fetch('/api/portfolio/history?days=30');
+    if (res.ok) points = await res.json();
+  } catch (e) { /* offline: show the empty note */ }
+  const empty = !Array.isArray(points) || points.length < 2 || typeof Chart === 'undefined';
+  fig.classList.toggle('is-empty', empty);
+  if (empty) {
+    note.textContent = 'The value line appears once the bot has recorded a few portfolio changes.';
+    return;
+  }
+  note.textContent = 'Last 30 days';
+  const labels = points.map(p => p[0]);
+  const data = points.map(p => p[1]);
+  if (!valueChart) {
+    valueChart = new Chart(canvas.getContext('2d'), {
+      type: 'line',
+      data: { labels, datasets: [{ data, borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, tension: 0.25, fill: 'start' }] },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            displayColors: false,
+            callbacks: {
+              title: items => new Date(items[0].label + 'Z').toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }),
+              label: c => eur(c.parsed.y)
+            }
+          }
+        },
+        scales: { x: { display: false }, y: { display: false, grace: '5%' } }
+      }
+    });
+  } else {
+    valueChart.data.labels = labels;
+    valueChart.data.datasets[0].data = data;
+  }
+  styleValueChart();
+  valueChart.update('none');
+}
+
 async function loadPortfolio() {
+  loadValueHistory();
   // Separate promise: a holdings failure must not blank the bot list
   const holdingsReq = fetch('/api/holdings').then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
   holdingsReq.catch(() => {});
@@ -791,9 +852,10 @@ async function loadPortfolio() {
     const container = document.getElementById('positionsContainer');
     if (positions.length === 0) {
       container.innerHTML = `
-        <div class="text-center px-6 py-10 text-slate-400 text-sm">
-          <i class="fa-solid fa-seedling text-xl mb-2 text-slate-500 block"></i>
-          No open positions yet. The committee opens positions during market hours or when you buy from Advice.
+        <div class="empty-state">
+          <p class="empty-title">No open positions yet</p>
+          <p class="empty-body">The bot buys during market hours when a stock scores high enough. Run a scan to find candidates now.</p>
+          <button type="button" onclick="triggerQuickScan()" class="ui-btn ui-btn-primary ui-btn-sm"><i class="fa-solid fa-satellite-dish" aria-hidden="true"></i> Run scan</button>
         </div>`;
       return;
     }

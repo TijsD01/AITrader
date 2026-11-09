@@ -24,12 +24,6 @@
             mono: ['"IBM Plex Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace']
           },
           colors: {
-            brand: {
-              50: '#ecfdf5',
-              500: '#10b981',
-              600: '#059669',
-              700: '#047857'
-            },
             // Design tokens (see style.css :root). Every colour reads a CSS variable,
             // so existing class names follow the light/dark theme.
             accent: { DEFAULT: 'rgb(var(--rgb-accent) / <alpha-value>)', strong: 'rgb(var(--rgb-accent-strong) / <alpha-value>)', soft: 'rgb(var(--rgb-accent-soft) / <alpha-value>)' },
@@ -52,7 +46,7 @@
   </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@100..125,400..700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js" integrity="sha384-dug+JxfBvklEQdJ4AYuBBAIScUz0bVN73xpy273gcAwHjb3qI0fXmuYNaNfdyYJG" crossorigin="anonymous"></script>
   <link rel="stylesheet" href="/static/style.css">
@@ -108,7 +102,7 @@
   <div id="mobileDropdownMenu" class="hidden md:hidden fixed z-[35] p-4" role="dialog" aria-label="More sections">
     <div class="flex items-center justify-between px-1 pb-3">
       <span class="text-base font-bold text-slate-50">More</span>
-      <span class="text-xs text-slate-500 font-mono">EUR &euro;</span>
+      <span class="text-xs text-slate-500">EUR &euro;</span>
     </div>
     <div class="grid grid-cols-2 gap-2.5">
       <button type="button" onclick="switchTab('screener')" class="mobile-dropdown-item more-tile" data-tab="screener" data-module="screener">
@@ -193,13 +187,17 @@
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 md:gap-8">
         <div class="lg:col-span-2 space-y-6 md:space-y-8 min-w-0">
 
-          <!-- Hero: total value, return, allocation bar -->
-          <section class="ui-card hero-card space-y-4" aria-label="Portfolio value">
-            <div class="space-y-1">
+          <!-- Hero: total value, return, 30-day value line, allocation bar. No card: it is the page's main figure. -->
+          <section class="hero space-y-5" aria-label="Portfolio value">
+            <div class="space-y-1.5">
               <div class="hero-label">Portfolio value</div>
               <div id="metricTotalVal" class="hero-value truncate">&euro;0.00</div>
-              <div id="metricReturnBadge" class="flex items-center gap-2 text-sm font-semibold text-slate-400">--</div>
+              <div id="metricReturnBadge" class="flex items-center gap-2 text-sm font-semibold text-slate-400">Loading return...</div>
             </div>
+            <figure class="hero-chart" aria-label="Portfolio value, last 30 days">
+              <div class="hero-chart-plot"><canvas id="valueChart"></canvas></div>
+              <figcaption id="valueChartNote" class="hero-chart-note">Last 30 days</figcaption>
+            </figure>
             <div class="space-y-2">
               <div id="allocationBar" class="alloc-bar" role="img" aria-label="Capital allocation"><span style="flex:1;background:var(--line-strong)"></span></div>
               <div class="flex justify-between gap-3 text-[13px] text-slate-400">

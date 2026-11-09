@@ -4,8 +4,9 @@
 /* prefers-color-scheme block below swaps in the dark one. No JS        */
 /* needed. Gains are green, losses are red/coral; both also carry a     */
 /* sign or arrow so colour is never the only signal. Graphite greys    */
-/* (one neutral palette) carry the interactive accent; colour is kept  */
-/* for gain, loss and warnings only.                                    */
+/* are the neutrals. One cobalt accent marks interaction (buttons,     */
+/* focus, active tab); it is not green, red or amber, so it never      */
+/* reads as gain, loss or warning.                                      */
 /* --rgb-* triplets feed the Tailwind config in index.html, so classes  */
 /* like text-slate-400 or bg-cardBg follow the theme too. In light mode */
 /* the slate scale is inverted: low numbers stay "foreground".          */
@@ -22,12 +23,12 @@
   --text: #212529;
   --text-2: #495057;
   --text-3: #686F77; /* palette #6C757D, nudged darker to reach 4.5:1 on --bg */
-  --accent: #212529;
-  --accent-strong: #212529;
-  --accent-soft: #E9ECEF;
-  --accent-pill: #DEE2E6;
-  --accent-tint: #F8F9FA;
-  --accent-line: #CED4DA;
+  --accent: #2B54D6;
+  --accent-strong: #1E3FA8;
+  --accent-soft: #E5ECFD;
+  --accent-pill: #CCD8FA;
+  --accent-tint: #F3F6FE;
+  --accent-line: #AFC2F5;
   --accent-ink: #FFFFFF;
   --gain: #0A7A47;
   --loss: #C8283F;
@@ -45,9 +46,9 @@
   --rgb-bg: 248 249 250;
   --rgb-surface: 255 255 255;
   --rgb-line: 222 226 230;
-  --rgb-accent: 33 37 41;
-  --rgb-accent-strong: 33 37 41;
-  --rgb-accent-soft: 233 236 239;
+  --rgb-accent: 43 84 214;
+  --rgb-accent-strong: 30 63 168;
+  --rgb-accent-soft: 229 236 253;
   --rgb-gain: 10 122 71;
   --rgb-loss: 200 40 63;
   --rgb-warn: 154 88 0;
@@ -87,6 +88,8 @@
   --radius-xl: 20px;
   --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, "Segoe UI", sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* Numbers: Archivo has tabular figures and a width axis; the hero runs it wide */
+  --font-num: 'Archivo', var(--font-sans);
   --nav-h: 68px;
   --nav-gap: 12px;
   /* Layout: translucent bars and card frame (light: borderless cards, dark: hairline) */
@@ -114,13 +117,13 @@
     --text: #F8F9FA;
     --text-2: #CED4DA;
     --text-3: #ADB5BD;
-    --accent: #F8F9FA;
-    --accent-strong: #FFFFFF;
-    --accent-soft: #343A40;
-    --accent-pill: #495057;
-    --accent-tint: #1A1D20;
-    --accent-line: #495057;
-    --accent-ink: #212529;
+    --accent: #7C9CFF;
+    --accent-strong: #A9BEFF;
+    --accent-soft: #1B2547;
+    --accent-pill: #26346A;
+    --accent-tint: #10162B;
+    --accent-line: #34478A;
+    --accent-ink: #0B1736;
     --gain: #4ADE9B;
     --loss: #FF7A8A;
     --danger-surface: #1E1418;
@@ -137,9 +140,9 @@
     --rgb-bg: 0 0 0;
     --rgb-surface: 33 37 41;
     --rgb-line: 52 58 64;
-    --rgb-accent: 248 249 250;
-    --rgb-accent-strong: 255 255 255;
-    --rgb-accent-soft: 52 58 64;
+    --rgb-accent: 124 156 255;
+    --rgb-accent-strong: 169 190 255;
+    --rgb-accent-soft: 27 37 71;
     --rgb-gain: 74 222 155;
     --rgb-loss: 255 122 138;
     --rgb-warn: 245 180 84;
@@ -197,6 +200,8 @@ html, body { max-width: 100%; overflow-x: hidden; }
 @supports (overflow-x: clip) { html, body { overflow-x: clip; } }
 img, canvas, svg { max-width: 100%; }
 pre, code { white-space: pre-wrap; overflow-wrap: anywhere; }
+h1, h2, h3, h4 { text-wrap: balance; }
+p { text-wrap: pretty; }
 
 /* Scrollbars */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -220,7 +225,7 @@ button:active { transform: scale(0.97); }
 /* ------------------------------------------------------------------ */
 /* Building blocks (ui-*)                                              */
 /* ------------------------------------------------------------------ */
-.ui-num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+.ui-num { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
 .ui-gain { color: var(--gain) !important; }
 .ui-loss { color: var(--loss) !important; }
 .ui-muted { color: var(--text-2); }
@@ -256,7 +261,7 @@ button:active { transform: scale(0.97); }
 .ui-section-title { margin: 0; font-size: 13px; font-weight: 600; color: var(--text-2); display: flex; align-items: center; gap: 8px; }
 .ui-section-title .ui-count { color: var(--text-3); font-weight: 500; }
 .ui-label { font-size: 12px; font-weight: 500; color: var(--text-2); }
-.ui-eyebrow { font-size: 12px; font-weight: 600; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.06em; }
+.ui-eyebrow { font-size: 13px; font-weight: 600; color: var(--text-3); }
 
 /* Buttons. Each button rule also names `button.x` so it outranks Tailwind's
    preflight reset ([type='button'] { background-color: transparent }), which
@@ -296,7 +301,7 @@ button.ui-chip { cursor: pointer; }
 .ui-badge {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 3px 8px; border-radius: 8px;
-  font: 600 12px/1.2 var(--font-mono);
+  font: 600 12px/1.2 var(--font-sans);
   background: var(--surface-2); color: var(--text-2);
 }
 .ui-badge-accent { background: var(--accent-soft); color: var(--accent-strong); }
@@ -352,10 +357,10 @@ button.ui-chip { cursor: pointer; }
   background: transparent; border: 0; color: var(--text-2); cursor: pointer;
 }
 .status-pill-btn:hover { color: var(--text); }
-.mode-tag { font: 600 11px/1 var(--font-mono); letter-spacing: .06em; color: var(--gain); }
+.mode-tag { font: 700 11px/1 var(--font-sans); letter-spacing: .04em; color: var(--gain); }
 .mode-tag.is-live { color: var(--loss); }
 /* Kill switch engaged: visible on every tab, tap goes to the Home control */
-.halted-chip { display: inline-flex; align-items: center; gap: 4px; min-height: 24px; padding: 0 8px; border: 0; border-radius: 999px; background: var(--danger-surface); color: var(--danger-text); font: 600 11px/1 var(--font-mono); letter-spacing: .04em; cursor: pointer; }
+.halted-chip { display: inline-flex; align-items: center; gap: 4px; min-height: 24px; padding: 0 8px; border: 0; border-radius: 999px; background: var(--danger-surface); color: var(--danger-text); font: 700 11px/1 var(--font-sans); letter-spacing: .04em; cursor: pointer; }
 .halted-chip.hidden { display: none; }
 
 /* Desktop nav: centered segmented control. `display` stays on the plain
@@ -469,11 +474,22 @@ button.ui-chip { cursor: pointer; }
 /* ------------------------------------------------------------------ */
 /* Home (Portfolio)                                                    */
 /* ------------------------------------------------------------------ */
-.hero-card { padding: 20px; }
-@media (min-width: 640px) { .hero-card { padding: 28px; } }
-.hero-label { font-size: 13px; font-weight: 500; color: var(--text-2); }
-.hero-value { font: 600 36px/1.1 var(--font-mono); font-variant-numeric: tabular-nums; letter-spacing: -0.04em; color: var(--text); }
-@media (min-width: 768px) { .hero-value { font-size: 44px; } }
+.hero { padding: 4px 4px 0; }
+.hero-label { font-size: 14px; font-weight: 500; color: var(--text-2); }
+.hero-value {
+  font: 600 52px/1 var(--font-num); font-stretch: 115%; font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em; color: var(--text);
+}
+@media (min-width: 768px) { .hero-value { font-size: 72px; } }
+.hero-chart { margin: 0; }
+.hero-chart-plot { position: relative; height: 120px; }
+@media (min-width: 768px) { .hero-chart-plot { height: 160px; } }
+.hero-chart-note { margin-top: 6px; font-size: 12px; color: var(--text-3); }
+.hero-chart.is-empty .hero-chart-plot { display: none; }
+.hero-chart.is-empty .hero-chart-note { font-size: 13px; color: var(--text-2); }
+.empty-state { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 32px 24px; text-align: center; }
+.empty-title { font-size: 15px; font-weight: 600; color: var(--text); }
+.empty-body { max-width: 34ch; font-size: 13px; line-height: 1.5; color: var(--text-2); margin-bottom: 4px; }
 .alloc-bar { display: flex; height: 10px; border-radius: 6px; overflow: hidden; gap: 2px; background: var(--surface-2); }
 .alloc-bar > span { display: block; min-width: 3px; }
 .alloc-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--text-2); }
@@ -518,7 +534,7 @@ button.ui-chip { cursor: pointer; }
 .home-kpis > * + * { border-left: 1px solid var(--line); }
 .kpi { padding: 2px 16px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .home-kpis > :first-child { padding-left: 4px; }
-.kpi .kpi-value { font: 600 20px/1.2 var(--font-mono); letter-spacing: -0.02em; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kpi .kpi-value { font: 600 20px/1.2 var(--font-num); font-variant-numeric: tabular-nums; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #learningRiskParams { white-space: normal; overflow: visible; }
 .kpi .kpi-sub, .trigger-link .kpi-sub { font-size: 12px; color: var(--text-3); line-height: 1.35; }
 
@@ -544,7 +560,7 @@ button.ui-chip { cursor: pointer; }
   width: 40px; height: 40px; border-radius: 12px; flex-shrink: 0;
   background: var(--surface-2);
   display: flex; align-items: center; justify-content: center;
-  font: 600 11px/1 var(--font-mono); letter-spacing: -0.02em; overflow: hidden;
+  font: 600 11px/1 var(--font-num); overflow: hidden;
 }
 .pos-detail { padding: 4px 14px 14px; background: var(--surface-inset); display: none; }
 .pos-row.open .pos-detail { display: block; }
@@ -556,7 +572,7 @@ button.ui-chip { cursor: pointer; }
 .pos-row.open .pos-chevron { transform: rotate(180deg); }
 .kv { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; }
 .kv > span:first-child { color: var(--text-3); }
-.kv > span:last-child { font-family: var(--font-mono); color: var(--text); }
+.kv > span:last-child { font-family: var(--font-num); font-variant-numeric: tabular-nums; color: var(--text); }
 
 /* Generic card hover (screener / advice cards) */
 .stock-card { transition: border-color .2s ease, box-shadow .2s ease; }
@@ -606,8 +622,7 @@ button.ui-chip { cursor: pointer; }
   }
   .responsive-table td::before {
     content: attr(data-label); flex: 0 0 auto;
-    color: var(--text-3); font-size: 0.75rem; font-weight: 600;
-    text-transform: uppercase; letter-spacing: 0.04em; text-align: left;
+    color: var(--text-3); font-size: 0.8125rem; font-weight: 600; text-align: left;
   }
   .responsive-table td[colspan] { display: block; text-align: center; }
   .responsive-table td[colspan]::before { content: none; }
@@ -638,7 +653,7 @@ button.ui-chip { cursor: pointer; }
 .set-help { display: block; margin-top: 2px; font-size: 13px; line-height: 1.4; color: var(--text-2); }
 .set-value { font-size: 15px; font-weight: 600; color: var(--accent-strong); white-space: nowrap; }
 .set-range { display: block; width: 100%; margin-top: 8px; accent-color: var(--accent); cursor: pointer; }
-.set-ticks { display: flex; justify-content: space-between; font: 12px var(--font-mono); color: var(--text-3); }
+.set-ticks { display: flex; justify-content: space-between; font: 12px var(--font-num); color: var(--text-3); }
 .set-select {
   width: auto; min-width: 136px; padding-right: 38px; cursor: pointer;
   -webkit-appearance: none; appearance: none;
