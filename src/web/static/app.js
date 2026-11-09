@@ -2524,6 +2524,7 @@ function reviewPickStatusNl(p, minScore) {
         : '🎯 Koopopdracht klaar: koopt zodra de instapkoers geraakt wordt';
     case 'ALREADY_HELD': return '💼 Zit al in de portefeuille, niet bijgekocht';
     case 'TRIGGER_PENDING': return '⏳ Er stond al een koopopdracht klaar, die wacht nog';
+    case 'TRIGGER_CANCELLED': return '🛑 Koopopdracht geannuleerd: nieuwe beoordeling steunt de aankoop niet meer';
     case 'INSUFFICIENT_CASH': return '⏸️ Goed genoeg, maar geen vrij geld of vrije plek';
     case 'SHARE_TOO_EXPENSIVE': return '💶 Goed genoeg, maar 1 aandeel kost meer dan het budget per positie';
     case 'REGIME_FILTER': return '🌧️ Goed genoeg, maar de hele markt daalt (index onder 200-daags gemiddelde)';

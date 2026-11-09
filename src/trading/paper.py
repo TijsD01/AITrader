@@ -770,7 +770,7 @@ class PaperBroker(BaseBroker):
             "risk_capped": plan["risk_capped"],
         }
 
-    async def cancel_price_trigger(self, trigger_id: int) -> Dict[str, Any]:
+    async def cancel_price_trigger(self, trigger_id: int, reason: str = "Cancelled by user") -> Dict[str, Any]:
         """Cancels a pending order trigger."""
         async with AsyncSessionLocal() as session:
             res = await session.execute(select(OrderTrigger).where(OrderTrigger.id == trigger_id))
@@ -781,9 +781,9 @@ class PaperBroker(BaseBroker):
                 return {"success": False, "message": f"Trigger #{trigger_id} is already {trigger.status}."}
             
             trigger.status = "CANCELLED"
-            trigger.cancel_reason = "Cancelled by user"
+            trigger.cancel_reason = reason[:255]
             await session.commit()
-            logger.info(f"Cancelled trigger #{trigger_id} for {trigger.ticker}")
+            logger.info(f"Cancelled trigger #{trigger_id} for {trigger.ticker}: {reason}")
             return {"success": True, "message": f"Trigger #{trigger_id} for {trigger.ticker} cancelled."}
 
     async def adjust_triggers_dynamically(self) -> List[Dict[str, Any]]:

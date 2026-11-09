@@ -665,3 +665,59 @@ async def test_paper_manual_cancel_records_reason():
     row = await _trigger_row(trigger_id)
     assert row.status == "CANCELLED"
     assert row.cancel_reason == "Cancelled by user"
+
+
+@pytest.mark.asyncio
+async def test_re_debate_cancels_pending_trigger_that_no_longer_qualifies():
+    """A pending trigger is cancelled when a new debate scores it below the trigger threshold; a still-strong one stays."""
+    from src.scheduler.jobs import trading_scheduler
+    from src.db.models import OrderTrigger
+    from sqlalchemy import select, delete
+    await init_db()
+
+    tickers = ["DROPX", "KEEPX"]
+    async with AsyncSessionLocal() as session:
+        for tk in tickers:
+            session.add(OrderTrigger(ticker=tk, name=tk, currency="EUR", trigger_type="LIMIT_PULLBACK",
+                                     target_price=98.0, current_price_at_creation=100.0, stop_loss=95.0,
+                                     take_profit=110.0, allocation_eur=500.0, consensus_score=86,
+                                     status="PENDING", is_live=False))
+        await session.commit()
+
+    def mock_stock(ticker):
+        return {"ticker": ticker, "name": ticker, "price": 100.0, "currency": "EUR",
+                "technicals": {"rsi14": 55, "volume_surge_ratio": 1.5, "atr14": 2.0}, "fundamentals": {}}
+
+    async def mock_eval(data, total_val):
+        score = 70 if data["ticker"] == "DROPX" else 88
+        return {
+            "ticker": data["ticker"], "name": data["name"], "price": data["price"], "currency": data["currency"],
+            "action": "BUY" if score < 80 else "STRONG_BUY", "consensus_score": score,
+            "entry_trigger_price": 98.0, "trigger_type": "LIMIT_PULLBACK", "trigger_rationale": "r",
+            "risk": {"approved": True, "take_profit_price": 110.0, "stop_loss_price": 95.0,
+                     "recommended_size_pct": 0.05, "risk_summary": "ok"},
+            "technical": {"analysis_summary": "t"}, "fundamental": {"analysis_summary": "f"},
+            "sentiment": {"sentiment_summary": "s"}, "summary": "s", "debate_transcript": "d",
+        }
+
+    try:
+        with patch("src.screener.scanner.market_scanner.scan_universe",
+                   return_value=[{"ticker": tk, "name": tk, "pre_score": 80} for tk in tickers]), \
+             patch("src.data.market.market_data_provider.get_stock_data", side_effect=mock_stock), \
+             patch("src.agents.committee.investment_committee.evaluate_ticker", side_effect=mock_eval), \
+             patch("src.scheduler.jobs.settings.TRIGGER_MIN_SCORE", 80), \
+             patch("src.telegram.bot.telegram_bot.send_message"), \
+             patch("src.telegram.bot.telegram_bot.notify_trigger_armed"):
+            await trading_scheduler.run_market_session(market="EU", session="OPEN")
+
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(select(OrderTrigger).where(OrderTrigger.ticker.in_(tickers)))).scalars().all()
+        by_ticker = {t.ticker: t for t in rows}
+        assert len(rows) == 2  # no re-arm of DROPX
+        assert by_ticker["DROPX"].status == "CANCELLED"
+        assert "New debate no longer supports this buy" in by_ticker["DROPX"].cancel_reason
+        assert by_ticker["KEEPX"].status == "PENDING"
+    finally:
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(OrderTrigger).where(OrderTrigger.ticker.in_(tickers)))
+            await session.commit()

@@ -64,7 +64,7 @@ class BaseBroker(ABC):
         pass
 
     @abstractmethod
-    async def cancel_price_trigger(self, trigger_id: int) -> Dict[str, Any]:
+    async def cancel_price_trigger(self, trigger_id: int, reason: str = "Cancelled by user") -> Dict[str, Any]:
         """Cancels an armed price trigger."""
         pass
 

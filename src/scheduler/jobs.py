@@ -50,6 +50,34 @@ class TradingScheduler:
         """
         return evaluate_trigger_verdict(report, trigger_min_score).allowed
 
+    async def _cancel_downgraded_triggers(self, ticker: str, report: Dict[str, Any], trigger_min_score: int) -> bool:
+        """
+        Cancels the pending trigger(s) of the active mode for `ticker` when a fresh debate would no longer arm one
+        (lower score, non-buy verdict or risk veto). An old high score must not buy on a stale verdict.
+        Returns True when at least one trigger was cancelled.
+        """
+        verdict = evaluate_trigger_verdict(report, trigger_min_score)
+        if verdict.allowed:
+            return False
+        live = get_active_broker() is live_broker
+        async with AsyncSessionLocal() as db_session:
+            res = await db_session.execute(
+                select(OrderTrigger.id).where(
+                    OrderTrigger.ticker == ticker, OrderTrigger.status == "PENDING", OrderTrigger.is_live == live
+                )
+            )
+            trigger_ids = list(res.scalars().all())
+        reason = f"New debate no longer supports this buy: {verdict.message}"
+        cancelled = False
+        for trigger_id in trigger_ids:
+            res = await active_broker.cancel_price_trigger(trigger_id, reason=reason)
+            if res.get("success"):
+                cancelled = True
+                logger.info(f"Cancelled trigger #{trigger_id} for {ticker} after re-debate ({verdict.code}, score {verdict.consensus_score}).")
+            else:
+                logger.warning(f"Could not cancel trigger #{trigger_id} for {ticker} after re-debate: {res.get('message')}")
+        return cancelled
+
     @staticmethod
     def _fits_whole_share(
         allocation_eur: float, price_native: float, currency: str,
@@ -321,8 +349,12 @@ class TradingScheduler:
                         logger.info(f"Skipping trigger for {ticker}: position already open (anti-overlap).")
                         report["status_type"] = "ALREADY_HELD"
                     elif ticker in pending_tickers:
-                        logger.info(f"Skipping trigger for {ticker}: pending trigger already active (anti-overlap).")
-                        report["status_type"] = "TRIGGER_PENDING"
+                        if await self._cancel_downgraded_triggers(ticker, report, trigger_min_score):
+                            pending_tickers.discard(ticker)
+                            report["status_type"] = "TRIGGER_CANCELLED"
+                        else:
+                            logger.info(f"Skipping trigger for {ticker}: pending trigger already active (anti-overlap).")
+                            report["status_type"] = "TRIGGER_PENDING"
                     elif self._should_arm_trigger(report, trigger_min_score):
                         # Automatically arm trigger for approved buy setups scoring >= 80
                         curr_summary = await paper_broker.get_portfolio_summary()

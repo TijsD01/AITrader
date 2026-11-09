@@ -258,6 +258,7 @@ class TelegramAssistant:
         return {
             "ALREADY_HELD": "💼 Zit al in de portefeuille, niet bijgekocht",
             "TRIGGER_PENDING": "⏳ Er stond al een koopopdracht klaar, die wacht nog",
+            "TRIGGER_CANCELLED": "🛑 Koopopdracht geannuleerd: nieuwe beoordeling steunt de aankoop niet meer",
             "INSUFFICIENT_CASH": "⏸️ Goed genoeg, maar geen vrij geld of vrije plek",
             "SHARE_TOO_EXPENSIVE": "💶 Goed genoeg, maar 1 aandeel kost meer dan het budget per positie",
             "REGIME_FILTER": "🌧️ Goed genoeg, maar de hele markt daalt (index onder 200-daags gemiddelde)",
