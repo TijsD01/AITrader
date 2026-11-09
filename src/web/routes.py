@@ -11,8 +11,9 @@ from sqlalchemy import select, desc, func
 
 from config.settings import settings, update_env_file
 from src.db.session import AsyncSessionLocal, set_kill_switch
-from src.db.models import Position, Trade, PortfolioSnapshot, AnalysisReport, WatchlistItem, SystemConfig, MarketDigest, TradeLesson
+from src.db.models import UserHolding, Position, Trade, PortfolioSnapshot, AnalysisReport, WatchlistItem, SystemConfig, MarketDigest, TradeLesson
 from src.trading.broker import active_broker as paper_broker, get_active_broker, active_broker, live_broker, check_broker_status
+from src.trading import trading212
 from src.trading.holdings import holdings_enabled, list_holdings
 from src.trading.risk import derive_trigger_levels, entry_allocation_from_summary
 from src.trading.trigger_gate import (
@@ -1065,12 +1066,34 @@ async def get_ticker_detail(ticker: str, range: str = "3M"):
                   for t in main_trades)
     trades.sort(key=lambda t: t["at"] or "")
 
+    currency = stock.get("currency") or fallback_currency
     current_price = stock.get("price") or (history[-1][1] if history else None)
+    price_source = "yahoo"
+    # Trading 212 holds the shares, so its own price is the most accurate; Yahoo stays the fallback
+    client = trading212.get_client() if settings.LIVE_BROKER.lower() == "trading212" else None
+    if client:
+        try:
+            # shortcut: one positions call per sheet load, cache if T212 starts returning 429
+            held = {bp["instrument"]["ticker"]: bp.get("currentPrice") for bp in await client.positions()}
+            if held:
+                async with AsyncSessionLocal() as session:
+                    t212_ticker = (await session.execute(
+                        select(UserHolding.t212_ticker).where(UserHolding.ticker == sym))).scalars().first()
+                t212_ticker = t212_ticker or await client.resolve_ticker(sym, currency)
+                t212_price = float(held.get(t212_ticker) or 0)
+                if t212_price > 0:
+                    current_price, price_source = t212_price, "trading212"
+                    now = datetime.datetime.utcnow().isoformat(timespec="minutes")
+                    if history and history[-1][0] < now:
+                        history = list(history) + [[now, t212_price]]  # copy: the provider returns its cached list
+        except Exception as e:
+            logger.warning(f"Trading 212 price for {sym} failed, using Yahoo: {e}")
     return {
         "ticker": sym,
         "name": stock.get("name") or fallback_name or sym,
-        "currency": stock.get("currency") or fallback_currency,
+        "currency": currency,
         "current_price": _r2(current_price),
+        "price_source": price_source,
         "range": range_key,
         "history": history,
         "level_sets": level_sets,

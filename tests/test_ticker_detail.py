@@ -9,6 +9,7 @@ from src.data import market as market_module
 from src.data.market import market_data_provider
 from src.db import session as db_session
 from src.db.models import AnalysisReport, Position, ShadowPosition, ShadowTrigger, Trade
+from src.trading import trading212
 from src.trading.broker import get_active_broker
 
 T = "ZZTD"
@@ -163,3 +164,64 @@ def test_price_history_range_mapping(monkeypatch):
     market_data_provider.get_price_history("ZZTD", "1Y")  # served from cache
     assert len(calls) == n
     market_module._history_cache.clear()
+
+
+class _FakeT212:
+    def __init__(self, positions=None, boom=False):
+        self._positions, self.boom, self.calls = positions or [], boom, 0
+
+    async def positions(self):
+        self.calls += 1
+        if self.boom:
+            raise RuntimeError("T212 down")
+        return self._positions
+
+    async def resolve_ticker(self, sym, currency):
+        return "ZZTD_US_EQ" if sym == T else None
+
+
+def _t212(monkeypatch, client, broker="trading212"):
+    from config.settings import settings
+    monkeypatch.setattr(settings, "LIVE_BROKER", broker)
+    monkeypatch.setattr(trading212, "get_client", lambda: client)
+
+
+def _held(price):
+    return [{"instrument": {"ticker": "ZZTD_US_EQ"}, "currentPrice": price}]
+
+
+async def test_t212_price_preferred_and_history_extended(seeded, monkeypatch):
+    _t212(monkeypatch, _FakeT212(_held(105.5)))
+    data = (await _get(f"/api/ticker/{T}/detail")).json()
+    assert data["current_price"] == 105.5 and data["price_source"] == "trading212"
+    assert len(data["history"]) == 3 and data["history"][-1][1] == 105.5
+
+
+async def test_no_t212_client_falls_back_to_yahoo(seeded, monkeypatch):
+    _t212(monkeypatch, None)
+    data = (await _get(f"/api/ticker/{T}/detail")).json()
+    assert data["current_price"] == 104.2 and data["price_source"] == "yahoo" and len(data["history"]) == 2
+
+
+async def test_t212_failure_falls_back_to_yahoo(seeded, monkeypatch):
+    _t212(monkeypatch, _FakeT212(boom=True))
+    r = await _get(f"/api/ticker/{T}/detail")
+    assert r.status_code == 200
+    assert r.json()["current_price"] == 104.2 and r.json()["price_source"] == "yahoo"
+
+
+async def test_cached_history_not_mutated(seeded, monkeypatch):
+    cached = [["2026-11-01T00:00", 101.0], ["2026-11-02T00:00", 104.0]]
+    monkeypatch.setattr(market_data_provider, "get_price_history", lambda sym, rk: cached)
+    _t212(monkeypatch, _FakeT212(_held(105.5)))
+    for _ in range(2):
+        data = (await _get(f"/api/ticker/{T}/detail")).json()
+        assert len(data["history"]) == 3
+    assert len(cached) == 2
+
+
+async def test_other_broker_never_calls_t212(seeded, monkeypatch):
+    client = _FakeT212(_held(105.5))
+    _t212(monkeypatch, client, broker="alpaca")
+    data = (await _get(f"/api/ticker/{T}/detail")).json()
+    assert client.calls == 0 and data["price_source"] == "yahoo"

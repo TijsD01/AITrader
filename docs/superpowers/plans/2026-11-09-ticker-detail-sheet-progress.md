@@ -11,8 +11,8 @@ Baseline before work: `python -m pytest tests/ -q` → 693 passed, 1 failed (`te
 |---|---|---|---|---|
 | 1 | Backend: `get_price_history` + `/api/ticker/{ticker}/detail` + tests | opus, medium | `src/data/market.py`, `src/web/routes.py`, `tests/test_ticker_detail.py` | done, reviewed, committed |
 | 2 | Frontend sheet: dialog, chart + level plugin, info panel, motion, `tickerLink` + `open-ticker` handler | opus, medium | `src/web/static/index.html`, `src/web/static/app.js` (new code only), `src/web/static/style.css`, `tests/test_web_modules_contract.py` | done, reviewed, committed |
-| 3 | Wire `tickerLink` into the lists + shadow row ids | sonnet | `src/web/static/app.js` (list renderers only), `src/trading/shadow.py`, `tests/test_shadow.py` | dispatched |
-| 4 | Trading 212 price for held live tickers in the detail endpoint | sonnet | `src/web/routes.py`, `tests/test_ticker_detail.py` | dispatched |
+| 3 | Wire `tickerLink` into the lists + shadow row ids | sonnet | `src/web/static/app.js` (list renderers only), `src/trading/shadow.py`, `tests/test_shadow.py` | done, reviewed, committed |
+| 4 | Trading 212 price for held live tickers in the detail endpoint | sonnet | `src/web/routes.py`, `tests/test_ticker_detail.py` | done, reviewed, committed |
 
 ## Decisions made during implementation
 
@@ -47,3 +47,9 @@ After units 3 and 4 land, before calling the feature done:
 1. Fresh-context worker: ponytail review (`.claude/skills/ponytail-review/SKILL.md`) of the full branch diff vs main.
 2. Fresh-context worker: design review of the sheet and ticker taps against `.claude/skills/unslop-ui-design/SKILL.md` and the ui-animation-guidelines rules.
 Fix findings, re-verify, then final commit.
+
+## Units 3 and 4 review (ponytail)
+
+- Unit 3: 13 tickerLink sites + Chart buttons in holdings/positions. Fixed: Chart buttons got `aria-label="Chart for <TICKER>"`.
+- Unit 4: T212 price gated on LIVE_BROKER=trading212 + client; any failure falls back to Yahoo; cached history copied before appending. Response adds `price_source`. Accepted: one T212 positions call per sheet load (shortcut comment).
+- Full suite after units 3+4: 704 passed, 1 failed (pre-existing antigravity test).
