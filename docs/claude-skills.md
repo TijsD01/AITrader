@@ -20,6 +20,7 @@ This repo ships a shared Claude Code setup in `.claude/`. When you open the repo
 |---|---|
 | `live-money-safety` | Before any change to the real-money path: `live.py`, `broker.py`, `risk.py`, `fees.py`, sizing, kill switch, `TRADING_MODE`. Lists the interlocks to keep and the tests to run. |
 | `backtest-discipline` | When building or judging a backtest or shadow experiment: no look-ahead, real fees from `fees.py`, whole shares, survivorship bias, hold-out period, benchmark. |
+| `unslop-ui-design` | When designing, building or reviewing UI (`src/web/static/`, Tailwind/CSS): 20 anti-slop rules for type, spacing, colour, radius, icons, CTA, loading states. |
 
 There was no maintained public backtesting skill worth adding, so these two are written for this codebase.
 
