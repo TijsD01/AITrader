@@ -84,7 +84,7 @@ class Settings(BaseSettings):
     TRIGGER_EXPIRY_DAYS: int = 7            # Pending price triggers older than this are marked EXPIRED
     TRIGGER_REDEBATE_HOUR: int = 8          # Daily re-debate of pending triggers (TIMEZONE, Mon-Fri), before EU open
     TRIGGER_REDEBATE_MINUTE: int = 30
-    TRIGGER_REDEBATE_SKIP_HOURS: int = 12   # Skip tickers the committee already debated within this many hours
+    TRIGGER_REDEBATE_SKIP_HOURS: int = 12   # Reuse a committee report younger than this instead of a new debate
     ENFORCE_MARKET_HOURS: bool = True       # When true, trades are strictly blocked when markets are closed
 
     # Shadow paper portfolios: simulated variants that follow the main bot's committee verdicts

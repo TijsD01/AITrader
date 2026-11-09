@@ -243,24 +243,7 @@ async def _analyze(req: AnalyzeRequest, job: Dict[str, Any]):
     report = await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
     job["report"] = report  # lets "Arm trigger" on the debate card skip a second committee run
 
-    # Persist report
-    async with AsyncSessionLocal() as session:
-        entry = AnalysisReport(
-            ticker=ticker,
-            action=report["action"],
-            consensus_score=report["consensus_score"],
-            target_price=report["risk"]["take_profit_price"],
-            stop_loss=report["risk"]["stop_loss_price"],
-            summary=report["summary"],
-            technical_summary=report["technical"]["analysis_summary"],
-            fundamental_summary=report["fundamental"]["analysis_summary"],
-            sentiment_summary=report["sentiment"]["sentiment_summary"],
-            risk_summary=report["risk"]["risk_summary"],
-            debate_transcript=report["debate_transcript"],
-            raw_signals=report
-        )
-        session.add(entry)
-        await session.commit()
+    await trading_scheduler._save_report(ticker, report)
 
     from src.trading.shadow import shadow_portfolios
     await shadow_portfolios.follow_report(report, data, followed_main=False)

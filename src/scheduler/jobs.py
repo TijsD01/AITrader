@@ -76,6 +76,8 @@ class TradingScheduler:
         """
         Cancels the pending trigger(s) of the active mode for `ticker` when a fresh debate would no longer arm one
         (lower score, non-buy verdict or risk veto). An old high score must not buy on a stale verdict.
+        A soft block (HOLD, low score) only cancels when the score fell below the trigger's own score, so a
+        trigger the user forced against the same verdict stays. Hard blocks (veto, SELL, below minimum) always cancel.
         Returns True when at least one trigger was cancelled.
         """
         verdict = evaluate_trigger_verdict(report, trigger_min_score)
@@ -84,11 +86,14 @@ class TradingScheduler:
         live = get_active_broker() is live_broker
         async with AsyncSessionLocal() as db_session:
             res = await db_session.execute(
-                select(OrderTrigger.id).where(
+                select(OrderTrigger.id, OrderTrigger.consensus_score).where(
                     OrderTrigger.ticker == ticker, OrderTrigger.status == "PENDING", OrderTrigger.is_live == live
                 )
             )
-            trigger_ids = list(res.scalars().all())
+            trigger_ids = [
+                trigger_id for trigger_id, armed_score in res.all()
+                if not verdict.overridable or armed_score is None or verdict.consensus_score < armed_score
+            ]
         reason = f"New debate no longer supports this buy: {verdict.message}"
         cancelled = False
         # Same lock as the trigger monitor, so a fill check cannot run mid-cancel
@@ -106,9 +111,10 @@ class TradingScheduler:
         """
         Daily job: re-debates every pending trigger of the active mode, so none buys on a stale verdict.
         A trigger that no longer passes the arming gate is cancelled; one that still passes gets its new score
-        (funding priority). Tickers debated in the last TRIGGER_REDEBATE_SKIP_HOURS are skipped to save LLM calls.
+        (funding priority). A ticker debated in the last TRIGGER_REDEBATE_SKIP_HOURS reuses that report instead of
+        a new LLM call, so a recent manual analysis still counts.
         """
-        result: Dict[str, List[str]] = {"kept": [], "cancelled": [], "skipped": [], "failed": []}
+        result: Dict[str, List[str]] = {"kept": [], "cancelled": [], "failed": []}
         trigger_min_score = await get_trigger_min_score()
         live = get_active_broker() is live_broker
         since = datetime.datetime.utcnow() - datetime.timedelta(hours=settings.TRIGGER_REDEBATE_SKIP_HOURS)
@@ -118,24 +124,27 @@ class TradingScheduler:
             )
             tickers = sorted({t.upper() for t in res.scalars().all()})
             recent = await db_session.execute(
-                select(AnalysisReport.ticker).where(AnalysisReport.created_at >= since)
+                select(AnalysisReport).where(AnalysisReport.created_at >= since).order_by(desc(AnalysisReport.created_at))
             )
-            recent_tickers = {t.upper() for t in recent.scalars().all()}
+            recent_reports: Dict[str, Dict[str, Any]] = {}
+            for row in recent.scalars().all():
+                recent_reports.setdefault(row.ticker.upper(), {
+                    **(row.raw_signals or {}), "action": row.action, "consensus_score": row.consensus_score
+                })
 
         for ticker in tickers:
-            if ticker in recent_tickers:
-                result["skipped"].append(ticker)
-                continue
             try:
-                data = await asyncio.to_thread(market_data_provider.get_stock_data, ticker)
-                if not data:
-                    result["failed"].append(ticker)
-                    continue
-                summary = await paper_broker.get_portfolio_summary()
-                report = await asyncio.wait_for(
-                    investment_committee.evaluate_ticker(data, summary["total_value_eur"]), timeout=300.0
-                )
-                await self._save_report(ticker, report)
+                report = recent_reports.get(ticker)
+                if report is None:
+                    data = await asyncio.to_thread(market_data_provider.get_stock_data, ticker)
+                    if not data:
+                        result["failed"].append(ticker)
+                        continue
+                    summary = await paper_broker.get_portfolio_summary()
+                    report = await asyncio.wait_for(
+                        investment_committee.evaluate_ticker(data, summary["total_value_eur"]), timeout=300.0
+                    )
+                    await self._save_report(ticker, report)
                 if await self._cancel_downgraded_triggers(ticker, report, trigger_min_score):
                     result["cancelled"].append(f"{ticker} ({report['consensus_score']}/100)")
                     continue
@@ -161,12 +170,6 @@ class TradingScheduler:
                 + "\n".join(f"• {t}" for t in result["cancelled"])
             )
         return result
-
-    async def _scheduled_trigger_refresh(self):
-        """Weekday guard for the daily trigger re-debate."""
-        if datetime.datetime.now(ZoneInfo(settings.TIMEZONE)).weekday() > 4:
-            return
-        await self.refresh_pending_triggers()
 
     @staticmethod
     def _fits_whole_share(
@@ -275,7 +278,7 @@ class TradingScheduler:
 
         # 10. Daily trigger re-debate (before EU open, Mon-Fri): cancels pending triggers the committee no longer backs
         self.scheduler.add_job(
-            self._scheduled_trigger_refresh,
+            self.refresh_pending_triggers,
             CronTrigger(day_of_week="mon-fri", hour=settings.TRIGGER_REDEBATE_HOUR,
                         minute=settings.TRIGGER_REDEBATE_MINUTE, timezone=settings.TIMEZONE),
             id="trigger_redebate",

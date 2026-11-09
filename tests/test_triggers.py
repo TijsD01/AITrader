@@ -724,21 +724,23 @@ async def test_re_debate_cancels_pending_trigger_that_no_longer_qualifies():
 
 
 @pytest.mark.asyncio
-async def test_daily_redebate_cancels_downgraded_keeps_strong_skips_recent_and_failed():
-    """Daily job: cancel a downgrade, refresh the score of a still-strong trigger, skip a fresh debate, never cancel on error."""
+async def test_daily_redebate_cancels_downgraded_keeps_strong_forced_and_failed():
+    """Daily job: cancel a downgrade, refresh a still-strong score, reuse a fresh report, keep a forced trigger, never cancel on error."""
     from unittest.mock import AsyncMock
     from src.scheduler.jobs import trading_scheduler
     from src.db.models import OrderTrigger, AnalysisReport
     from sqlalchemy import select, delete
     await init_db()
 
-    tickers = ["RDDROP", "RDKEEP", "RDFRESH", "RDFAIL"]
+    armed = {"RDDROP": 86, "RDKEEP": 86, "RDFRESH": 86, "RDFAIL": 86, "RDFORCED": 65}
+    tickers = list(armed)
     async with AsyncSessionLocal() as session:
-        for tk in tickers:
+        for tk, score in armed.items():
             session.add(OrderTrigger(ticker=tk, name=tk, currency="EUR", trigger_type="LIMIT_PULLBACK",
                                      target_price=98.0, current_price_at_creation=100.0, stop_loss=95.0,
-                                     take_profit=110.0, allocation_eur=500.0, consensus_score=86,
+                                     take_profit=110.0, allocation_eur=500.0, consensus_score=score,
                                      status="PENDING", is_live=False))
+        # A manual analysis from last night: reused, no new debate, and its low score cancels the trigger
         session.add(AnalysisReport(ticker="RDFRESH", action="BUY", consensus_score=60))
         await session.commit()
 
@@ -748,9 +750,9 @@ async def test_daily_redebate_cancels_downgraded_keeps_strong_skips_recent_and_f
     async def mock_eval(data, total_val):
         if data["ticker"] == "RDFAIL":
             raise RuntimeError("LLM down")
-        score = 65 if data["ticker"] == "RDDROP" else 91
+        action, score = {"RDDROP": ("BUY", 75), "RDFORCED": ("HOLD", 65)}.get(data["ticker"], ("STRONG_BUY", 91))
         return {
-            "ticker": data["ticker"], "action": "BUY" if score < 80 else "STRONG_BUY", "consensus_score": score,
+            "ticker": data["ticker"], "action": action, "consensus_score": score,
             "risk": {"approved": True, "take_profit_price": 110.0, "stop_loss_price": 95.0, "risk_summary": "ok"},
             "technical": {"analysis_summary": "t"}, "fundamental": {"analysis_summary": "f"},
             "sentiment": {"sentiment_summary": "s"}, "summary": "s", "debate_transcript": "d",
@@ -762,20 +764,22 @@ async def test_daily_redebate_cancels_downgraded_keeps_strong_skips_recent_and_f
         with patch("src.scheduler.jobs.market_data_provider.get_stock_data", side_effect=mock_stock), \
              patch("src.scheduler.jobs.investment_committee.evaluate_ticker", evaluate), \
              patch("src.scheduler.jobs.get_trigger_min_score", AsyncMock(return_value=80)), \
+             patch("src.scheduler.jobs.settings.MIN_CONSENSUS_SCORE", 60), \
              patch("src.scheduler.jobs.telegram_bot.send_message", send):
             result = await trading_scheduler.refresh_pending_triggers()
 
         async with AsyncSessionLocal() as session:
             rows = (await session.execute(select(OrderTrigger).where(OrderTrigger.ticker.in_(tickers)))).scalars().all()
         by = {t.ticker: t for t in rows}
-        assert by["RDDROP"].status == "CANCELLED"
+        assert by["RDDROP"].status == "CANCELLED"          # BUY 75 < threshold 80 and below its armed 86
+        assert by["RDFRESH"].status == "CANCELLED"         # reused report: 60 < armed 86
         assert by["RDKEEP"].status == "PENDING" and by["RDKEEP"].consensus_score == 91
-        assert by["RDFRESH"].status == "PENDING" and by["RDFRESH"].consensus_score == 86
+        assert by["RDFORCED"].status == "PENDING"          # forced at HOLD 65, still HOLD 65: user override stays
         assert by["RDFAIL"].status == "PENDING"
-        assert "RDFRESH" in result["skipped"] and "RDFAIL" in result["failed"]
-        assert {c.args[0]["ticker"] for c in evaluate.await_args_list} == {"RDDROP", "RDKEEP", "RDFAIL"}
+        assert "RDFAIL" in result["failed"]
+        assert {c.args[0]["ticker"] for c in evaluate.await_args_list} == {"RDDROP", "RDKEEP", "RDFAIL", "RDFORCED"}
         send.assert_awaited_once()
-        assert "RDDROP" in send.await_args.args[0]
+        assert "RDDROP" in send.await_args.args[0] and "RDFRESH" in send.await_args.args[0]
     finally:
         async with AsyncSessionLocal() as session:
             await session.execute(delete(OrderTrigger).where(OrderTrigger.ticker.in_(tickers)))
