@@ -190,3 +190,47 @@ async def test_tickers_in_use_only_counts_the_active_mode():
             await session.execute(delete(Position).where(Position.ticker.in_(["MODEP", "MODEL"])))
             await session.execute(delete(OrderTrigger).where(OrderTrigger.ticker.in_(["MODEP", "MODEL"])))
             await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_committee_remembers_its_last_report_per_ticker():
+    """A finished debate is readable from memory without an LLM or DB call; an expired or absent one is None."""
+    from src.agents import committee as cm
+    stock = {**STOCK, "ticker": "MEMO", "technicals": {**STOCK["technicals"], "support_20d": 95.0, "resistance_20d": 105.0}}
+    cm._report_cache.pop("MEMO", None)
+    assert cm.investment_committee.cached_report("MEMO", 3600) is None
+    with patch.object(cm.llm_client, "has_active_key", return_value=False):
+        report = await cm.investment_committee.evaluate_ticker(stock, 10000.0)
+    assert cm.investment_committee.cached_report("memo", 3600) is report
+    assert cm.investment_committee.cached_report("MEMO", 0) is None  # 0 switches reuse off
+    cm._report_cache["MEMO"] = (cm._report_cache["MEMO"][0] - 7200, report)
+    assert cm.investment_committee.cached_report("MEMO", 3600) is None
+    cm._report_cache.pop("MEMO", None)
+
+
+@pytest.mark.asyncio
+async def test_opportunity_scan_reuses_a_recent_debate():
+    """The scan runs every 30 minutes and used to debate the same unarmed ticker every time."""
+    import time
+    from src.agents import committee as cm
+    from src.scheduler.jobs import trading_scheduler
+    await init_db()
+    cands = [{"ticker": t, "price": 20.0, "currency": "EUR"} for t in ("REUSE1", "REUSE2")]
+    portfolio = {"available_cash_eur": 400.0, "total_value_eur": 500.0, "open_positions_count": 0}
+    committee = AsyncMock(return_value=_report(action="HOLD", score=50))
+    follow = AsyncMock()
+    status = {"eu_market": {"is_open": True}, "us_market": {"is_open": False}}
+    cm._report_cache["REUSE1"] = (time.monotonic(), _report(action="HOLD", score=51))
+    try:
+        with patch("src.data.market_hours.get_market_statuses", return_value=status), \
+             patch("src.scheduler.jobs.market_scanner.load_watchlist_tickers", AsyncMock(return_value=[])), \
+             patch("src.scheduler.jobs.market_scanner.scan_universe", MagicMock(return_value=cands)), \
+             patch("src.scheduler.jobs.market_data_provider.get_stock_data", MagicMock(return_value=STOCK)), \
+             patch("src.scheduler.jobs.investment_committee.evaluate_ticker", committee), \
+             patch("src.scheduler.jobs.shadow_portfolios.follow_report", follow), \
+             patch.object(paper_broker, "get_portfolio_summary", AsyncMock(return_value=portfolio)):
+            await trading_scheduler.scan_market_opportunities()
+    finally:
+        cm._report_cache.pop("REUSE1", None)
+    assert committee.await_count == 1, "only REUSE2 needs a debate"
+    assert follow.await_count == 1, "shadows already followed the reused report when it was new"

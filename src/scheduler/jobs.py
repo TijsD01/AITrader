@@ -37,7 +37,10 @@ async def _tickers_in_use(db_session) -> tuple:
 
 class TradingScheduler:
     def __init__(self):
-        self.scheduler = AsyncIOScheduler(timezone=settings.TIMEZONE)
+        # APScheduler's default grace is 1 s: a short event-loop stall would silently skip a stop or trigger check
+        self.scheduler = AsyncIOScheduler(
+            timezone=settings.TIMEZONE, job_defaults={"misfire_grace_time": 60, "coalesce": True}
+        )
         # Serializes trigger/stop checks so a manual refresh cannot overlap a scheduled run
         self._monitor_lock = asyncio.Lock()
 
@@ -737,7 +740,9 @@ class TradingScheduler:
                     if avail < 20.0:
                         break
 
-                    report = await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
+                    # This scan runs every 30 minutes: a ticker debated a moment ago keeps its verdict, without a new LLM call
+                    reused = investment_committee.cached_report(tk, settings.SCAN_REPORT_REUSE_MINUTES * 60)
+                    report = reused or await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
                     armed = False
                     if self._should_arm_trigger(report, trigger_min_score):
                         regime_ok, regime_msg = await asyncio.to_thread(check_market_regime, tk, data.get("currency"))
@@ -771,7 +776,8 @@ class TradingScheduler:
                                 logger.info(f"Opportunity Scanner auto-armed trigger #{trig_res['trigger_id']} for {tk} (Score {report['consensus_score']}/100 >= {trigger_min_score})")
                                 await telegram_bot.notify_trigger_armed(trig_res)
                                 armed = True
-                    await shadow_portfolios.follow_report(report, data, followed_main=armed)
+                    if not reused:  # the shadows followed this report when it was new
+                        await shadow_portfolios.follow_report(report, data, followed_main=armed)
         except Exception as e:
             logger.error(f"Error in scan_market_opportunities: {e}")
 

@@ -85,6 +85,7 @@ class Settings(BaseSettings):
     TRIGGER_REDEBATE_HOUR: int = 8          # Daily re-debate of pending triggers (TIMEZONE, Mon-Fri), before EU open
     TRIGGER_REDEBATE_MINUTE: int = 30
     TRIGGER_REDEBATE_SKIP_HOURS: int = 12   # Reuse a committee report younger than this instead of a new debate
+    SCAN_REPORT_REUSE_MINUTES: int = 120    # The 30-minute opportunity scan reuses a committee report younger than this (0 = always debate)
     ENFORCE_MARKET_HOURS: bool = True       # When true, trades are strictly blocked when markets are closed
 
     # Shadow paper portfolios: simulated variants that follow the main bot's committee verdicts
@@ -116,6 +117,10 @@ class Settings(BaseSettings):
     REGIME_SMA_DAYS: int = 200              # Moving-average length for the regime filter
     REGIME_INDEX_EU: str = "^STOXX50E"      # Index that sets the regime for European tickers
     REGIME_INDEX_US: str = "^GSPC"          # Index that sets the regime for US tickers
+    # Per-ticker chop filter: the scanner drops a ticker before any LLM debate when it has no trend or barely moves
+    CHOP_FILTER_ENABLED: bool = True
+    CHOP_ADX_MIN: float = 20.0              # ADX(14) below this = ranging, no trend to trade (Wilder's usual threshold)
+    CHOP_MIN_ATR_PCT: float = 0.8           # Daily ATR below this % of price = too quiet for the target to clear fees
     RISK_PER_TRADE_PCT: float = 0.5         # "portfolio" mode: automated buys lose at most this % of portfolio value at the stop (0 = cap off in every mode)
     # What the risk cap measures against: "slot" = a trade with the default stop (DEFAULT_STOP_LOSS_PCT) keeps its full
     # slot and a wider stop gets proportionally less, so the loss at the stop is slot x DEFAULT_STOP_LOSS_PCT

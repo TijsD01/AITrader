@@ -13,8 +13,20 @@ from src.agents.risk_manager import RiskManagerAgent
 
 logger = logging.getLogger(__name__)
 
+# Last finished report per ticker, so a caller can reuse a recent verdict without a new LLM debate.
+# shortcut: in-process and lost on restart; one entry per ticker ever debated. Move to the DB if several workers run.
+_report_cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
+
 class InvestmentCommittee:
     name: str = "Hedge Fund Investment Committee"
+
+    @staticmethod
+    def cached_report(ticker: str, max_age_s: float) -> Optional[Dict[str, Any]]:
+        """The last report for this ticker when it is younger than max_age_s seconds, else None. No I/O."""
+        hit = _report_cache.get(ticker.upper())
+        if hit and max_age_s > 0 and (time.monotonic() - hit[0]) < max_age_s:
+            return hit[1]
+        return None
 
     @staticmethod
     def _parse_llm_verdict(res: Any) -> Optional[tuple]:
@@ -241,7 +253,7 @@ Synthesize the debate and return JSON with:
         except Exception:
             pass
 
-        return {
+        report = {
             "ticker": ticker,
             "name": stock_data.get("name"),
             "currency": curr,
@@ -259,5 +271,7 @@ Synthesize the debate and return JSON with:
             "sentiment": sent_rep,
             "risk": risk_rep,
         }
+        _report_cache[ticker.upper()] = (time.monotonic(), report)
+        return report
 
 investment_committee = InvestmentCommittee()
