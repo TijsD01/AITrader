@@ -721,3 +721,63 @@ async def test_re_debate_cancels_pending_trigger_that_no_longer_qualifies():
         async with AsyncSessionLocal() as session:
             await session.execute(delete(OrderTrigger).where(OrderTrigger.ticker.in_(tickers)))
             await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_daily_redebate_cancels_downgraded_keeps_strong_skips_recent_and_failed():
+    """Daily job: cancel a downgrade, refresh the score of a still-strong trigger, skip a fresh debate, never cancel on error."""
+    from unittest.mock import AsyncMock
+    from src.scheduler.jobs import trading_scheduler
+    from src.db.models import OrderTrigger, AnalysisReport
+    from sqlalchemy import select, delete
+    await init_db()
+
+    tickers = ["RDDROP", "RDKEEP", "RDFRESH", "RDFAIL"]
+    async with AsyncSessionLocal() as session:
+        for tk in tickers:
+            session.add(OrderTrigger(ticker=tk, name=tk, currency="EUR", trigger_type="LIMIT_PULLBACK",
+                                     target_price=98.0, current_price_at_creation=100.0, stop_loss=95.0,
+                                     take_profit=110.0, allocation_eur=500.0, consensus_score=86,
+                                     status="PENDING", is_live=False))
+        session.add(AnalysisReport(ticker="RDFRESH", action="BUY", consensus_score=60))
+        await session.commit()
+
+    def mock_stock(ticker):
+        return {"ticker": ticker, "name": ticker, "price": 100.0, "currency": "EUR"}
+
+    async def mock_eval(data, total_val):
+        if data["ticker"] == "RDFAIL":
+            raise RuntimeError("LLM down")
+        score = 65 if data["ticker"] == "RDDROP" else 91
+        return {
+            "ticker": data["ticker"], "action": "BUY" if score < 80 else "STRONG_BUY", "consensus_score": score,
+            "risk": {"approved": True, "take_profit_price": 110.0, "stop_loss_price": 95.0, "risk_summary": "ok"},
+            "technical": {"analysis_summary": "t"}, "fundamental": {"analysis_summary": "f"},
+            "sentiment": {"sentiment_summary": "s"}, "summary": "s", "debate_transcript": "d",
+        }
+
+    evaluate = AsyncMock(side_effect=mock_eval)
+    send = AsyncMock()
+    try:
+        with patch("src.scheduler.jobs.market_data_provider.get_stock_data", side_effect=mock_stock), \
+             patch("src.scheduler.jobs.investment_committee.evaluate_ticker", evaluate), \
+             patch("src.scheduler.jobs.get_trigger_min_score", AsyncMock(return_value=80)), \
+             patch("src.scheduler.jobs.telegram_bot.send_message", send):
+            result = await trading_scheduler.refresh_pending_triggers()
+
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(select(OrderTrigger).where(OrderTrigger.ticker.in_(tickers)))).scalars().all()
+        by = {t.ticker: t for t in rows}
+        assert by["RDDROP"].status == "CANCELLED"
+        assert by["RDKEEP"].status == "PENDING" and by["RDKEEP"].consensus_score == 91
+        assert by["RDFRESH"].status == "PENDING" and by["RDFRESH"].consensus_score == 86
+        assert by["RDFAIL"].status == "PENDING"
+        assert "RDFRESH" in result["skipped"] and "RDFAIL" in result["failed"]
+        assert {c.args[0]["ticker"] for c in evaluate.await_args_list} == {"RDDROP", "RDKEEP", "RDFAIL"}
+        send.assert_awaited_once()
+        assert "RDDROP" in send.await_args.args[0]
+    finally:
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(OrderTrigger).where(OrderTrigger.ticker.in_(tickers)))
+            await session.execute(delete(AnalysisReport).where(AnalysisReport.ticker.in_(tickers)))
+            await session.commit()

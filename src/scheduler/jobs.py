@@ -20,7 +20,7 @@ from src.db.session import AsyncSessionLocal
 from src.db.models import AnalysisReport, MarketDigest, Position, OrderTrigger, SystemConfig
 from src.data.review_tracker import review_tracker
 from src.trading.risk import check_market_regime
-from src.trading.trigger_gate import evaluate_trigger_verdict
+from src.trading.trigger_gate import evaluate_trigger_verdict, get_trigger_min_score
 from src.trading.holdings import mine_tickers
 
 logger = logging.getLogger(__name__)
@@ -50,6 +50,28 @@ class TradingScheduler:
         """
         return evaluate_trigger_verdict(report, trigger_min_score).allowed
 
+    @staticmethod
+    async def _save_report(ticker: str, report: Dict[str, Any]) -> AnalysisReport:
+        """Persists a committee report as an AnalysisReport row."""
+        async with AsyncSessionLocal() as db_session:
+            rep_entry = AnalysisReport(
+                ticker=ticker,
+                action=report["action"],
+                consensus_score=report["consensus_score"],
+                target_price=report["risk"]["take_profit_price"],
+                stop_loss=report["risk"]["stop_loss_price"],
+                summary=report["summary"],
+                technical_summary=report["technical"]["analysis_summary"],
+                fundamental_summary=report["fundamental"]["analysis_summary"],
+                sentiment_summary=report["sentiment"]["sentiment_summary"],
+                risk_summary=report["risk"]["risk_summary"],
+                debate_transcript=report["debate_transcript"],
+                raw_signals=report
+            )
+            db_session.add(rep_entry)
+            await db_session.commit()
+            return rep_entry
+
     async def _cancel_downgraded_triggers(self, ticker: str, report: Dict[str, Any], trigger_min_score: int) -> bool:
         """
         Cancels the pending trigger(s) of the active mode for `ticker` when a fresh debate would no longer arm one
@@ -69,14 +91,82 @@ class TradingScheduler:
             trigger_ids = list(res.scalars().all())
         reason = f"New debate no longer supports this buy: {verdict.message}"
         cancelled = False
-        for trigger_id in trigger_ids:
-            res = await active_broker.cancel_price_trigger(trigger_id, reason=reason)
-            if res.get("success"):
-                cancelled = True
-                logger.info(f"Cancelled trigger #{trigger_id} for {ticker} after re-debate ({verdict.code}, score {verdict.consensus_score}).")
-            else:
-                logger.warning(f"Could not cancel trigger #{trigger_id} for {ticker} after re-debate: {res.get('message')}")
+        # Same lock as the trigger monitor, so a fill check cannot run mid-cancel
+        async with self._monitor_lock:
+            for trigger_id in trigger_ids:
+                res = await active_broker.cancel_price_trigger(trigger_id, reason=reason)
+                if res.get("success"):
+                    cancelled = True
+                    logger.info(f"Cancelled trigger #{trigger_id} for {ticker} after re-debate ({verdict.code}, score {verdict.consensus_score}).")
+                else:
+                    logger.warning(f"Could not cancel trigger #{trigger_id} for {ticker} after re-debate: {res.get('message')}")
         return cancelled
+
+    async def refresh_pending_triggers(self) -> Dict[str, List[str]]:
+        """
+        Daily job: re-debates every pending trigger of the active mode, so none buys on a stale verdict.
+        A trigger that no longer passes the arming gate is cancelled; one that still passes gets its new score
+        (funding priority). Tickers debated in the last TRIGGER_REDEBATE_SKIP_HOURS are skipped to save LLM calls.
+        """
+        result: Dict[str, List[str]] = {"kept": [], "cancelled": [], "skipped": [], "failed": []}
+        trigger_min_score = await get_trigger_min_score()
+        live = get_active_broker() is live_broker
+        since = datetime.datetime.utcnow() - datetime.timedelta(hours=settings.TRIGGER_REDEBATE_SKIP_HOURS)
+        async with AsyncSessionLocal() as db_session:
+            res = await db_session.execute(
+                select(OrderTrigger.ticker).where(OrderTrigger.status == "PENDING", OrderTrigger.is_live == live)
+            )
+            tickers = sorted({t.upper() for t in res.scalars().all()})
+            recent = await db_session.execute(
+                select(AnalysisReport.ticker).where(AnalysisReport.created_at >= since)
+            )
+            recent_tickers = {t.upper() for t in recent.scalars().all()}
+
+        for ticker in tickers:
+            if ticker in recent_tickers:
+                result["skipped"].append(ticker)
+                continue
+            try:
+                data = await asyncio.to_thread(market_data_provider.get_stock_data, ticker)
+                if not data:
+                    result["failed"].append(ticker)
+                    continue
+                summary = await paper_broker.get_portfolio_summary()
+                report = await asyncio.wait_for(
+                    investment_committee.evaluate_ticker(data, summary["total_value_eur"]), timeout=300.0
+                )
+                await self._save_report(ticker, report)
+                if await self._cancel_downgraded_triggers(ticker, report, trigger_min_score):
+                    result["cancelled"].append(f"{ticker} ({report['consensus_score']}/100)")
+                    continue
+                async with AsyncSessionLocal() as db_session:
+                    res = await db_session.execute(
+                        select(OrderTrigger).where(
+                            OrderTrigger.ticker == ticker, OrderTrigger.status == "PENDING", OrderTrigger.is_live == live
+                        )
+                    )
+                    for trig in res.scalars().all():
+                        trig.consensus_score = report["consensus_score"]
+                    await db_session.commit()
+                result["kept"].append(f"{ticker} ({report['consensus_score']}/100)")
+            except Exception as e:
+                # A failed debate (LLM timeout, data error) never cancels: the trigger keeps its last verdict
+                logger.error(f"Trigger re-debate failed for {ticker}: {e}", exc_info=True)
+                result["failed"].append(ticker)
+
+        logger.info(f"Trigger re-debate done: {result}")
+        if result["cancelled"]:
+            await telegram_bot.send_message(
+                "🛑 <b>Koopopdrachten geannuleerd na nieuwe beoordeling</b>\n"
+                + "\n".join(f"• {t}" for t in result["cancelled"])
+            )
+        return result
+
+    async def _scheduled_trigger_refresh(self):
+        """Weekday guard for the daily trigger re-debate."""
+        if datetime.datetime.now(ZoneInfo(settings.TIMEZONE)).weekday() > 4:
+            return
+        await self.refresh_pending_triggers()
 
     @staticmethod
     def _fits_whole_share(
@@ -181,6 +271,17 @@ class TradingScheduler:
             id="learner_idle_decay",
             misfire_grace_time=3600,
             coalesce=True
+        )
+
+        # 10. Daily trigger re-debate (before EU open, Mon-Fri): cancels pending triggers the committee no longer backs
+        self.scheduler.add_job(
+            self._scheduled_trigger_refresh,
+            CronTrigger(day_of_week="mon-fri", hour=settings.TRIGGER_REDEBATE_HOUR,
+                        minute=settings.TRIGGER_REDEBATE_MINUTE, timezone=settings.TIMEZONE),
+            id="trigger_redebate",
+            misfire_grace_time=3600,
+            coalesce=True,
+            max_instances=1
         )
 
         self.scheduler.start()
@@ -325,24 +426,7 @@ class TradingScheduler:
                         timeout=300.0  # 3 sequential agy LLM calls x 90s worst case
                     )
 
-                    # Persist AnalysisReport
-                    async with AsyncSessionLocal() as db_session:
-                        rep_entry = AnalysisReport(
-                            ticker=ticker,
-                            action=report["action"],
-                            consensus_score=report["consensus_score"],
-                            target_price=report["risk"]["take_profit_price"],
-                            stop_loss=report["risk"]["stop_loss_price"],
-                            summary=report["summary"],
-                            technical_summary=report["technical"]["analysis_summary"],
-                            fundamental_summary=report["fundamental"]["analysis_summary"],
-                            sentiment_summary=report["sentiment"]["sentiment_summary"],
-                            risk_summary=report["risk"]["risk_summary"],
-                            debate_transcript=report["debate_transcript"],
-                            raw_signals=report
-                        )
-                        db_session.add(rep_entry)
-                        await db_session.commit()
+                    rep_entry = await self._save_report(ticker, report)
 
                     # 3. Automatically Arm AI Triggers for Scores >= 80 with Anti-Overlap Guardrails
                     if ticker in open_tickers:
