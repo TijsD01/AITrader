@@ -24,6 +24,10 @@ Money path = `src/trading/live.py`, `paper.py`, `broker.py`, `risk.py`, `fees.py
 
 **Implementer skills.** Every implementer invokes the `ponytail` skill first (smallest change that fully solves the task). Money-path implementers also invoke `live-money-safety`. TDD: failing test first.
 
+**UI tasks (5 and 17).** The implementer also invokes `frontend-design:frontend-design`, `unslop-ui-design` and `anthropic-skills:ui-animation-guidelines` before writing UI code, and keeps the app's existing visual language (`ui-*` classes, CSS variables).
+
+**Baseline.** Before this work, `python -m pytest tests/ -q` gives 901 passed, 2 failed (`test_antigravity_agent.py::test_antigravity_llm_client`, `test_portfolio_sync.py::test_portfolio_summary_refreshes_unrealized_pnl`). "Suite passes" below means: no failures beyond these two.
+
 **Review gate.** After each task, a **fresh** subagent (no shared context with the implementer) runs `/ponytail-review` on that task's commit. Reviewer model: `opus` for money-path tasks, `sonnet` otherwise. Findings are fixed by the implementer model before the next task starts. No task is done with open findings.
 
 **Phase gate.** After the last task of a phase: `python -m pytest tests/ -q` must pass, then push. Each phase ships alone.
