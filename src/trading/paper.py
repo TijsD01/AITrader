@@ -456,6 +456,11 @@ class PaperBroker(BaseBroker):
                 adjustments = calib.get("adjustments", []) if calib else []
             except Exception as learn_err:
                 logger.error(f"Error in trade learning post-mortem/calibration for trade #{trade.id}: {learn_err}")
+            try:
+                from src.memory.outcomes import record_main_outcome
+                await record_main_outcome(pos, trade, reason)
+            except Exception as mem_err:
+                logger.warning(f"Could not record outcome for trade #{trade.id}: {mem_err}")
 
             sell_res = {
                 "success": True,

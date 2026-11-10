@@ -36,13 +36,17 @@ class ColdStartEngine:
         await memory_store.init_db()
 
         # 1. Fetch portfolio state and memory layers in parallel
-        portfolio_state, l3, scenarios, l1_atoms, skills, wiki_pages = await asyncio.gather(
+        # A single-word query is a ticker: show its main outcomes; otherwise the most recent overall
+        q_word = (query or "").strip()
+        outcome_ticker = q_word.upper() if q_word and " " not in q_word else None
+        portfolio_state, l3, scenarios, l1_atoms, skills, wiki_pages, main_outcomes = await asyncio.gather(
             ColdStartEngine._fetch_portfolio_status(),
             memory_store.get_core_profile(team_id=team_id, agent_id=agent_id),
             memory_store.list_scenarios(team_id=team_id),
-            memory_store.search_l1_atoms(query=query or None, team_id=team_id, limit=6),
+            memory_store.search_l1_atoms(query=query or None, team_id=team_id, limit=6, exclude_outcomes=True),
             memory_store.search_skills(query=query or None, team_id=team_id, top_k=3),
             memory_store.list_wiki_pages(team_id=team_id),
+            memory_store.search_outcomes(source="main", ticker=outcome_ticker, limit=5),
         )
 
         # Fall back to core skills when query is a ticker symbol that matches no skill name
@@ -144,6 +148,10 @@ class ColdStartEngine:
             sections.append("--- L1 KEY EXTRACTED ATOMS & CONSTRAINTS ---\n" + "\n".join(f"- {f}" for f in l1_key_facts))
         if active_skills:
             sections.append("--- ACTIVE SKILL PLAYBOOKS ---\n" + "\n".join(f"- {s}" for s in active_skills))
+        if main_outcomes:
+            sections.append("--- RECENT MAIN-BOT TRADE OUTCOMES ---\n" + "\n".join(
+                f"- {o.get('ticker')} ({o.get('source')}) {o.get('pnl_pct') or 0:+.2f}% in {o.get('hold_days') or 0:.1f}d: {o.get('exit_reason')}"
+                for o in main_outcomes))
         sections.append("======================================================")
         full_prompt_context = "\n\n".join(sections) + "\n"
 

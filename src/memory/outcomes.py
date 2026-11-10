@@ -32,3 +32,15 @@ async def record_outcome(*, source: str, strategy: str, ref_id: int | str, ticke
     except Exception as e:
         logger.warning("record_outcome failed for %s:%s: %s", source, ref_id, e)
         return False
+
+
+async def record_main_outcome(pos, trade, reason: str) -> bool:
+    """Outcome for a main-bot sell, from its closed Position and SELL Trade rows (already committed)."""
+    hold_days = 0.0
+    if pos.opened_at and trade.executed_at:
+        hold_days = round((trade.executed_at - pos.opened_at).total_seconds() / 86400.0, 2)
+    # r_multiple stays None: stop_loss_native is trailed after entry, so the entry stop is not on the row.
+    return await record_outcome(
+        source="main_live" if trade.is_live else "main_paper", strategy="main", ref_id=trade.id, ticker=trade.ticker,
+        pnl_pct=trade.realized_pnl_pct or 0.0, r_multiple=None, hold_days=hold_days, exit_reason=reason,
+        score=trade.consensus_score, entry_type="UNKNOWN", params={})

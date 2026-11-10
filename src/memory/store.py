@@ -1,4 +1,5 @@
 import ast
+import datetime
 import os
 import re
 import json
@@ -295,10 +296,16 @@ class AgentMemoryStore:
             return cursor.lastrowid
 
     async def search_l1_atoms(self, query: Optional[str] = None, atom_type: Optional[str] = None,
-                              team_id: str = "trading-team", limit: int = 20) -> List[Dict[str, Any]]:
+                              team_id: str = "trading-team", limit: int = 20,
+                              exclude_outcomes: bool = False) -> List[Dict[str, Any]]:
         await self.init_db()
         sql = "SELECT * FROM memory_l1_atoms WHERE team_id = ?"
         params: List[Any] = [team_id]
+        if exclude_outcomes:
+            # Raw closed-trade atoms and shadow learner bookkeeping stay out of committee prompts
+            sql += (" AND NOT (agent_id = 'outcomes' AND predicate = 'closed_trade')"
+                    " AND NOT (predicate IN ('param_change', 'outcome_summary')"
+                    " AND COALESCE(object, '') LIKE 'shadow:%')")
         if atom_type:
             sql += " AND type = ?"
             params.append(atom_type)
@@ -732,6 +739,8 @@ class AgentMemoryStore:
                 """, (max_l0_rows,))
                 stats["l0_deleted"] += cur.rowcount or 0
 
+                stats["outcomes_compacted"] = await self._compact_outcomes(db)
+
                 await db.commit()
 
             await self.refresh_codegraph()
@@ -743,6 +752,57 @@ class AgentMemoryStore:
                 async with await vdb.execute("VACUUM") as c:
                     await c.fetchall()
         return stats
+
+    @staticmethod
+    async def _compact_outcomes(db, keep: int = 500) -> int:
+        """Per outcome `object`, keeps the newest `keep` closed-trade atoms and folds older ones into one
+        outcome_summary atom per calendar month (UTC). Merges into an existing summary, so reruns are no-ops."""
+        async with await db.execute("""
+            SELECT id, team_id, object, content, created_at FROM (
+                SELECT *, ROW_NUMBER() OVER (PARTITION BY object ORDER BY created_at DESC, id DESC) AS rn
+                FROM memory_l1_atoms WHERE agent_id = 'outcomes' AND predicate = 'closed_trade'
+            ) WHERE rn > ?
+        """, (keep,)) as cur:
+            old = await cur.fetchall()
+        groups: Dict[tuple, Dict[str, Any]] = {}
+        for r in old:
+            month = datetime.datetime.fromtimestamp(r["created_at"], datetime.timezone.utc).strftime("%Y-%m")
+            g = groups.setdefault((r["team_id"], r["object"], month), {"ids": [], "rows": []})
+            g["ids"].append(r["id"])
+            try:
+                g["rows"].append(json.loads(r["content"].rsplit(" ||| ", 1)[1]))
+            except (IndexError, ValueError):
+                pass
+        now = time.time()
+        for (team_id, obj, month), g in groups.items():
+            atom_id = f"outcome_summary:{obj}:{month}"
+            agg = {"count": 0, "wins": 0, "r_sum": 0.0, "r_count": 0, "exit_reasons": {}}
+            async with await db.execute("SELECT content FROM memory_l1_atoms WHERE atom_id = ?", (atom_id,)) as cur:
+                prev = await cur.fetchone()
+            if prev:
+                try:
+                    agg = json.loads(prev["content"].rsplit(" ||| ", 1)[1])
+                except (IndexError, ValueError):
+                    pass
+            agg["count"] += len(g["ids"])
+            for o in g["rows"]:
+                agg["wins"] += 1 if (o.get("pnl_pct") or 0) > 0 else 0
+                if o.get("r_multiple") is not None:
+                    agg["r_sum"] += o["r_multiple"]
+                    agg["r_count"] += 1
+                reason = str(o.get("exit_reason") or "unknown")
+                agg["exit_reasons"][reason] = agg["exit_reasons"].get(reason, 0) + 1
+            avg_r = f"{agg['r_sum'] / agg['r_count']:+.2f}" if agg["r_count"] else "n/a"
+            text = (f"{obj} {month}: count {agg['count']}, win rate {100.0 * agg['wins'] / agg['count']:.0f}%, "
+                    f"avg R {avg_r}, exits {agg['exit_reasons']}")
+            month_start = datetime.datetime.strptime(month, "%Y-%m").replace(tzinfo=datetime.timezone.utc).timestamp()
+            await db.execute("""
+                INSERT OR REPLACE INTO memory_l1_atoms
+                (atom_id, team_id, agent_id, type, subject, predicate, object, content, confidence, source_session_id, created_at, updated_at)
+                VALUES (?, ?, 'outcomes', 'episodic', 'OUTCOMES', 'outcome_summary', ?, ?, 1.0, NULL, ?, ?)
+            """, (atom_id, team_id, obj, f"{text} ||| {json.dumps(agg)}", month_start, now))
+            await db.executemany("DELETE FROM memory_l1_atoms WHERE id = ?", [(i,) for i in g["ids"]])
+        return len(old)
 
     async def refresh_codegraph(self) -> int:
         """Re-syncs CodeGraph nodes with AST-resolved (line_start, line_end) from source files."""
