@@ -152,7 +152,12 @@ class ShadowLearner:
         if not isinstance(reply, dict) or not isinstance(reply.get("changes"), dict):
             return _result(False, False, "LLM reply missing or malformed")
 
-        kept = _guard(reply, params, strength)
+        # The call can take minutes: clamp against the params and strength as they are now, not as sent
+        strategy = next((s for s in get_strategies() if s.key == key), None)
+        strength = learning_strengths().get(key, 0)
+        if strategy is None or strength <= 0:
+            return _result(False, True, "Strategy was deleted, disabled or set to strength 0 during the LLM call")
+        kept = _guard(reply, strategy.to_params(), strength)
         reason = reply.get("reason")
         reason = reason[:500] if isinstance(reason, str) else ""
         changes = {}

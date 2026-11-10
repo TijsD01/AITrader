@@ -269,3 +269,62 @@ async def test_learn_due_runs_each_strength_and_survives_errors(_learner, monkey
     results = await shadow_learner.learn_due()
     assert sorted(seen) == sorted([KEY, other])  # baseline / aggressive have strength 0
     assert len(results) == 1 and results[0]["skipped"] is True
+
+
+async def test_user_edit_during_llm_call_is_the_base_for_clamping(_learner):
+    from src.trading.shadow import apply_param_change
+    await _add_closed(10)
+
+    async def user_edits(*_):
+        await apply_param_change(KEY, {"stop_scale": 1.8}, source="user")
+        return {"changes": {"stop_scale": 2.0}}
+
+    _learner.side_effect = user_edits
+    res = await shadow_learner.learn(KEY)
+    assert res["changes"] == {"stop_scale": {"old": 1.8, "new": 1.95}}
+    assert _params()["stop_scale"] == 1.95
+    learner_rows = [r for r in await _history() if r.source == "learner"]
+    assert [r.changes for r in learner_rows] == [{"stop_scale": {"old": 1.8, "new": 1.95}}]
+
+
+async def test_strength_zero_during_llm_call_writes_nothing(_learner):
+    await _add_closed(10)
+
+    async def user_stops(*_):
+        await update_strategy(KEY, learning_strength=0)
+        return {"changes": {"stop_scale": 2.0}}
+
+    _learner.side_effect = user_stops
+    res = await shadow_learner.learn(KEY)
+    assert res["skipped"] is True and res["success"] is False and res["changes"] == {}
+    assert [r for r in await _history() if r.source == "learner"] == []
+    assert _params()["stop_scale"] == 1.0
+    assert (await _row()).closed_at_last_learn == 0
+
+
+async def test_strategy_deleted_during_llm_call_writes_nothing(_learner, monkeypatch):
+    from src.trading.shadow import delete_strategy
+    await _add_closed(10)
+    added = AsyncMock()
+    monkeypatch.setattr(memory_store, "add_l1_atom", added)
+
+    async def user_deletes(*_):
+        await delete_strategy(KEY)
+        return {"changes": {"stop_scale": 2.0}}
+
+    _learner.side_effect = user_deletes
+    res = await shadow_learner.learn(KEY)
+    assert res["success"] is False and res["skipped"] is True and res["changes"] == {}
+    assert await _history() == [] and await _row() is None
+    added.assert_not_awaited()
+
+
+async def test_portfolio_reset_resets_learn_counter():
+    from src.db.models import ShadowAccount
+    from src.trading.shadow import shadow_portfolios
+    async with AsyncSessionLocal() as session:
+        (await session.get(ShadowStrategyRow, KEY)).closed_at_last_learn = 7
+        session.add(ShadowAccount(strategy=KEY, cash_eur=10000.0, initial_capital_eur=10000.0))
+        await session.commit()
+    assert await shadow_portfolios.reset(KEY) is True
+    assert (await _row()).closed_at_last_learn == 0

@@ -1090,6 +1090,8 @@ class ShadowPortfolios:
                 await session.execute(delete(ShadowTrigger).where(ShadowTrigger.strategy == strategy_key))
                 await session.execute(delete(ShadowSnapshot).where(ShadowSnapshot.strategy == strategy_key))
                 await session.delete(acc)
+                await session.execute(update(ShadowStrategyRow).where(ShadowStrategyRow.key == strategy_key)
+                                      .values(closed_at_last_learn=0))
                 await session.commit()
         logger.info(f"Shadow portfolio '{strategy_key}' was reset.")
         return True
