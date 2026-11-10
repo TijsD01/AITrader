@@ -45,3 +45,7 @@ def test_clamp_step_none_bool_and_int():
 def test_json_schema_shape():
     row = next(r for r in to_json_schema() if r["name"] == "stop_scale")
     assert row["min"] == 0.5 and row["max"] == 2.0 and row["step"] == 0.05
+
+def test_clamp_step_leaves_old_outside_learn_range():
+    assert clamp_step("breakeven_pct", 10.0, 0.05, 3) == 10.0
+    assert clamp_step("stop_scale", 3.0, 1.0, 3) == 3.0

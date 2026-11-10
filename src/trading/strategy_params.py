@@ -109,6 +109,8 @@ def clamp_step(name: str, old, proposed, strength: int):
         return old
     lo = spec.min if spec.learn_min is None else spec.learn_min
     hi = spec.max if spec.learn_max is None else spec.learn_max
+    if _is_num(old) and not lo <= old <= hi:
+        return old  # a human set it outside the learnable range; never move it
     cap = share * (hi - lo)
     delta = max(-cap, min(cap, proposed - old))
     new = max(lo, min(hi, old + delta))
