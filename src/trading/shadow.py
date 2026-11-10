@@ -33,6 +33,7 @@ from src.db.models import (
     ShadowTrigger, SystemConfig, Trade,
 )
 from src.db.session import AsyncSessionLocal
+from src.memory.outcomes import record_outcome
 from src.trading.cash_flows import list_cash_flow_points
 from src.trading.strategy_params import SPECS, validate as validate_params
 from src.trading.risk import (
@@ -747,13 +748,25 @@ class ShadowPortfolios:
             return []
         try:
             async with self._lock:
-                return await self._check_exits({s.key: s for s in get_strategies()})
+                closed = await self._check_exits({s.key: s for s in get_strategies()})
         except Exception as e:
             logger.error(f"Shadow exit check failed: {e}", exc_info=True)
             return []
+        # Outside the lock and after the commit, so a slow memory DB never blocks shadow monitoring
+        for c in closed:
+            try:
+                await record_outcome(
+                    source="shadow", strategy=c["strategy"], ref_id=c["position_id"], ticker=c["ticker"],
+                    pnl_pct=c["pnl_pct"], r_multiple=c["r_multiple"], hold_days=c["hold_days"],
+                    exit_reason=c["reason"], score=c["score"], entry_type=c["entry_type"], params=c["params"],
+                )
+            except Exception as e:
+                logger.warning(f"Shadow outcome not recorded for {c['ticker']}: {e}")
+        return closed
 
     async def _check_exits(self, strategies: Dict[str, ShadowStrategy]) -> List[Dict[str, Any]]:
         closed = []
+        trigger_ids: Dict[int, Optional[int]] = {}
         now = _utcnow()
         quotes: Dict[str, Optional[Dict[str, Any]]] = {}
         async with AsyncSessionLocal() as session:
@@ -798,6 +811,17 @@ class ShadowPortfolios:
                     reason = f"Time exit after {s.max_hold_days} days"
                 if reason:
                     closed.append(self._close_position(accounts[s.key], p, price, reason, now))
+                    closed[-1]["params"] = s.to_params()
+                    trigger_ids[p.id] = p.trigger_id
+            if trigger_ids:
+                wanted = {t for t in trigger_ids.values() if t is not None}
+                types = {}
+                if wanted:
+                    rows = await session.execute(
+                        select(ShadowTrigger.id, ShadowTrigger.trigger_type).where(ShadowTrigger.id.in_(wanted)))
+                    types = {i: t for i, t in rows.all()}
+                for c in closed:
+                    c["entry_type"] = types.get(trigger_ids[c["position_id"]]) or "UNKNOWN"
             await session.commit()
         return closed
 
@@ -824,7 +848,15 @@ class ShadowPortfolios:
         p.exit_reason = reason
         p.closed_at = now
         logger.info(f"Shadow '{p.strategy}' sold {p.shares} {p.ticker} @ {price}: €{pnl:+.2f} ({reason})")
-        return {"strategy": p.strategy, "ticker": p.ticker, "realized_pnl_eur": pnl, "reason": reason}
+        stop = p.initial_stop_native
+        r_multiple = round((price - p.entry_price_native) / (p.entry_price_native - stop), 2) \
+            if stop and stop < p.entry_price_native else None
+        hold_days = (now - p.opened_at).total_seconds() / 86400 if p.opened_at else 0.0
+        return {
+            "strategy": p.strategy, "ticker": p.ticker, "realized_pnl_eur": pnl, "reason": reason,
+            "position_id": p.id, "pnl_pct": p.realized_pnl_pct, "r_multiple": r_multiple, "hold_days": hold_days,
+            "score": p.consensus_score, "entry_type": "UNKNOWN", "params": {},
+        }
 
     # ------------------------------------------------------------------ reporting
 

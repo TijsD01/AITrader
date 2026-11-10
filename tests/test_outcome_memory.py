@@ -57,3 +57,43 @@ async def test_search_limit_since_ticker_and_bad_tail():
         await db.execute("UPDATE memory_l1_atoms SET content = 'no json ||| {bad' WHERE atom_id = 'outcome:shadow:100'")
         await db.commit()
     assert len(await memory_store.search_outcomes(strategy="lim")) == 2
+
+
+# ---- shadow closes write outcomes ----
+from tests.test_shadow import _data, _report, shadows  # noqa: E402,F401  (shadows is a fixture)
+from src.trading.shadow import shadow_portfolios  # noqa: E402
+
+
+async def _open_baseline_then_stop_out(prices):
+    prices["OUT.AS"] = 100.0
+    await shadow_portfolios.follow_report(_report("OUT.AS"), _data("OUT.AS"))
+    prices["OUT.AS"] = 94.0
+    assert len(await shadow_portfolios.check_triggers()) == 1
+    prices["OUT.AS"] = 89.0
+    return await shadow_portfolios.check_exits()
+
+
+async def test_shadow_stop_loss_close_records_outcome(shadows):
+    enable, reset_all = shadows
+    prices = enable(["baseline"])
+    await reset_all()
+    closed = await _open_baseline_then_stop_out(prices)
+    assert len(closed) == 1 and closed[0]["ticker"] == "OUT.AS" and closed[0]["reason"].startswith("Stop-Loss hit")
+    rows = await memory_store.search_outcomes(strategy="baseline")
+    assert len(rows) == 1
+    o = rows[0]
+    assert o["source"] == "shadow" and o["ticker"] == "OUT.AS" and o["exit_reason"].startswith("Stop-Loss hit")
+    assert o["r_multiple"] is not None and abs(o["r_multiple"] + 1.0) < 0.3 and o["pnl_pct"] < 0
+    assert o["entry_type"] == "LIMIT_PULLBACK" and o["score"] == 85 and isinstance(o["params"], dict)
+
+
+async def test_shadow_close_survives_record_failure(shadows, monkeypatch):
+    enable, reset_all = shadows
+    prices = enable(["baseline"])
+    await reset_all()
+
+    async def boom(**kw):
+        raise RuntimeError("memory down")
+    monkeypatch.setattr("src.trading.shadow.record_outcome", boom)
+    closed = await _open_baseline_then_stop_out(prices)
+    assert len(closed) == 1 and closed[0]["realized_pnl_eur"] < 0
