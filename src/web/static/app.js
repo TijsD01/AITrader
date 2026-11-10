@@ -3089,7 +3089,7 @@ function renderShadowStrategy(s, mainLabel) {
     <div class="ui-card ui-card-pad space-y-4">
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0">
-          <h3 class="ui-section-title">${esc(s.label)}${s.learning_strength > 0 ? ' <span class="ui-badge ui-badge-accent">Learning</span>' : ''}</h3>
+          <h3 class="ui-section-title">${esc(s.label)}<span class="ui-badge ui-badge-accent ${s.learning_strength > 0 ? '' : 'hidden'}" data-sh-badge>Learning</span></h3>
           <p class="text-[13px] ui-muted mt-1">${esc(s.description)}</p>
           <p class="text-xs ui-faint mt-1 ui-num">Since ${esc(s.started_at || '--')} · start ${esc(eur(s.initial_capital_eur))}</p>
           ${shadowFrozenNote(s.params || {})}
@@ -3197,6 +3197,7 @@ async function loadShadow() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || 'Request failed');
     const mainLabel = (data.main && data.main.label) || 'Main';
+    shadowData = data;
     if (!data.enabled || !(data.strategies || []).length) {
       const presets = (data.presets || []).map(p => `<li><span class="ui-num" style="color:var(--text)">${esc(p.key)}</span>: ${esc(p.description)}</li>`).join('');
       container.innerHTML = `<div class="ui-card ui-card-pad text-[13px] ui-muted space-y-2">
@@ -3205,7 +3206,6 @@ async function loadShadow() {
       </div>`;
       return;
     }
-    shadowData = data;
     const openHist = [...container.querySelectorAll('details.sh-hist[open]')].map(d => d.dataset.key);
     container.innerHTML = data.strategies.map(s => renderShadowStrategy(s, mainLabel)).join('');
     data.strategies.forEach(s => drawShadowChart(s, mainLabel));
@@ -3240,7 +3240,7 @@ async function resetShadow(key) {
 // ------------------------------------------------------------------
 let shadowData = null;      // last /api/shadow payload
 let shadowSchema = null;    // /api/shadow/schema, fetched once
-const shadowEditor = { key: null, initial: {}, values: {} };
+const shadowEditor = { key: null, initial: {}, touched: new Set(), afterClose: null };
 const SHADOW_STRENGTH = ['Off', 'Low', 'Medium', 'High'];
 
 async function shadowApi(method, url, body) {
@@ -3257,13 +3257,24 @@ async function shadowApi(method, url, body) {
 function shadowStrengthControl(s) {
   const n = s.learning_strength || 0;
   const stops = SHADOW_STRENGTH.map((l, i) => `<span style="--i:${i}" class="${i === n ? 'is-on' : ''}">${l}</span>`).join('');
-  return `<div class="sh-strength">
+  return `<div class="sh-strength" data-sh-strength="${esc(s.key)}">
     <label class="ui-label" for="shStrength-${esc(s.key)}">Learning strength</label>
     <input type="range" class="se-range" id="shStrength-${esc(s.key)}" min="0" max="3" step="1" value="${esc(n)}"
       data-action="set-shadow-strength" data-key="${esc(s.key)}" aria-valuetext="${SHADOW_STRENGTH[n]}">
     <div class="sh-stops" aria-hidden="true">${stops}</div>
-    ${n > 0 ? '<p class="se-note">Under 30 closed trades the result is noise. A learning shadow is no longer a clean comparison.</p>' : ''}
+    <p class="se-note ${n > 0 ? '' : 'hidden'}" data-sh-note>Under 30 closed trades the result is noise. A learning shadow is no longer a clean comparison.</p>
   </div>`;
+}
+
+// Stop labels, aria text, badge and note follow the slider in place, so keyboard focus stays on it
+function syncShadowStrength(el) {
+  const n = Number(el.value);
+  const box = el.closest('.sh-strength');
+  el.setAttribute('aria-valuetext', SHADOW_STRENGTH[n]);
+  box.querySelectorAll('.sh-stops span').forEach((sp, i) => sp.classList.toggle('is-on', i === n));
+  box.querySelector('[data-sh-note]').classList.toggle('hidden', n === 0);
+  const badge = el.closest('.ui-card').querySelector('[data-sh-badge]');
+  if (badge) badge.classList.toggle('hidden', n === 0);
 }
 
 async function setShadowStrength(key, value) {
@@ -3272,8 +3283,8 @@ async function setShadowStrength(key, value) {
     showToast(`Learning ${SHADOW_STRENGTH[value].toLowerCase()}.`);
   } catch (e) {
     showToast(e.message, true);
+    loadShadow(); // put the slider back to the saved value
   }
-  loadShadow();
 }
 
 async function copyShadow(key) {
@@ -3360,10 +3371,14 @@ function shadowParamField(spec, value) {
     control = `<div class="se-row"><label for="se-${n}">${esc(spec.label)}</label>
       <select id="se-${n}" class="ui-input" style="width:auto" data-se-param="${n}">
         ${(spec.choices || []).map(c => `<option value="${esc(c)}" ${c === value ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></div>`;
+  } else if ((spec.max - spec.min) / spec.step > 200) {
+    // Too many stops for a slider: type the number instead
+    control = `<div class="se-row"><label for="se-${n}">${esc(spec.label)}</label>
+        <input type="number" id="se-${n}" class="ui-input se-num ui-num" data-se-param="${n}" inputmode="decimal" min="${esc(spec.min)}" max="${esc(spec.max)}" step="${esc(spec.step)}" value="${value === null ? '' : esc(value)}" ${value === null ? 'disabled' : ''}></div>`;
   } else {
     const shown = value === null ? spec.min : value;
     control = `<div class="se-row"><label for="se-${n}">${esc(spec.label)}</label>
-        <span class="se-val ui-num" data-se-val="${n}">${value === null ? 'main bot' : esc(shown)}</span></div>
+        <span class="se-val ui-num" data-se-val="${n}">${value === null ? 'main bot' : esc(value)}</span></div>
       <input type="range" class="se-range" id="se-${n}" data-se-param="${n}" min="${esc(spec.min)}" max="${esc(spec.max)}" step="${esc(spec.step)}" value="${esc(shown)}" ${value === null ? 'disabled' : ''}>`;
   }
   return `<div class="se-param ${value === null && spec.kind !== 'bool' ? 'is-muted' : ''}" data-se-field="${n}">${control}${nullToggle}${note}</div>`;
@@ -3381,6 +3396,21 @@ function readShadowEditorValue(spec) {
   return spec.kind === 'int' ? parseInt(el.value, 10) : parseFloat(el.value);
 }
 
+// New shadow: every param as shown (the sheet is the source of truth). Edit: only what the user touched.
+function collectShadowParams(isNew) {
+  const params = {};
+  for (const sp of shadowSchema) {
+    if (!shadowEditor.touched.has(sp.name)) {
+      if (isNew) params[sp.name] = shadowEditor.initial[sp.name];
+      continue;
+    }
+    const v = readShadowEditorValue(sp);
+    if (typeof v === 'number' && Number.isNaN(v)) throw new Error(`Enter a number for ${sp.label}.`);
+    if (isNew || v !== shadowEditor.initial[sp.name]) params[sp.name] = v;
+  }
+  return params;
+}
+
 async function openShadowEditor(key) {
   const dlg = document.getElementById('shadowEditor');
   if (!dlg) return;
@@ -3393,6 +3423,8 @@ async function openShadowEditor(key) {
   const base = (src && src.params) || {};
   shadowEditor.key = key;
   shadowEditor.initial = {};
+  shadowEditor.touched = new Set();
+  shadowEditor.afterClose = null;
   shadowSchema.forEach(sp => {
     shadowEditor.initial[sp.name] = base[sp.name] === undefined ? (sp.nullable ? null : sp.min) : base[sp.name];
   });
@@ -3424,11 +3456,9 @@ async function saveShadowEditor() {
   const label = document.getElementById('seLabel').value.trim();
   const description = document.getElementById('seDesc').value.trim();
   if (!label) { err.textContent = 'Enter a name.'; err.classList.remove('hidden'); return; }
-  const params = {};
-  shadowSchema.forEach(sp => {
-    const v = readShadowEditorValue(sp);
-    if (v !== shadowEditor.initial[sp.name]) params[sp.name] = v;
-  });
+  let params;
+  try { params = collectShadowParams(!shadowEditor.key); }
+  catch (e) { err.textContent = e.message; err.classList.remove('hidden'); return; }
   const btn = document.querySelector('#shadowEditor [data-se-save]');
   btn.disabled = true;
   try {
@@ -3441,8 +3471,14 @@ async function saveShadowEditor() {
       await shadowApi('POST', '/api/shadow', { label, description, params });
       showToast('Shadow created.');
     }
+    const editKey = shadowEditor.key;
+    await loadShadow();
+    shadowEditor.afterClose = () => {
+      const target = editKey ? document.querySelector(`[data-action="edit-shadow"][data-key="${CSS.escape(editKey)}"]`)
+        : document.querySelector('[data-action="new-shadow"]');
+      if (target) target.focus();
+    };
     closeShadowEditor();
-    loadShadow();
   } catch (e) {
     err.textContent = e.message;
     err.classList.remove('hidden');
@@ -3455,29 +3491,38 @@ async function saveShadowEditor() {
   const dlg = document.getElementById('shadowEditor');
   if (!dlg) return;
   dlg.addEventListener('cancel', e => { e.preventDefault(); closeShadowEditor(); });
+  dlg.addEventListener('close', () => { const f = shadowEditor.afterClose; shadowEditor.afterClose = null; if (f) f(); });
   dlg.addEventListener('click', e => {
     if (e.target === dlg || e.target.closest('[data-se-close]')) return closeShadowEditor();
     if (e.target.closest('[data-se-save]')) saveShadowEditor();
   });
   dlg.addEventListener('input', e => {
     const el = e.target;
+    if (el.dataset.seParam) shadowEditor.touched.add(el.dataset.seParam);
     if (el.type === 'range' && el.dataset.seParam) {
       dlg.querySelector(`[data-se-val="${el.dataset.seParam}"]`).textContent = el.value;
     }
   });
   dlg.addEventListener('change', e => {
-    const name = e.target.dataset.seNull;
+    const el = e.target;
+    if (el.dataset.seParam) shadowEditor.touched.add(el.dataset.seParam); // selects and checkboxes fire change only
+    const name = el.dataset.seNull;
     if (!name) return;
+    shadowEditor.touched.add(name);
     const field = dlg.querySelector(`[data-se-field="${name}"]`);
-    const range = field.querySelector('input[type="range"]');
+    const input = field.querySelector('input[data-se-param], select[data-se-param]');
     const val = field.querySelector('[data-se-val]');
-    range.disabled = e.target.checked;
-    field.classList.toggle('is-muted', e.target.checked);
-    val.textContent = e.target.checked ? 'main bot' : range.value;
+    if (input) input.disabled = el.checked;
+    field.classList.toggle('is-muted', el.checked);
+    if (val && input) val.textContent = el.checked ? 'main bot' : input.value;
   });
 })();
 
 // Strength slider commits on release; history loads the first time its panel opens
+document.addEventListener('input', e => {
+  const el = e.target.closest('[data-action="set-shadow-strength"]');
+  if (el) syncShadowStrength(el);
+});
 document.addEventListener('change', e => {
   const el = e.target.closest('[data-action="set-shadow-strength"]');
   if (el) setShadowStrength(el.dataset.key, Number(el.value));
