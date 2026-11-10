@@ -34,7 +34,7 @@ from src.db.models import (
 )
 from src.db.session import AsyncSessionLocal
 from src.trading.cash_flows import list_cash_flow_points
-from src.trading.strategy_params import validate as validate_params
+from src.trading.strategy_params import SPECS, validate as validate_params
 from src.trading.risk import (
     apply_risk_budget,
     calculate_position_allocation,
@@ -225,7 +225,9 @@ async def load_strategies() -> None:
     """Seeds the table from the env settings when it is empty, then refreshes the cache from the enabled rows."""
     global _CACHE
     async with AsyncSessionLocal() as session:
-        if (await session.execute(select(ShadowStrategyRow.key).limit(1))).first() is None:
+        # Seed once per database: later an empty table means the user deleted everything
+        if await session.get(SystemConfig, "SHADOW_SEEDED") is None:
+            session.add(SystemConfig(key="SHADOW_SEEDED", value="true"))
             now = _utcnow()
             for i, s in enumerate(_env_strategies()):
                 session.add(ShadowStrategyRow(
@@ -295,8 +297,8 @@ async def apply_param_change(key: str, new_params: dict, source: str, reason: st
     """Saves changed params and one history row. Open positions keep their levels: nothing else is touched."""
     async with AsyncSessionLocal() as session:
         row = await _get_row(session, key)
-        old = dict(row.params)
-        merged = {**old, **validate_params({**old, **new_params})}
+        old = {k: v for k, v in row.params.items() if k in SPECS}  # drop keys no longer in the schema
+        merged = {**old, **validate_params(new_params)}
         changes = {k: {"old": old.get(k), "new": merged[k]} for k in new_params if old.get(k) != merged[k]}
         if not changes:
             return {}
@@ -331,7 +333,8 @@ async def delete_strategy(key: str) -> bool:
             await session.execute(delete(ShadowAccount).where(ShadowAccount.strategy == key))
             await session.delete(row)
             await session.commit()
-    await load_strategies()
+        # Reload before releasing the lock, so a waiting job never sees the deleted strategy
+        await load_strategies()
     return True
 
 
@@ -509,12 +512,12 @@ class ShadowPortfolios:
         followed_main: bool = False,
     ) -> List[Dict[str, Any]]:
         """Lets every shadow strategy decide on a committee verdict the main bot just received."""
-        strategies = get_strategies()
-        if not strategies:
+        if not get_strategies():
             return []
         try:
             async with self._lock:
-                armed = await self._follow_report(report, data, followed_main, strategies)
+                # Read under the lock: a strategy deleted while this job waited must not get an account back
+                armed = await self._follow_report(report, data, followed_main, get_strategies())
             if any(a["trigger_type"] == "MARKET" for a in armed):
                 await self.check_triggers()
             return armed
@@ -576,12 +579,11 @@ class ShadowPortfolios:
 
     async def check_triggers(self) -> List[Dict[str, Any]]:
         """Fills pending shadow triggers whose price level is hit while the market is open."""
-        strategies = {s.key: s for s in get_strategies()}
-        if not strategies:
+        if not get_strategies():
             return []
         try:
             async with self._lock:
-                return await self._check_triggers(strategies)
+                return await self._check_triggers({s.key: s for s in get_strategies()})
         except Exception as e:
             logger.error(f"Shadow trigger check failed: {e}", exc_info=True)
             return []
@@ -725,12 +727,11 @@ class ShadowPortfolios:
 
     async def check_exits(self) -> List[Dict[str, Any]]:
         """Updates prices, ratchets stops and closes shadow positions that hit their exit rules."""
-        strategies = {s.key: s for s in get_strategies()}
-        if not strategies:
+        if not get_strategies():
             return []
         try:
             async with self._lock:
-                return await self._check_exits(strategies)
+                return await self._check_exits({s.key: s for s in get_strategies()})
         except Exception as e:
             logger.error(f"Shadow exit check failed: {e}", exc_info=True)
             return []
@@ -813,11 +814,11 @@ class ShadowPortfolios:
 
     async def record_snapshots(self, main_summary_fn: Optional[Callable[[], Awaitable[Dict[str, Any]]]] = None) -> None:
         """Stores roughly hourly values of every shadow and of the main portfolio, for the comparison chart."""
-        strategies = get_strategies()
-        if not strategies:
+        if not get_strategies():
             return
         try:
             async with self._lock:
+                strategies = get_strategies()
                 async with AsyncSessionLocal() as session:
                     accounts = await self._ensure_accounts(session, strategies)
                     now = _utcnow()
@@ -911,6 +912,7 @@ class ShadowPortfolios:
         async with AsyncSessionLocal() as session:
             # Locked: booking a deposit into cash must not race a shadow buy on the same account
             async with self._lock:
+                strategies = get_strategies()
                 accounts = await self._ensure_accounts(session, strategies)
                 await self._mark_followed_by_main(session, main_is_live)
             current_main = await self._main_params(session)
