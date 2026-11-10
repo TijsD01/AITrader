@@ -54,3 +54,44 @@ async def test_undo_of_other_strategys_change_is_404(client):
 async def test_comparison_exposes_learning_fields(client):
     s = (await client.get("/api/shadow")).json()["strategies"][0]
     assert {"learning_strength", "copied_from", "is_preset"} <= set(s)
+
+
+async def _snapshot(client, key="baseline"):
+    s = next(x for x in (await client.get("/api/shadow")).json()["strategies"] if x["key"] == key)
+    return s["label"], s["params"]["stop_scale"], s["learning_strength"], await client.get(f"/api/shadow/{key}/history")
+
+
+@pytest.mark.parametrize("body", [
+    {"label": "New", "params": {"stop_scale": 99}},
+    {"label": "New", "learning_strength": 7},
+    {"label": "   "},
+])
+async def test_patch_is_all_or_nothing(client, body):
+    before = await _snapshot(client)
+    assert (await client.patch("/api/shadow/baseline", json=body)).status_code == 422
+    after = await _snapshot(client)
+    assert before[:3] == after[:3] and before[3].json() == after[3].json()
+
+
+async def test_patch_label_and_params_saved_with_one_history_row(client):
+    n = len((await _snapshot(client))[3].json())  # history rows persist across tests
+    r = await client.patch("/api/shadow/baseline", json={"label": "  New  ", "params": {"stop_scale": 1.3}})
+    assert r.status_code == 200
+    label, stop, _, hist = await _snapshot(client)
+    assert (label, stop) == ("New", 1.3) and len(hist.json()) == n + 1
+
+
+async def test_patch_label_truncated_to_60(client):
+    await client.patch("/api/shadow/baseline", json={"label": "x" * 100})
+    assert len((await _snapshot(client))[0]) == 60
+
+
+async def test_patch_deleted_key_is_404_and_writes_nothing(client):
+    assert (await client.delete("/api/shadow/aggressive")).status_code == 200
+    assert (await client.patch("/api/shadow/aggressive", json={"label": "Z", "params": {"stop_scale": 1.2}})).status_code == 404
+    assert (await client.get("/api/shadow/aggressive/history")).json() == []
+
+
+async def test_undo_id_out_of_range_is_not_500(client):
+    r = await client.post(f"/api/shadow/baseline/history/{10**30}/undo")
+    assert r.status_code in (404, 422)

@@ -278,7 +278,7 @@ async def create_strategy(label: str, params: dict, description: str = "", copie
         count = (await session.execute(select(func.count()).select_from(ShadowStrategyRow))).scalar_one()
         if count >= settings.SHADOW_MAX_STRATEGIES:
             raise ValueError(f"At most {settings.SHADOW_MAX_STRATEGIES} strategies are allowed")
-        session.add(ShadowStrategyRow(key=key, label=label[:60], description=description, params=full,
+        session.add(ShadowStrategyRow(key=key, label=_clean_label(label), description=description, params=full,
                                       copied_from=copied_from, learning_strength=learning_strength))
         await session.commit()
     await load_strategies()
@@ -292,34 +292,50 @@ async def copy_strategy(key: str, label: str) -> str:
     return await create_strategy(label, params, description, copied_from=key)
 
 
-async def apply_param_change(key: str, new_params: dict, source: str, reason: str = "",
-                             stats: Optional[dict] = None) -> dict:
-    """Saves changed params and one history row. Open positions keep their levels: nothing else is touched."""
-    async with AsyncSessionLocal() as session:
-        row = await _get_row(session, key)
-        old = {k: v for k, v in row.params.items() if k in SPECS}  # drop keys no longer in the schema
-        merged = {**old, **validate_params(new_params)}
-        changes = {k: {"old": old.get(k), "new": merged[k]} for k in new_params if old.get(k) != merged[k]}
-        if not changes:
-            return {}
-        row.params = merged
-        session.add(ShadowParamChange(strategy=key, source=source, changes=changes, reason=reason, stats=stats))
-        await session.commit()
-    await load_strategies()
-    return changes
+def _clean_label(label: str) -> str:
+    label = (label or "").strip()
+    if not label:
+        raise ValueError("Strategy name is empty")
+    return label[:60]
 
 
-async def update_strategy(key: str, *, label=None, description=None, learning_strength=None, enabled=None) -> None:
+async def edit_strategy(key: str, *, label=None, description=None, learning_strength=None, enabled=None,
+                        params: Optional[dict] = None, source: str = "user", reason: str = "",
+                        stats: Optional[dict] = None) -> dict:
+    """Saves the given fields, changed params and their history row in one commit; returns the param changes.
+
+    Open positions keep their levels: nothing else is touched. Nothing is written when any input is invalid.
+    """
     if learning_strength is not None and not 0 <= learning_strength <= 3:
         raise ValueError("learning_strength must be 0..3")
+    if label is not None:
+        label = _clean_label(label)
+    changes: dict = {}
     async with AsyncSessionLocal() as session:
         row = await _get_row(session, key)
+        if params is not None:
+            old = {k: v for k, v in row.params.items() if k in SPECS}  # drop keys no longer in the schema
+            merged = {**old, **validate_params(params)}
+            changes = {k: {"old": old.get(k), "new": merged[k]} for k in params if old.get(k) != merged[k]}
+            if changes:
+                row.params = merged
+                session.add(ShadowParamChange(strategy=key, source=source, changes=changes, reason=reason, stats=stats))
         for name, value in (("label", label), ("description", description),
                             ("learning_strength", learning_strength), ("enabled", enabled)):
             if value is not None:
                 setattr(row, name, value)
         await session.commit()
     await load_strategies()
+    return changes
+
+
+async def apply_param_change(key: str, new_params: dict, source: str, reason: str = "",
+                             stats: Optional[dict] = None) -> dict:
+    return await edit_strategy(key, params=new_params, source=source, reason=reason, stats=stats)
+
+
+async def update_strategy(key: str, *, label=None, description=None, learning_strength=None, enabled=None) -> None:
+    await edit_strategy(key, label=label, description=description, learning_strength=learning_strength, enabled=enabled)
 
 
 async def delete_strategy(key: str) -> bool:

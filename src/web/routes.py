@@ -4,7 +4,7 @@ import logging
 import time
 import uuid
 from typing import Dict, Any, List, Literal, Optional, Tuple
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Path
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select, desc, func
@@ -897,17 +897,10 @@ async def copy_shadow(strategy_key: str, body: ShadowCopy):
 
 @router.patch("/api/shadow/{strategy_key}")
 async def edit_shadow(strategy_key: str, body: ShadowPatch):
-    from src.trading.shadow import apply_param_change, update_strategy
-    from src.trading.strategy_params import validate
-    if body.params is not None:
-        try:
-            validate(body.params)  # fail before any field is saved
-        except ValueError as e:
-            raise HTTPException(status_code=422, detail=str(e))
-    await _shadow_call(update_strategy(
-        strategy_key, label=body.label, description=body.description,
+    from src.trading.shadow import edit_strategy
+    changes = await _shadow_call(edit_strategy(
+        strategy_key, label=body.label, description=body.description, params=body.params,
         learning_strength=body.learning_strength, enabled=body.enabled))
-    changes = await _shadow_call(apply_param_change(strategy_key, body.params, source="user")) if body.params else {}
     return {"success": True, "changes": changes}
 
 @router.delete("/api/shadow/{strategy_key}")
@@ -928,7 +921,7 @@ async def shadow_history(strategy_key: str):
              "created_at": r.created_at.isoformat() if r.created_at else None} for r in rows]
 
 @router.post("/api/shadow/{strategy_key}/history/{change_id}/undo")
-async def undo_shadow_change(strategy_key: str, change_id: int):
+async def undo_shadow_change(strategy_key: str, change_id: int = Path(ge=1, le=2**63 - 1)):
     from src.db.models import ShadowParamChange
     from src.trading.shadow import undo_param_change
     async with AsyncSessionLocal() as session:
