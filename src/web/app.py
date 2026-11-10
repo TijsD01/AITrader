@@ -34,6 +34,11 @@ async def lifespan(app: FastAPI):
     logger.info("Initializing database...")
     await init_db()
     try:
+        from src.trading.shadow import load_strategies
+        await load_strategies()
+    except Exception as e:
+        logger.error(f"Loading shadow strategies failed, using env settings: {e}")
+    try:
         from src.trading.holdings import backfill_user_holdings
         moved = await backfill_user_holdings()
         if moved:

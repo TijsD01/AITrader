@@ -18,6 +18,7 @@ import datetime
 import json
 import logging
 import math
+import re
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
@@ -27,9 +28,13 @@ from config.settings import settings
 from src.data.currency import currency_service
 from src.data.market import market_data_provider
 from src.data.market_hours import check_market_hours
-from src.db.models import OrderTrigger, Position, ShadowAccount, ShadowPosition, ShadowSnapshot, ShadowTrigger, SystemConfig, Trade
+from src.db.models import (
+    OrderTrigger, Position, ShadowAccount, ShadowParamChange, ShadowPosition, ShadowSnapshot, ShadowStrategyRow,
+    ShadowTrigger, SystemConfig, Trade,
+)
 from src.db.session import AsyncSessionLocal
 from src.trading.cash_flows import list_cash_flow_points
+from src.trading.strategy_params import validate as validate_params
 from src.trading.risk import (
     apply_risk_budget,
     calculate_position_allocation,
@@ -186,10 +191,8 @@ def _custom_strategies() -> Dict[str, ShadowStrategy]:
     return custom
 
 
-def get_strategies() -> List[ShadowStrategy]:
-    """The enabled shadow strategies, in the order of SHADOW_STRATEGIES."""
-    if not settings.SHADOW_ENABLED:
-        return []
+def _env_strategies() -> List[ShadowStrategy]:
+    """Strategies named in SHADOW_STRATEGIES: presets plus SHADOW_CUSTOM_STRATEGIES. Seeds the table; fallback before it is loaded."""
     available = {**PRESETS, **_custom_strategies()}
     result = []
     for key in (settings.SHADOW_STRATEGIES or "").split(","):
@@ -202,6 +205,143 @@ def get_strategies() -> List[ShadowStrategy]:
         if all(s.key != key for s in result):
             result.append(available[key])
     return result
+
+
+# (strategy, learning_strength) of the enabled DB rows; None = never loaded (env-based behaviour)
+_CACHE: Optional[List[tuple]] = None
+
+
+def reset_strategy_cache() -> None:
+    global _CACHE
+    _CACHE = None
+
+
+def _row_to_strategy(row: ShadowStrategyRow) -> ShadowStrategy:
+    params = {k: v for k, v in (row.params or {}).items() if k in _FIELD_NAMES - {"label", "description"}}
+    return ShadowStrategy(key=row.key, label=row.label, description=row.description or "", **params)
+
+
+async def load_strategies() -> None:
+    """Seeds the table from the env settings when it is empty, then refreshes the cache from the enabled rows."""
+    global _CACHE
+    async with AsyncSessionLocal() as session:
+        if (await session.execute(select(ShadowStrategyRow.key).limit(1))).first() is None:
+            now = _utcnow()
+            for i, s in enumerate(_env_strategies()):
+                session.add(ShadowStrategyRow(
+                    key=s.key, label=s.label, description=s.description, params=s.to_params(),
+                    is_preset=s.key in PRESETS, created_at=now + datetime.timedelta(microseconds=i),
+                ))
+            await session.commit()
+        rows = (await session.execute(
+            select(ShadowStrategyRow).where(ShadowStrategyRow.enabled.is_(True)).order_by(ShadowStrategyRow.created_at)
+        )).scalars().all()
+        _CACHE = [(_row_to_strategy(r), r.learning_strength or 0) for r in rows]
+
+
+def get_strategies() -> List[ShadowStrategy]:
+    """The enabled shadow strategies (from the DB once loaded, else in the order of SHADOW_STRATEGIES)."""
+    if not settings.SHADOW_ENABLED:
+        return []
+    if _CACHE is None:
+        return _env_strategies()
+    return [s for s, _ in _CACHE]
+
+
+def learning_strengths() -> Dict[str, int]:
+    return {s.key: strength for s, strength in (_CACHE or [])}
+
+
+def slug(label: str) -> str:
+    return re.sub(r"[^a-z0-9]", "_", (label or "").lower()).strip("_")[:40]
+
+
+async def _get_row(session, key: str) -> ShadowStrategyRow:
+    row = await session.get(ShadowStrategyRow, key)
+    if not row:
+        raise LookupError(f"Unknown shadow strategy '{key}'")
+    return row
+
+
+async def create_strategy(label: str, params: dict, description: str = "", copied_from: Optional[str] = None,
+                          learning_strength: int = 0) -> str:
+    key = slug(label)
+    if not key or key == MAIN_KEY.lower():
+        raise ValueError("Strategy name is empty or reserved")
+    # Defaults for unspecified fields, so the stored row is complete
+    full = ShadowStrategy(key=key, label=label, description=description, **validate_params(params)).to_params()
+    async with AsyncSessionLocal() as session:
+        if await session.get(ShadowStrategyRow, key):
+            raise ValueError(f"A strategy with key '{key}' already exists")
+        count = (await session.execute(select(func.count()).select_from(ShadowStrategyRow))).scalar_one()
+        if count >= settings.SHADOW_MAX_STRATEGIES:
+            raise ValueError(f"At most {settings.SHADOW_MAX_STRATEGIES} strategies are allowed")
+        session.add(ShadowStrategyRow(key=key, label=label[:60], description=description, params=full,
+                                      copied_from=copied_from, learning_strength=learning_strength))
+        await session.commit()
+    await load_strategies()
+    return key
+
+
+async def copy_strategy(key: str, label: str) -> str:
+    async with AsyncSessionLocal() as session:
+        row = await _get_row(session, key)
+        params, description = dict(row.params), row.description or ""
+    return await create_strategy(label, params, description, copied_from=key)
+
+
+async def apply_param_change(key: str, new_params: dict, source: str, reason: str = "",
+                             stats: Optional[dict] = None) -> dict:
+    """Saves changed params and one history row. Open positions keep their levels: nothing else is touched."""
+    async with AsyncSessionLocal() as session:
+        row = await _get_row(session, key)
+        old = dict(row.params)
+        merged = {**old, **validate_params({**old, **new_params})}
+        changes = {k: {"old": old.get(k), "new": merged[k]} for k in new_params if old.get(k) != merged[k]}
+        if not changes:
+            return {}
+        row.params = merged
+        session.add(ShadowParamChange(strategy=key, source=source, changes=changes, reason=reason, stats=stats))
+        await session.commit()
+    await load_strategies()
+    return changes
+
+
+async def update_strategy(key: str, *, label=None, description=None, learning_strength=None, enabled=None) -> None:
+    if learning_strength is not None and not 0 <= learning_strength <= 3:
+        raise ValueError("learning_strength must be 0..3")
+    async with AsyncSessionLocal() as session:
+        row = await _get_row(session, key)
+        for name, value in (("label", label), ("description", description),
+                            ("learning_strength", learning_strength), ("enabled", enabled)):
+            if value is not None:
+                setattr(row, name, value)
+        await session.commit()
+    await load_strategies()
+
+
+async def delete_strategy(key: str) -> bool:
+    async with shadow_portfolios._lock:
+        async with AsyncSessionLocal() as session:
+            row = await session.get(ShadowStrategyRow, key)
+            if not row:
+                return False
+            for model in (ShadowPosition, ShadowTrigger, ShadowSnapshot):
+                await session.execute(delete(model).where(model.strategy == key))
+            await session.execute(delete(ShadowAccount).where(ShadowAccount.strategy == key))
+            await session.delete(row)
+            await session.commit()
+    await load_strategies()
+    return True
+
+
+async def undo_param_change(change_id: int) -> dict:
+    async with AsyncSessionLocal() as session:
+        change = await session.get(ShadowParamChange, change_id)
+        if not change:
+            raise LookupError(f"Unknown param change {change_id}")
+        key, old = change.strategy, {k: v["old"] for k, v in (change.changes or {}).items()}
+    return await apply_param_change(key, old, source="undo", reason=f"Undo change {change_id}")
 
 
 def plan_entry(
