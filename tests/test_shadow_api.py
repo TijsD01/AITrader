@@ -95,3 +95,23 @@ async def test_patch_deleted_key_is_404_and_writes_nothing(client):
 async def test_undo_id_out_of_range_is_not_500(client):
     r = await client.post(f"/api/shadow/baseline/history/{10**30}/undo")
     assert r.status_code in (404, 422)
+
+
+async def test_learn_route_returns_learner_result(client, monkeypatch):
+    from unittest.mock import AsyncMock
+    from src.trading.shadow_learner import shadow_learner
+    result = {"success": True, "skipped": True, "message": "Needs 5 closed trades.", "changes": {}}
+    mock = AsyncMock(return_value=result)
+    monkeypatch.setattr(shadow_learner, "learn", mock)
+    r = await client.post("/api/shadow/baseline/learn")
+    assert r.status_code == 200 and r.json() == result
+    mock.assert_awaited_once_with("baseline", manual=True)
+
+
+async def test_learn_route_unknown_key_is_404(client, monkeypatch):
+    from unittest.mock import AsyncMock
+    from src.trading.shadow_learner import shadow_learner
+    mock = AsyncMock()
+    monkeypatch.setattr(shadow_learner, "learn", mock)
+    assert (await client.post("/api/shadow/nope/learn")).status_code == 404
+    mock.assert_not_awaited()

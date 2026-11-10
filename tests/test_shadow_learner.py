@@ -328,3 +328,65 @@ async def test_portfolio_reset_resets_learn_counter():
         await session.commit()
     assert await shadow_portfolios.reset(KEY) is True
     assert (await _row()).closed_at_last_learn == 0
+
+
+async def test_schedule_learn_due_runs_once_while_in_flight(monkeypatch):
+    from src.trading import shadow_learner as sl
+    gate = asyncio.Event()
+    calls = []
+
+    async def slow():
+        calls.append(1)
+        await gate.wait()
+        return []
+
+    monkeypatch.setattr(shadow_learner, "learn_due", slow)
+    sl.schedule_learn_due()
+    sl.schedule_learn_due()
+    task = sl._learn_task
+    await asyncio.sleep(0)  # let the task start
+    sl.schedule_learn_due()
+    gate.set()
+    await task
+    assert calls == [1]
+    sl.schedule_learn_due()  # a finished run does not block the next one
+    await sl._learn_task
+    assert calls == [1, 1]
+
+
+async def test_schedule_learn_due_logs_and_swallows_errors(monkeypatch, caplog):
+    from src.trading import shadow_learner as sl
+    monkeypatch.setattr(shadow_learner, "learn_due", AsyncMock(side_effect=RuntimeError("boom")))
+    sl.schedule_learn_due()
+    await sl._learn_task  # does not raise
+    assert "Background shadow learning failed" in caplog.text
+
+
+async def test_monitor_job_survives_learner_failure(monkeypatch):
+    from unittest.mock import MagicMock, patch
+    from src.scheduler.jobs import TradingScheduler
+    from src.trading import shadow_learner as sl
+    monkeypatch.setattr(shadow_learner, "learn_due", AsyncMock(side_effect=RuntimeError("boom")))
+    sched = TradingScheduler()
+    with patch.object(sched, "_check_stops_and_targets", new=AsyncMock(return_value=[])), \
+         patch("src.scheduler.jobs.shadow_portfolios.check_exits", new=AsyncMock(return_value=[{"id": 1}])), \
+         patch("src.scheduler.jobs.shadow_portfolios.record_snapshots", new=AsyncMock()), \
+         patch("src.scheduler.jobs.get_active_broker", return_value=MagicMock()):
+        assert await sched.monitor_open_positions() == []
+    await sl._learn_task
+    sl.shadow_learner.learn_due.assert_awaited_once()
+
+
+async def test_monitor_job_does_not_learn_without_exits(monkeypatch):
+    from unittest.mock import MagicMock, patch
+    from src.scheduler.jobs import TradingScheduler
+    from src.trading import shadow_learner as sl
+    monkeypatch.setattr(sl, "_learn_task", None)
+    monkeypatch.setattr(shadow_learner, "learn_due", AsyncMock())
+    sched = TradingScheduler()
+    with patch.object(sched, "_check_stops_and_targets", new=AsyncMock(return_value=[])), \
+         patch("src.scheduler.jobs.shadow_portfolios.check_exits", new=AsyncMock(return_value=[])), \
+         patch("src.scheduler.jobs.shadow_portfolios.record_snapshots", new=AsyncMock()), \
+         patch("src.scheduler.jobs.get_active_broker", return_value=MagicMock()):
+        await sched.monitor_open_positions()
+    assert sl._learn_task is None

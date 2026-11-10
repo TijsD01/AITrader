@@ -222,3 +222,23 @@ class ShadowLearner:
 
 
 shadow_learner = ShadowLearner()
+
+
+_learn_task = None  # strong reference so the background run is not garbage-collected mid-flight
+
+
+async def _run_learn_due() -> None:
+    try:
+        await shadow_learner.learn_due()
+    except Exception as e:
+        logger.exception(f"Background shadow learning failed: {e}")
+
+
+def schedule_learn_due() -> None:
+    """Runs learn_due() in the background; never raises, and never starts a second run while one is in flight."""
+    global _learn_task
+    try:
+        if _learn_task is None or _learn_task.done():
+            _learn_task = asyncio.get_running_loop().create_task(_run_learn_due())
+    except Exception as e:
+        logger.error(f"Could not schedule shadow learning: {e}")

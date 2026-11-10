@@ -930,6 +930,15 @@ async def undo_shadow_change(strategy_key: str, change_id: int = Path(ge=1, le=2
         raise HTTPException(status_code=404, detail=f"No change {change_id} for '{strategy_key}'.")
     return {"success": True, "changes": await _shadow_call(undo_param_change(change_id))}
 
+@router.post("/api/shadow/{strategy_key}/learn")
+async def learn_shadow(strategy_key: str):
+    """Runs one learning pass now. The LLM call can take minutes, so this simply awaits it."""
+    from src.trading.shadow import get_strategies
+    from src.trading.shadow_learner import shadow_learner
+    if strategy_key not in {s.key for s in get_strategies()}:
+        raise HTTPException(status_code=404, detail=f"No shadow portfolio named '{strategy_key}'.")
+    return await shadow_learner.learn(strategy_key, manual=True)
+
 @router.post("/api/shadow/{strategy_key}/reset")
 async def reset_shadow(strategy_key: str):
     """Restarts one shadow portfolio from fresh simulated capital. Never touches the main portfolio."""

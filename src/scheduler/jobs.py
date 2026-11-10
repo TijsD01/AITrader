@@ -14,6 +14,7 @@ from src.agents.committee import investment_committee
 from src.trading.broker import active_broker as paper_broker, get_active_broker, active_broker, live_broker
 from src.trading.risk import derive_trigger_levels, entry_allocation_from_summary, plan_buy
 from src.trading.shadow import shadow_portfolios
+from src.trading.shadow_learner import schedule_learn_due
 from src.telegram.bot import telegram_bot
 from sqlalchemy import select, desc
 from src.db.session import AsyncSessionLocal
@@ -569,7 +570,8 @@ class TradingScheduler:
                 except Exception as e:
                     logger.error(f"Periodic broker adoption failed: {e}")
             closed = await self._check_stops_and_targets()
-            await shadow_portfolios.check_exits()
+            if await shadow_portfolios.check_exits():
+                schedule_learn_due()
             await shadow_portfolios.record_snapshots(main_summary_fn=get_active_broker().get_portfolio_summary)
             return closed
 
@@ -671,7 +673,8 @@ class TradingScheduler:
             executed = await self._check_price_triggers()
             closed = await self._check_stops_and_targets()
             await shadow_portfolios.check_triggers()
-            await shadow_portfolios.check_exits()
+            if await shadow_portfolios.check_exits():
+                schedule_learn_due()
 
             logger.info(
                 f"Manual market data refresh: {len(tickers)} tickers, {len(resized)} triggers resized, "

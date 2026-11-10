@@ -160,6 +160,7 @@ document.addEventListener('click', (e) => {
     case 'reset-shadow': resetShadow(el.dataset.key || ''); break;
     case 'new-shadow': openShadowEditor(null); break;
     case 'edit-shadow': openShadowEditor(el.dataset.key || ''); break;
+    case 'learn-shadow': learnShadow(el); break;
     case 'copy-shadow': copyShadow(el.dataset.key || ''); break;
     case 'delete-shadow': deleteShadow(el.dataset.key || ''); break;
     case 'undo-shadow-change': undoShadowChange(el.dataset.key || '', Number(el.dataset.id)); break;
@@ -3096,6 +3097,7 @@ function renderShadowStrategy(s, mainLabel) {
         </div>
       </div>
       <div class="sh-actions">
+        <button type="button" class="ui-btn ui-btn-sm ${s.learning_strength > 0 ? '' : 'hidden'}" data-action="learn-shadow" data-key="${esc(s.key)}" data-sh-learn style="min-height:44px"><i class="fa-solid fa-graduation-cap" aria-hidden="true"></i> <span>Learn now</span></button>
         <button type="button" class="ui-btn ui-btn-sm" data-action="edit-shadow" data-key="${esc(s.key)}"><i class="fa-solid fa-sliders" aria-hidden="true"></i> Edit</button>
         <button type="button" class="ui-btn ui-btn-sm" data-action="copy-shadow" data-key="${esc(s.key)}"><i class="fa-regular fa-copy" aria-hidden="true"></i> Copy</button>
         <button type="button" class="ui-btn ui-btn-sm" data-action="reset-shadow" data-key="${esc(s.key)}"><i class="fa-solid fa-rotate-left" aria-hidden="true"></i> Reset</button>
@@ -3273,6 +3275,7 @@ function syncShadowStrength(el) {
   el.setAttribute('aria-valuetext', SHADOW_STRENGTH[n]);
   box.querySelectorAll('.sh-stops span').forEach((sp, i) => sp.classList.toggle('is-on', i === n));
   box.querySelector('[data-sh-note]').classList.toggle('hidden', n === 0);
+  el.closest('.ui-card').querySelector('[data-sh-learn]').classList.toggle('hidden', n === 0);
   const badge = el.closest('.ui-card').querySelector('[data-sh-badge]');
   if (badge) badge.classList.toggle('hidden', n === 0);
 }
@@ -3285,6 +3288,26 @@ async function setShadowStrength(key, value) {
     showToast(e.message, true);
     loadShadow(); // put the slider back to the saved value
   }
+}
+
+// One learning pass can take a minute or more: only this button is locked, the rest of the card stays usable
+async function learnShadow(btn) {
+  if (btn.disabled) return;
+  const label = btn.querySelector('span');
+  const icon = btn.querySelector('i');
+  btn.disabled = true;
+  label.textContent = 'Learning\u2026';
+  icon.className = 'fa-solid fa-circle-notch fa-spin';
+  try {
+    const data = await shadowApi('POST', `/api/shadow/${encodeURIComponent(btn.dataset.key)}/learn`);
+    showToast(data.message || 'Learning finished.', data.success === false);
+  } catch (e) {
+    showToast(e.message, true);
+  }
+  btn.disabled = false;
+  label.textContent = 'Learn now';
+  icon.className = 'fa-solid fa-graduation-cap';
+  loadShadow();
 }
 
 async function copyShadow(key) {
