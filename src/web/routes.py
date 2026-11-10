@@ -6,7 +6,7 @@ import uuid
 from typing import Dict, Any, List, Literal, Optional, Tuple
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select, desc, func
 
 from config.settings import settings, update_env_file
@@ -850,6 +850,92 @@ async def get_shadow_comparison():
         logger.warning(f"Shadow comparison: main portfolio summary unavailable: {e}")
         main_summary = {}
     return await shadow_portfolios.get_comparison(main_summary, main_is_live)
+
+class ShadowCreate(BaseModel):
+    label: str = Field(min_length=1)
+    params: Dict[str, Any] = {}
+    base: str = "baseline"
+    description: str = ""
+
+class ShadowCopy(BaseModel):
+    label: str = Field(min_length=1)
+
+class ShadowPatch(BaseModel):
+    label: Optional[str] = Field(default=None, min_length=1)
+    description: Optional[str] = None
+    params: Optional[Dict[str, Any]] = None
+    learning_strength: Optional[int] = None
+    enabled: Optional[bool] = None
+
+async def _shadow_call(coro):
+    """Maps the shadow store's errors to HTTP: bad input is 422, an unknown strategy or change is 404."""
+    try:
+        return await coro
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+# Declared before any /api/shadow/{key} GET so "schema" is not read as a key
+@router.get("/api/shadow/schema")
+async def get_shadow_schema():
+    from src.trading.strategy_params import to_json_schema
+    return to_json_schema()
+
+@router.post("/api/shadow")
+async def create_shadow(body: ShadowCreate):
+    from src.trading.shadow import PRESETS, create_strategy
+    if body.base not in PRESETS:
+        raise HTTPException(status_code=422, detail=f"base: unknown preset '{body.base}'")
+    params = {**PRESETS[body.base].to_params(), **body.params}
+    return {"success": True, "key": await _shadow_call(create_strategy(body.label, params, body.description))}
+
+@router.post("/api/shadow/{strategy_key}/copy")
+async def copy_shadow(strategy_key: str, body: ShadowCopy):
+    from src.trading.shadow import copy_strategy
+    return {"success": True, "key": await _shadow_call(copy_strategy(strategy_key, body.label))}
+
+@router.patch("/api/shadow/{strategy_key}")
+async def edit_shadow(strategy_key: str, body: ShadowPatch):
+    from src.trading.shadow import apply_param_change, update_strategy
+    from src.trading.strategy_params import validate
+    if body.params is not None:
+        try:
+            validate(body.params)  # fail before any field is saved
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+    await _shadow_call(update_strategy(
+        strategy_key, label=body.label, description=body.description,
+        learning_strength=body.learning_strength, enabled=body.enabled))
+    changes = await _shadow_call(apply_param_change(strategy_key, body.params, source="user")) if body.params else {}
+    return {"success": True, "changes": changes}
+
+@router.delete("/api/shadow/{strategy_key}")
+async def delete_shadow(strategy_key: str):
+    from src.trading.shadow import delete_strategy
+    if not await delete_strategy(strategy_key):
+        raise HTTPException(status_code=404, detail=f"No shadow portfolio named '{strategy_key}'.")
+    return {"success": True}
+
+@router.get("/api/shadow/{strategy_key}/history")
+async def shadow_history(strategy_key: str):
+    from src.db.models import ShadowParamChange
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(
+            select(ShadowParamChange).where(ShadowParamChange.strategy == strategy_key)
+            .order_by(desc(ShadowParamChange.id)).limit(50))).scalars().all()
+    return [{"id": r.id, "source": r.source, "changes": r.changes, "reason": r.reason,
+             "created_at": r.created_at.isoformat() if r.created_at else None} for r in rows]
+
+@router.post("/api/shadow/{strategy_key}/history/{change_id}/undo")
+async def undo_shadow_change(strategy_key: str, change_id: int):
+    from src.db.models import ShadowParamChange
+    from src.trading.shadow import undo_param_change
+    async with AsyncSessionLocal() as session:
+        change = await session.get(ShadowParamChange, change_id)
+    if not change or change.strategy != strategy_key:
+        raise HTTPException(status_code=404, detail=f"No change {change_id} for '{strategy_key}'.")
+    return {"success": True, "changes": await _shadow_call(undo_param_change(change_id))}
 
 @router.post("/api/shadow/{strategy_key}/reset")
 async def reset_shadow(strategy_key: str):

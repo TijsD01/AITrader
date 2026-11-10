@@ -58,6 +58,13 @@ def _is_num(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
+def _finite(v) -> bool:
+    try:
+        return math.isfinite(v)
+    except OverflowError:  # an int too large for a float
+        return False
+
+
 def _check(spec: ParamSpec, v):
     n = spec.name
     if v is None:
@@ -76,7 +83,7 @@ def _check(spec: ParamSpec, v):
         raise ValueError(f"{n}: must be a number")
     if spec.kind == "int" and not isinstance(v, int):
         raise ValueError(f"{n}: must be an integer")
-    if not math.isfinite(v):
+    if not _finite(v):
         raise ValueError(f"{n}: must be finite")
     if not spec.min <= v <= spec.max:
         raise ValueError(f"{n}: must be between {spec.min} and {spec.max}")
@@ -105,7 +112,7 @@ def clamp_step(name: str, old, proposed, strength: int):
         return proposed if isinstance(proposed, bool) else old
     if spec.kind == "choice":
         return proposed if proposed in spec.choices else old
-    if not _is_num(proposed) or not math.isfinite(proposed):
+    if not _is_num(proposed) or not _finite(proposed):
         return old
     lo = spec.min if spec.learn_min is None else spec.learn_min
     hi = spec.max if spec.learn_max is None else spec.learn_max

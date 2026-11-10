@@ -49,3 +49,11 @@ def test_json_schema_shape():
 def test_clamp_step_leaves_old_outside_learn_range():
     assert clamp_step("breakeven_pct", 10.0, 0.05, 3) == 10.0
     assert clamp_step("stop_scale", 3.0, 1.0, 3) == 3.0
+
+
+def test_huge_int_is_rejected_not_overflow():
+    import pytest
+    from src.trading.strategy_params import validate, clamp_step
+    with pytest.raises(ValueError, match="max_positions: must be finite"):
+        validate({"max_positions": 10**400})
+    assert clamp_step("stop_scale", 1.0, 10**400, 2) == 1.0

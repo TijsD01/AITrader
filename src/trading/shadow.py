@@ -916,6 +916,7 @@ class ShadowPortfolios:
                 accounts = await self._ensure_accounts(session, strategies)
                 await self._mark_followed_by_main(session, main_is_live)
             current_main = await self._main_params(session)
+            meta = {r.key: r for r in (await session.execute(select(ShadowStrategyRow))).scalars().all()}
             for s in strategies:
                 acc = accounts[s.key]
                 since = acc.started_at
@@ -974,6 +975,9 @@ class ShadowPortfolios:
                     "label": s.label,
                     "description": s.description,
                     "params": params,
+                    "learning_strength": (meta[s.key].learning_strength or 0) if s.key in meta else 0,
+                    "copied_from": meta[s.key].copied_from if s.key in meta else None,
+                    "is_preset": bool(meta[s.key].is_preset) if s.key in meta else s.key in PRESETS,
                     "started_at": since.strftime("%Y-%m-%d %H:%M") if since else None,
                     "initial_capital_eur": round(acc.initial_capital_eur, 2),
                     "cash_eur": round(acc.cash_eur, 2),
