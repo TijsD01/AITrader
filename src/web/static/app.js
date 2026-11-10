@@ -3300,14 +3300,16 @@ async function learnShadow(btn) {
   icon.className = 'fa-solid fa-circle-notch fa-spin';
   try {
     const data = await shadowApi('POST', `/api/shadow/${encodeURIComponent(btn.dataset.key)}/learn`);
-    showToast(data.message || 'Learning finished.', data.success === false);
+    // A skip ("needs 5 closed trades") is information, not a failure
+    showToast(data.message || 'Learning finished.', data.success === false && !data.skipped);
   } catch (e) {
     showToast(e.message, true);
+  } finally {
+    btn.disabled = false;
+    label.textContent = 'Learn now';
+    icon.className = 'fa-solid fa-graduation-cap';
+    loadShadow();
   }
-  btn.disabled = false;
-  label.textContent = 'Learn now';
-  icon.className = 'fa-solid fa-graduation-cap';
-  loadShadow();
 }
 
 async function copyShadow(key) {

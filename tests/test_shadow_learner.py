@@ -390,3 +390,23 @@ async def test_monitor_job_does_not_learn_without_exits(monkeypatch):
          patch("src.scheduler.jobs.get_active_broker", return_value=MagicMock()):
         await sched.monitor_open_positions()
     assert sl._learn_task is None
+
+
+@pytest.mark.parametrize("exits, expect_learn", [([{"id": 1}], True), ([], False)])
+async def test_manual_refresh_schedules_learning_only_after_exits(monkeypatch, exits, expect_learn):
+    from unittest.mock import MagicMock, patch
+    from src.scheduler.jobs import TradingScheduler
+    from src.trading import shadow_learner as sl
+    monkeypatch.setattr(sl, "_learn_task", None)
+    monkeypatch.setattr(shadow_learner, "learn_due", AsyncMock(return_value=[]))
+    sched = TradingScheduler()
+    with patch.object(sched, "_sync_account_balance", new=AsyncMock(return_value={})), \
+         patch.object(sched, "_check_price_triggers", new=AsyncMock(return_value=[])), \
+         patch.object(sched, "_check_stops_and_targets", new=AsyncMock(return_value=[])), \
+         patch("src.scheduler.jobs.shadow_portfolios.check_triggers", new=AsyncMock()), \
+         patch("src.scheduler.jobs.shadow_portfolios.check_exits", new=AsyncMock(return_value=exits)), \
+         patch("src.scheduler.jobs.get_active_broker", return_value=MagicMock()):
+        assert (await sched.refresh_market_data_now())["success"] is True
+    if sl._learn_task is not None:
+        await sl._learn_task
+    assert shadow_learner.learn_due.await_count == (1 if expect_learn else 0)
