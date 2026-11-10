@@ -363,6 +363,45 @@ class AgentMemoryStore:
                         break
                 return results
 
+    async def search_outcomes(self, strategy: Optional[str] = None, source: Optional[str] = None,
+                              ticker: Optional[str] = None, exit_reason: Optional[str] = None,
+                              since: Optional[float] = None, limit: int = 50) -> List[Dict[str, Any]]:
+        """Closed-trade outcome atoms (see src.memory.outcomes), newest first, as parsed JSON dicts.
+        source="main" matches main_live and main_paper; exit_reason is a case-sensitive substring."""
+        await self.init_db()
+        sql = "SELECT content FROM memory_l1_atoms WHERE agent_id = 'outcomes' AND predicate = 'closed_trade'"
+        params: List[Any] = []
+        if source == "main":
+            sql += " AND (object LIKE 'main\\_live:%' ESCAPE '\\' OR object LIKE 'main\\_paper:%' ESCAPE '\\')"
+        elif source:
+            sql += " AND object LIKE ? ESCAPE '\\'"
+            params.append(_like_pattern(source).strip("%") + ":%")
+        if strategy:
+            # object is "<source>:<strategy>"; source never contains ':'
+            sql += " AND substr(object, instr(object, ':') + 1) = ?"
+            params.append(strategy)
+        if ticker:
+            sql += " AND subject = ?"
+            params.append(ticker)
+        if since is not None:
+            sql += " AND created_at >= ?"
+            params.append(since)
+        sql += " ORDER BY created_at DESC, id DESC"
+        results: List[Dict[str, Any]] = []
+        async with self._get_conn() as db:
+            async with await db.execute(sql, params) as cursor:
+                async for r in cursor:
+                    try:
+                        d = json.loads(r["content"].rsplit(" ||| ", 1)[1])
+                    except (IndexError, ValueError):
+                        continue
+                    if exit_reason and exit_reason not in str(d.get("exit_reason", "")):
+                        continue
+                    results.append(d)
+                    if len(results) >= limit:
+                        break
+        return results
+
     # --- L2 Scenarios ---
 
     async def get_or_create_scenario(self, scenario_key: str, default_title: str = "",
