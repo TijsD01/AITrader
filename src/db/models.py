@@ -282,3 +282,31 @@ class ShadowSnapshot(Base):
     timestamp = Column(DateTime, default=datetime.datetime.utcnow, index=True)
     total_value_eur = Column(Float, nullable=False)
     return_pct = Column(Float, default=0.0)
+
+
+class ShadowStrategyRow(Base):
+    __tablename__ = "shadow_strategies"
+
+    key = Column(String(40), primary_key=True)
+    label = Column(String(60), nullable=False)
+    description = Column(Text, nullable=True)
+    params = Column(JSON, nullable=False)
+    learning_strength = Column(Integer, default=0, nullable=False)
+    enabled = Column(Boolean, default=True, nullable=False)
+    copied_from = Column(String(40), nullable=True)
+    is_preset = Column(Boolean, default=False, nullable=False)
+    closed_at_last_learn = Column(Integer, default=0, nullable=False)  # Closed-trade count at last learning pass
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+
+
+class ShadowParamChange(Base):
+    __tablename__ = "shadow_param_changes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    strategy = Column(String(40), nullable=False, index=True)
+    source = Column(String(20))  # Who changed the params, e.g. manual or learner
+    changes = Column(JSON)
+    reason = Column(Text, nullable=True)
+    stats = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow, index=True)
