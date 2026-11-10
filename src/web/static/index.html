@@ -707,6 +707,7 @@
           <i class="fa-solid fa-arrows-rotate"></i>
         </button>
       </div>
+      <button type="button" class="ui-btn ui-btn-primary" style="min-height:44px" data-action="new-shadow"><i class="fa-solid fa-plus" aria-hidden="true"></i> New shadow</button>
       <div id="shadowContainer" class="space-y-6" data-loading>
         <div class="ui-card ui-card-pad text-[13px] ui-muted">Loading shadow portfolios...</div>
       </div>
@@ -1051,6 +1052,24 @@
     <i id="toastIcon" class="fa-solid fa-circle-check ui-gain"></i>
     <span id="toastMsg">Action executed.</span>
   </div>
+
+  <!-- Shadow editor sheet (app.js openShadowEditor) -->
+  <dialog id="shadowEditor" class="ticker-sheet" aria-labelledby="seTitle">
+    <div class="ts-panel">
+      <header class="ts-head">
+        <div class="min-w-0"><h2 id="seTitle" class="ts-ticker">Shadow</h2></div>
+        <button type="button" class="ui-btn ui-btn-quiet ui-icon-btn" data-se-close aria-label="Close"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
+      </header>
+      <div id="seBody" class="se-body"></div>
+      <div class="se-actions">
+        <p id="seError" class="ui-notice ui-notice-danger hidden" role="alert"></p>
+        <div class="se-buttons">
+          <button type="button" class="ui-btn" data-se-close>Cancel</button>
+          <button type="button" class="ui-btn ui-btn-primary" data-se-save>Save</button>
+        </div>
+      </div>
+    </div>
+  </dialog>
 
   <!-- Ticker detail sheet (app.js openTickerSheet) -->
   <dialog id="tickerSheet" class="ticker-sheet" aria-labelledby="tsTicker" data-state="loading">

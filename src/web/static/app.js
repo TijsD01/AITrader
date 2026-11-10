@@ -158,6 +158,11 @@ document.addEventListener('click', (e) => {
     case 'inspect': inspectReport(Number(el.dataset.idx)); break;
     case 'cancel-trigger': cancelTrigger(Number(el.dataset.id), ticker); break;
     case 'reset-shadow': resetShadow(el.dataset.key || ''); break;
+    case 'new-shadow': openShadowEditor(null); break;
+    case 'edit-shadow': openShadowEditor(el.dataset.key || ''); break;
+    case 'copy-shadow': copyShadow(el.dataset.key || ''); break;
+    case 'delete-shadow': deleteShadow(el.dataset.key || ''); break;
+    case 'undo-shadow-change': undoShadowChange(el.dataset.key || '', Number(el.dataset.id)); break;
     case 'open-ticker': openTickerSheet(ticker, el.dataset.source || ''); break;
     default: break;
   }
@@ -3084,16 +3089,24 @@ function renderShadowStrategy(s, mainLabel) {
     <div class="ui-card ui-card-pad space-y-4">
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0">
-          <h3 class="ui-section-title">${esc(s.label)}</h3>
+          <h3 class="ui-section-title">${esc(s.label)}${s.learning_strength > 0 ? ' <span class="ui-badge ui-badge-accent">Learning</span>' : ''}</h3>
           <p class="text-[13px] ui-muted mt-1">${esc(s.description)}</p>
           <p class="text-xs ui-faint mt-1 ui-num">Since ${esc(s.started_at || '--')} · start ${esc(eur(s.initial_capital_eur))}</p>
           ${shadowFrozenNote(s.params || {})}
         </div>
-        <button type="button" class="ui-btn ui-btn-sm shrink-0" style="min-height:44px" data-action="reset-shadow" data-key="${esc(s.key)}">
-          <i class="fa-solid fa-rotate-left"></i> Reset
-        </button>
+      </div>
+      <div class="sh-actions">
+        <button type="button" class="ui-btn ui-btn-sm" data-action="edit-shadow" data-key="${esc(s.key)}"><i class="fa-solid fa-sliders" aria-hidden="true"></i> Edit</button>
+        <button type="button" class="ui-btn ui-btn-sm" data-action="copy-shadow" data-key="${esc(s.key)}"><i class="fa-regular fa-copy" aria-hidden="true"></i> Copy</button>
+        <button type="button" class="ui-btn ui-btn-sm" data-action="reset-shadow" data-key="${esc(s.key)}"><i class="fa-solid fa-rotate-left" aria-hidden="true"></i> Reset</button>
+        <button type="button" class="ui-btn ui-btn-sm" data-action="delete-shadow" data-key="${esc(s.key)}" data-label="${esc(s.label)}"><i class="fa-regular fa-trash-can" aria-hidden="true"></i> Delete</button>
       </div>
       <div class="flex flex-wrap gap-1.5">${shadowParamChips(s.params || {})}</div>
+      ${shadowStrengthControl(s)}
+      <details class="sh-hist" data-key="${esc(s.key)}">
+        <summary>Change history</summary>
+        <div class="sh-hist-list divide-y divide-borderCol"></div>
+      </details>
 
       <div class="ui-inset px-3 divide-y divide-borderCol">
         <div class="grid grid-cols-3 gap-2 py-2 ui-eyebrow">
@@ -3192,8 +3205,13 @@ async function loadShadow() {
       </div>`;
       return;
     }
+    shadowData = data;
+    const openHist = [...container.querySelectorAll('details.sh-hist[open]')].map(d => d.dataset.key);
     container.innerHTML = data.strategies.map(s => renderShadowStrategy(s, mainLabel)).join('');
     data.strategies.forEach(s => drawShadowChart(s, mainLabel));
+    container.querySelectorAll('details.sh-hist').forEach(d => {
+      if (openHist.includes(d.dataset.key)) { d.open = true; loadShadowHistory(d.dataset.key); }
+    });
   } catch (e) {
     container.innerHTML = `<div class="ui-card ui-card-pad text-[13px] ui-muted">Could not load shadow portfolios.</div>`;
     console.debug('Error loading shadow portfolios:', e);
@@ -3216,6 +3234,257 @@ async function resetShadow(key) {
     showToast('Error resetting shadow portfolio.', true);
   }
 }
+
+// ------------------------------------------------------------------
+// Shadow editor: create / edit / copy / delete, learning strength, change history
+// ------------------------------------------------------------------
+let shadowData = null;      // last /api/shadow payload
+let shadowSchema = null;    // /api/shadow/schema, fetched once
+const shadowEditor = { key: null, initial: {}, values: {} };
+const SHADOW_STRENGTH = ['Off', 'Low', 'Medium', 'High'];
+
+async function shadowApi(method, url, body) {
+  const res = await fetch(url, {
+    method,
+    headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || data.message || 'Request failed.');
+  return data;
+}
+
+function shadowStrengthControl(s) {
+  const n = s.learning_strength || 0;
+  const stops = SHADOW_STRENGTH.map((l, i) => `<span style="--i:${i}" class="${i === n ? 'is-on' : ''}">${l}</span>`).join('');
+  return `<div class="sh-strength">
+    <label class="ui-label" for="shStrength-${esc(s.key)}">Learning strength</label>
+    <input type="range" class="se-range" id="shStrength-${esc(s.key)}" min="0" max="3" step="1" value="${esc(n)}"
+      data-action="set-shadow-strength" data-key="${esc(s.key)}" aria-valuetext="${SHADOW_STRENGTH[n]}">
+    <div class="sh-stops" aria-hidden="true">${stops}</div>
+    ${n > 0 ? '<p class="se-note">Under 30 closed trades the result is noise. A learning shadow is no longer a clean comparison.</p>' : ''}
+  </div>`;
+}
+
+async function setShadowStrength(key, value) {
+  try {
+    await shadowApi('PATCH', `/api/shadow/${encodeURIComponent(key)}`, { learning_strength: value });
+    showToast(`Learning ${SHADOW_STRENGTH[value].toLowerCase()}.`);
+  } catch (e) {
+    showToast(e.message, true);
+  }
+  loadShadow();
+}
+
+async function copyShadow(key) {
+  const src = shadowData && (shadowData.strategies || []).find(x => x.key === key);
+  const label = prompt('Name for the copy:', src ? `${src.label} copy` : '');
+  if (!label || !label.trim()) return;
+  try {
+    await shadowApi('POST', `/api/shadow/${encodeURIComponent(key)}/copy`, { label: label.trim() });
+    showToast('Shadow copied.');
+    loadShadow();
+  } catch (e) {
+    showToast(e.message, true);
+  }
+}
+
+async function deleteShadow(key) {
+  const src = shadowData && (shadowData.strategies || []).find(x => x.key === key);
+  if (!confirm(`Delete shadow '${src ? src.label : key}' with all its positions and history?`)) return;
+  try {
+    await shadowApi('DELETE', `/api/shadow/${encodeURIComponent(key)}`);
+    showToast('Shadow deleted.');
+    loadShadow();
+  } catch (e) {
+    showToast(e.message, true);
+  }
+}
+
+async function loadShadowHistory(key) {
+  const d = document.querySelector(`details.sh-hist[data-key="${CSS.escape(key)}"] .sh-hist-list`);
+  if (!d) return;
+  try {
+    const rows = await shadowApi('GET', `/api/shadow/${encodeURIComponent(key)}/history`);
+    if (!rows.length) { d.innerHTML = '<p class="py-2 text-[13px] ui-faint">No changes yet.</p>'; return; }
+    d.innerHTML = rows.map(r => {
+      const diffs = Object.entries(r.changes || {}).map(([k, v]) => `<div class="ui-num">${esc(k)}: ${esc(v.old ?? 'main bot')} &rarr; ${esc(v.new ?? 'main bot')}</div>`).join('');
+      const when = r.created_at ? new Date(r.created_at + (r.created_at.endsWith('Z') ? '' : 'Z')).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+      return `<div class="sh-hist-item">
+        <div class="min-w-0">
+          <div class="ui-faint text-xs">${esc(when)} · ${esc(r.source)}</div>
+          ${diffs}
+          ${r.reason ? `<div class="ui-muted text-xs">${esc(r.reason)}</div>` : ''}
+        </div>
+        <button type="button" class="ui-btn ui-btn-sm shrink-0" data-action="undo-shadow-change" data-key="${esc(key)}" data-id="${esc(r.id)}">Undo</button>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    d.innerHTML = `<p class="py-2 text-[13px] ui-faint">${esc(e.message)}</p>`;
+  }
+}
+
+async function undoShadowChange(key, id) {
+  try {
+    await shadowApi('POST', `/api/shadow/${encodeURIComponent(key)}/history/${id}/undo`);
+    showToast('Change undone.');
+    loadShadow();
+  } catch (e) {
+    showToast(e.message, true);
+  }
+}
+
+function shadowParamField(spec, value) {
+  const n = esc(spec.name);
+  const nullToggle = spec.nullable && spec.kind !== 'bool' ? `
+      <label class="se-row set-toggle-row">
+        <span>Use main bot value</span>
+        <span class="check-wrap set-toggle"><input type="checkbox" data-se-null="${n}" ${value === null ? 'checked' : ''}><span class="ui-switch" aria-hidden="true"></span></span>
+      </label>` : '';
+  const note = spec.learnable === false ? '<p class="se-note">Only you can change this. Learning never touches it.</p>' : '';
+  let control;
+  if (spec.kind === 'bool') {
+    // nullable bool (regime_filter): a select keeps "main bot value" as a real third state
+    if (spec.nullable) {
+      const cur = value === null ? 'null' : String(value);
+      control = `<div class="se-row"><label for="se-${n}">${esc(spec.label)}</label>
+        <select id="se-${n}" class="ui-input" style="width:auto" data-se-param="${n}">
+          <option value="null" ${cur === 'null' ? 'selected' : ''}>Main bot value</option>
+          <option value="true" ${cur === 'true' ? 'selected' : ''}>On</option>
+          <option value="false" ${cur === 'false' ? 'selected' : ''}>Off</option></select></div>`;
+    } else {
+      control = `<label class="se-row"><span>${esc(spec.label)}</span>
+        <span class="check-wrap set-toggle"><input type="checkbox" data-se-param="${n}" ${value ? 'checked' : ''}><span class="ui-switch" aria-hidden="true"></span></span></label>`;
+    }
+  } else if (spec.kind === 'choice') {
+    control = `<div class="se-row"><label for="se-${n}">${esc(spec.label)}</label>
+      <select id="se-${n}" class="ui-input" style="width:auto" data-se-param="${n}">
+        ${(spec.choices || []).map(c => `<option value="${esc(c)}" ${c === value ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></div>`;
+  } else {
+    const shown = value === null ? spec.min : value;
+    control = `<div class="se-row"><label for="se-${n}">${esc(spec.label)}</label>
+        <span class="se-val ui-num" data-se-val="${n}">${value === null ? 'main bot' : esc(shown)}</span></div>
+      <input type="range" class="se-range" id="se-${n}" data-se-param="${n}" min="${esc(spec.min)}" max="${esc(spec.max)}" step="${esc(spec.step)}" value="${esc(shown)}" ${value === null ? 'disabled' : ''}>`;
+  }
+  return `<div class="se-param ${value === null && spec.kind !== 'bool' ? 'is-muted' : ''}" data-se-field="${n}">${control}${nullToggle}${note}</div>`;
+}
+
+function readShadowEditorValue(spec) {
+  const el = document.querySelector(`#seBody [data-se-param="${spec.name}"]`);
+  const nul = document.querySelector(`#seBody [data-se-null="${spec.name}"]`);
+  if (nul && nul.checked) return null;
+  if (spec.kind === 'bool') {
+    if (el.tagName === 'SELECT') return el.value === 'null' ? null : el.value === 'true';
+    return el.checked;
+  }
+  if (spec.kind === 'choice') return el.value;
+  return spec.kind === 'int' ? parseInt(el.value, 10) : parseFloat(el.value);
+}
+
+async function openShadowEditor(key) {
+  const dlg = document.getElementById('shadowEditor');
+  if (!dlg) return;
+  try {
+    if (!shadowSchema) shadowSchema = await shadowApi('GET', '/api/shadow/schema');
+  } catch (e) { showToast(e.message, true); return; }
+  const strategies = (shadowData && shadowData.strategies) || [];
+  const src = key ? strategies.find(x => x.key === key) : (strategies.find(x => x.key === 'baseline') || strategies[0]);
+  if (key && !src) { showToast('Shadow not found. Refresh and try again.', true); return; }
+  const base = (src && src.params) || {};
+  shadowEditor.key = key;
+  shadowEditor.initial = {};
+  shadowSchema.forEach(sp => {
+    shadowEditor.initial[sp.name] = base[sp.name] === undefined ? (sp.nullable ? null : sp.min) : base[sp.name];
+  });
+  document.getElementById('seTitle').textContent = key ? `Edit ${src.label}` : 'New shadow';
+  document.getElementById('seError').classList.add('hidden');
+  document.getElementById('seBody').innerHTML = `
+    <div class="se-field"><label class="ui-label" for="seLabel">Name</label>
+      <input id="seLabel" class="ui-input" maxlength="60" value="${key ? esc(src.label) : ''}" autocomplete="off"></div>
+    <div class="se-field"><label class="ui-label" for="seDesc">Description</label>
+      <textarea id="seDesc" class="ui-input" maxlength="300">${key ? esc(src.description) : ''}</textarea></div>
+    ${shadowSchema.map(sp => shadowParamField(sp, shadowEditor.initial[sp.name])).join('')}`;
+  if (!dlg.open) { dlg.classList.remove('is-closing'); dlg.showModal(); }
+  document.getElementById('seLabel').focus();
+}
+
+function closeShadowEditor() {
+  const dlg = document.getElementById('shadowEditor');
+  if (!dlg || !dlg.open || dlg.classList.contains('is-closing')) return;
+  dlg.classList.add('is-closing');
+  let done = false;
+  const finish = () => { if (done) return; done = true; dlg.classList.remove('is-closing'); dlg.close(); };
+  dlg.addEventListener('animationend', e => { if (e.target === dlg) finish(); }, { once: true });
+  setTimeout(finish, 250);
+}
+
+async function saveShadowEditor() {
+  const err = document.getElementById('seError');
+  err.classList.add('hidden');
+  const label = document.getElementById('seLabel').value.trim();
+  const description = document.getElementById('seDesc').value.trim();
+  if (!label) { err.textContent = 'Enter a name.'; err.classList.remove('hidden'); return; }
+  const params = {};
+  shadowSchema.forEach(sp => {
+    const v = readShadowEditorValue(sp);
+    if (v !== shadowEditor.initial[sp.name]) params[sp.name] = v;
+  });
+  const btn = document.querySelector('#shadowEditor [data-se-save]');
+  btn.disabled = true;
+  try {
+    if (shadowEditor.key) {
+      const body = { label, description };
+      if (Object.keys(params).length) body.params = params;
+      await shadowApi('PATCH', `/api/shadow/${encodeURIComponent(shadowEditor.key)}`, body);
+      showToast('Shadow saved.');
+    } else {
+      await shadowApi('POST', '/api/shadow', { label, description, params });
+      showToast('Shadow created.');
+    }
+    closeShadowEditor();
+    loadShadow();
+  } catch (e) {
+    err.textContent = e.message;
+    err.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+(function initShadowEditor() {
+  const dlg = document.getElementById('shadowEditor');
+  if (!dlg) return;
+  dlg.addEventListener('cancel', e => { e.preventDefault(); closeShadowEditor(); });
+  dlg.addEventListener('click', e => {
+    if (e.target === dlg || e.target.closest('[data-se-close]')) return closeShadowEditor();
+    if (e.target.closest('[data-se-save]')) saveShadowEditor();
+  });
+  dlg.addEventListener('input', e => {
+    const el = e.target;
+    if (el.type === 'range' && el.dataset.seParam) {
+      dlg.querySelector(`[data-se-val="${el.dataset.seParam}"]`).textContent = el.value;
+    }
+  });
+  dlg.addEventListener('change', e => {
+    const name = e.target.dataset.seNull;
+    if (!name) return;
+    const field = dlg.querySelector(`[data-se-field="${name}"]`);
+    const range = field.querySelector('input[type="range"]');
+    const val = field.querySelector('[data-se-val]');
+    range.disabled = e.target.checked;
+    field.classList.toggle('is-muted', e.target.checked);
+    val.textContent = e.target.checked ? 'main bot' : range.value;
+  });
+})();
+
+// Strength slider commits on release; history loads the first time its panel opens
+document.addEventListener('change', e => {
+  const el = e.target.closest('[data-action="set-shadow-strength"]');
+  if (el) setShadowStrength(el.dataset.key, Number(el.value));
+});
+document.addEventListener('toggle', e => {
+  if (e.target.matches && e.target.matches('details.sh-hist') && e.target.open) loadShadowHistory(e.target.dataset.key);
+}, true);
 
 // ------------------------------------------------------------------
 // Ticker detail sheet: price chart with trade levels for one ticker
