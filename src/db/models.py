@@ -50,6 +50,7 @@ class Position(Base):
     is_live = Column(Boolean, default=False)
     broker_order_id = Column(String(100), nullable=True)
     trigger_id = Column(Integer, nullable=True)  # OrderTrigger that opened this position (NULL = manual/direct buy)
+    rules_version = Column(Integer, nullable=True)  # MAIN_RULES_VERSION in force when the position opened
     opened_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
