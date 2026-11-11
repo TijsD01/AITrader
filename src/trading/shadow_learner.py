@@ -27,7 +27,7 @@ MANUAL_MIN_TRADES = 5
 OWN_OUTCOMES = 40
 MAIN_OUTCOMES = 20
 # Params whose None means "use the main bot's value frozen at the shadow's start" (not "feature off")
-INHERITED = ("breakeven_pct", "max_positions", "risk_per_trade_pct", "trailing_atr_mult")
+INHERITED = ("breakeven_pct", "max_positions", "risk_per_trade_pct", "trailing_atr_mult", "regime_filter")
 OUTCOME_FIELDS = ("ticker", "pnl_pct", "r_multiple", "hold_days", "exit_reason", "score", "entry_type")
 
 SYSTEM_PROMPT = (

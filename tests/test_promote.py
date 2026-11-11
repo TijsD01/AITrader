@@ -354,6 +354,7 @@ _SLOT_NOTE = ("Risk per trade only switches the risk cap on or off while RISK_BU
 
 @pytest.mark.parametrize("base,risk_changes,expect_note", [
     ("slot", True, True), ("portfolio", True, False), ("slot", False, False),
+    (" Portfolio ", True, False), ("off", True, False), ("", True, True),
 ])
 async def test_preview_notes_slot_risk_budget(client, monkeypatch, base, risk_changes, expect_note):
     monkeypatch.setattr(settings, "RISK_BUDGET_BASE", base)

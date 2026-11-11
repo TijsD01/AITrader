@@ -436,8 +436,18 @@ async def test_learner_moves_param_inherited_from_main_from_its_effective_value(
 async def test_learner_leaves_feature_off_params_alone_when_none(_learner):
     await _freeze(breakeven_pct=0.025)
     await _add_closed(10)
-    _learner.return_value = {"changes": {"reward_risk": 3.0, "max_hold_days": 30, "regime_filter": True}}
+    _learner.return_value = {"changes": {"reward_risk": 3.0, "max_hold_days": 30}}
     res = await shadow_learner.learn(KEY)
     assert res["changes"] == {}
     p = _params()
-    assert p["reward_risk"] is None and p["max_hold_days"] is None and p["regime_filter"] is None
+    assert p["reward_risk"] is None and p["max_hold_days"] is None
+
+
+async def test_learner_can_flip_an_inherited_regime_filter(_learner):
+    await _freeze(breakeven_pct=0.025)
+    await _add_closed(10)
+    assert _params()["regime_filter"] is None  # inherits the main bot's value (off in tests)
+    _learner.return_value = {"changes": {"regime_filter": True}}
+    res = await shadow_learner.learn(KEY)
+    assert res["changes"] == {"regime_filter": {"old": None, "new": True}}
+    assert _params()["regime_filter"] is True

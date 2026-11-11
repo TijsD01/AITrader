@@ -94,7 +94,9 @@ async def preview(key: str) -> Dict[str, Any]:
         blocked_reason = str(e)
     risky = _risky_flags(now, after)
     notes = []
-    if settings.RISK_BUDGET_BASE != "portfolio" and now["risk_per_trade_pct"] != after["risk_per_trade_pct"]:
+    # Same normalisation as risk.py
+    slot_base = (settings.RISK_BUDGET_BASE or "slot").strip().lower() == "slot"
+    if slot_base and now["risk_per_trade_pct"] != after["risk_per_trade_pct"]:
         notes.append(SLOT_RISK_NOTE)
     params = [{"name": name, "label": SPECS[name].label if name in SPECS else "Score threshold",
                "current": now[name], "after": after[name], "changed": now[name] != after[name]}
