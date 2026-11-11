@@ -167,8 +167,8 @@ document.addEventListener('click', (e) => {
     case 'undo-shadow-change': undoShadowChange(el.dataset.key || '', Number(el.dataset.id)); break;
     case 'promote-shadow': openPromoteDialog(el.dataset.key || ''); break;
     case 'confirm-promote': confirmPromote(); break;
-    case 'revert-main-rules': revertMainRules(); break;
-    case 'resume-main-learner': resumeMainLearner(); break;
+    case 'revert-main-rules': revertMainRules(el); break;
+    case 'resume-main-learner': resumeMainLearner(el); break;
     case 'open-ticker': openTickerSheet(ticker, el.dataset.source || ''); break;
     default: break;
   }
@@ -3561,7 +3561,7 @@ const PROMOTE_RISK_TEXT = {
   trigger_min_score: 'Lower score threshold: the bot takes clearly more setups than now.',
 };
 const PROMOTE_CONFIRM_TEXT = 'PROMOTE LIVE';
-const promoteState = { key: null, label: '', needsText: false, blocked: false, busy: false, opening: false };
+const promoteState = { key: null, label: '', needsText: false, blocked: false, busy: false, opening: false, shown: {} };
 
 // One main rule value as the owner reads it (fractions as %, flags On/Off, null per rule)
 function formatRuleValue(name, v) {
@@ -3589,6 +3589,54 @@ function syncPromoteConfirm() {
   btn.textContent = promoteState.busy ? 'Applying…' : 'Confirm';
 }
 
+// Fills the sheet from a preview. Blocked and no-change previews get no Confirm (a no-change promote would
+// overwrite the Revert target with the promoted rules).
+function renderPromotePreview(p) {
+  const blocked = !!p.blocked;
+  const noChange = !blocked && p.has_changes === false;
+  Object.assign(promoteState, { label: p.label || promoteState.key, needsText: !!p.needs_confirm_text, blocked: blocked || noChange, shown: {} });
+  document.getElementById('prTitle').textContent = `Use '${promoteState.label}' for the main bot?`;
+  const mode = document.getElementById('prMode');
+  mode.textContent = p.live ? 'LIVE: real money' : 'Paper';
+  mode.className = `ui-badge mt-1 ${p.live ? 'ui-badge-loss' : ''}`;
+
+  // Changed rows first, so nothing that changes sits below the fold on a phone
+  const params = [...(p.params || [])].sort((a, b) => Number(!!b.changed) - Number(!!a.changed));
+  const raw = v => (v === null || v === undefined ? 'None' : String(v));
+  const rows = params.map(r => {
+    let now = formatRuleValue(r.name, r.current);
+    let after = formatRuleValue(r.name, r.after);
+    if (r.changed) {
+      promoteState.shown[r.name] = r.after;
+      if (now === after) { now = raw(r.current); after = raw(r.after); } // rounding must never hide a change
+    }
+    return `
+    <tr class="${r.changed ? 'is-changed' : ''}">
+      <th scope="row">${r.changed ? '<span class="sr-only">Changed: </span>' : ''}${esc(r.label)}</th>
+      <td>${esc(now)}</td>
+      <td>${esc(after)}</td>
+    </tr>`;
+  }).join('');
+  const risky = (p.risky_flags || []).map(f => `<li><i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i><span>${esc(PROMOTE_RISK_TEXT[f] || f)}</span></li>`).join('');
+  document.getElementById('prBody').innerHTML = `
+    <p class="text-sm" style="color:var(--text-2)">New trades will use these rules. Open positions and pending triggers keep their current levels.</p>
+    ${blocked ? `<p class="ui-notice ui-notice-danger pr-blocked">${esc(p.blocked_reason || 'This promote cannot be done.')}</p>` : ''}
+    ${noChange ? '<p class="ui-notice pr-blocked pr-nochange">These rules match the main bot already.</p>' : ''}
+    ${risky ? `<ul class="pr-risks" aria-label="Riskier than now">${risky}</ul>` : ''}
+    <table class="pr-table">
+      <caption class="sr-only">Main bot rules now and after this change</caption>
+      <thead><tr><th scope="col">Parameter</th><th scope="col">Main now</th><th scope="col">After</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    ${p.needs_confirm_text && !promoteState.blocked ? `<div class="se-field">
+      <label class="ui-label" for="prConfirmText">Type PROMOTE LIVE to confirm</label>
+      <input id="prConfirmText" class="ui-input" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+    </div>` : ''}`;
+  document.getElementById('prConfirm').classList.toggle('hidden', promoteState.blocked);
+  document.getElementById('prCancel').textContent = promoteState.blocked ? 'Close' : 'Cancel';
+  syncPromoteConfirm();
+}
+
 async function openPromoteDialog(key) {
   const dlg = document.getElementById('promoteDialog');
   if (!dlg || !key || promoteState.opening || dlg.open) return;
@@ -3602,42 +3650,14 @@ async function openPromoteDialog(key) {
   } finally {
     promoteState.opening = false;
   }
-  Object.assign(promoteState, { key, label: p.label || key, needsText: !!p.needs_confirm_text, blocked: !!p.blocked, busy: false });
-  document.getElementById('prTitle').textContent = `Use '${promoteState.label}' for the main bot?`;
-  const mode = document.getElementById('prMode');
-  mode.textContent = p.live ? 'LIVE: real money' : 'Paper';
-  mode.className = `ui-badge mt-1 ${p.live ? 'ui-badge-loss' : ''}`;
-
-  // Changed rows first, so nothing that changes sits below the fold on a phone
-  const params = [...(p.params || [])].sort((a, b) => Number(!!b.changed) - Number(!!a.changed));
-  const rows = params.map(r => `
-    <tr class="${r.changed ? 'is-changed' : ''}">
-      <th scope="row">${r.changed ? '<span class="sr-only">Changed: </span>' : ''}${esc(r.label)}</th>
-      <td>${esc(formatRuleValue(r.name, r.current))}</td>
-      <td>${esc(formatRuleValue(r.name, r.after))}</td>
-    </tr>`).join('');
-  const risky = (p.risky_flags || []).map(f => `<li><i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i><span>${esc(PROMOTE_RISK_TEXT[f] || f)}</span></li>`).join('');
-  document.getElementById('prBody').innerHTML = `
-    <p class="text-sm" style="color:var(--text-2)">New trades will use these rules. Open positions and pending triggers keep their current levels.</p>
-    ${p.blocked ? `<p class="ui-notice ui-notice-danger pr-blocked">${esc(p.blocked_reason || 'This promote cannot be done.')}</p>` : ''}
-    ${risky ? `<ul class="pr-risks" aria-label="Riskier than now">${risky}</ul>` : ''}
-    ${p.has_changes === false ? '<p class="text-sm ui-muted">These rules match the main bot already.</p>' : ''}
-    <table class="pr-table">
-      <caption class="sr-only">Main bot rules now and after this change</caption>
-      <thead><tr><th scope="col">Parameter</th><th scope="col">Main now</th><th scope="col">After</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-    ${p.needs_confirm_text && !p.blocked ? `<div class="se-field">
-      <label class="ui-label" for="prConfirmText">Type PROMOTE LIVE to confirm</label>
-      <input id="prConfirmText" class="ui-input" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
-    </div>` : ''}`;
+  Object.assign(promoteState, { key, busy: false });
+  renderPromotePreview(p);
   document.getElementById('prError').classList.add('hidden');
-  document.getElementById('prConfirm').classList.toggle('hidden', promoteState.blocked);
-  document.getElementById('prCancel').textContent = promoteState.blocked ? 'Close' : 'Cancel';
-  syncPromoteConfirm();
   dlg.classList.remove('is-closing');
   dlg.showModal();
-  (document.getElementById('prConfirmText') || dlg.querySelector('[data-pr-close]')).focus();
+  // Start at the top so the mode badge and risk lines are seen before anything can be typed
+  dlg.querySelector('[data-pr-close]').focus({ preventScroll: true });
+  dlg.querySelector('.ts-panel').scrollTop = 0;
 }
 
 function closePromoteDialog() {
@@ -3658,19 +3678,32 @@ async function confirmPromote() {
   err.classList.add('hidden');
   promoteState.busy = true;
   syncPromoteConfirm();
+  let res;
   try {
-    await shadowApi('POST', `/api/shadow/${encodeURIComponent(promoteState.key)}/promote`, { confirm: true, confirm_text: input ? input.value : '' });
+    res = await shadowApi('POST', `/api/shadow/${encodeURIComponent(promoteState.key)}/promote`, { confirm: true, confirm_text: input ? input.value : '' });
   } catch (e) {
     err.textContent = e.message;
     err.classList.remove('hidden');
+    // The preview may be stale (e.g. the server now wants the typed text): show the current one, error kept
+    try { renderPromotePreview(await shadowApi('GET', `/api/shadow/${encodeURIComponent(promoteState.key)}/promote/preview`)); }
+    catch (e2) { console.warn('Could not refresh promote preview:', e2); }
     promoteState.busy = false;
     syncPromoteConfirm();
+    if (!document.activeElement || document.activeElement.offsetParent === null || document.activeElement.disabled) {
+      (document.getElementById('prConfirmText') || document.getElementById('prCancel')).focus();
+    }
     return;
   }
+  // Did the server write what the table showed?
+  const changes = (res && res.changes) || {};
+  const shown = promoteState.shown || {};
+  const same = Object.keys(changes).length === Object.keys(shown).length
+    && Object.entries(changes).every(([n, c]) => n in shown && JSON.stringify(c.new) === JSON.stringify(shown[n]));
   // Re-render before closing, so focus returns to the card's new button
   await Promise.all([loadShadow(), loadMainRulesBanner()]);
   promoteState.busy = false;
-  showToast(`Main bot now uses rules from ${promoteState.label}.`);
+  showToast(same ? `Main bot now uses rules from ${promoteState.label}.`
+    : `Main bot now uses rules from ${promoteState.label}. Some values changed since the preview; check the banner and Settings.`);
   closePromoteDialog();
 }
 
@@ -3717,8 +3750,9 @@ async function loadMainRulesBanner() {
   }
 }
 
-async function mainRulesAction(btnAction, question, url, done) {
+async function mainRulesAction(btn, btnAction, question, url, done) {
   if (!confirm(question)) return;
+  const mount = btn && btn.closest('[data-main-rules-banner]');
   document.querySelectorAll(`[data-action="${btnAction}"]`).forEach(b => { b.disabled = true; });
   try {
     await shadowApi('POST', url);
@@ -3727,14 +3761,22 @@ async function mainRulesAction(btnAction, question, url, done) {
     showToast(e.message, true);
   }
   await Promise.all([loadMainRulesBanner(), loadShadow()]);
+  // The clicked button is gone now: put focus on the banner, or on a stable spot in the same tab
+  if (!mount) return;
+  const tab = mount.closest('.tab-content');
+  const target = !mount.hidden ? mount
+    : (tab && (tab.querySelector('[data-action="new-shadow"]') || tab.querySelector('h2')));
+  if (!target) return;
+  if (!target.matches('button')) target.setAttribute('tabindex', '-1');
+  target.focus();
 }
 
-function revertMainRules() {
-  return mainRulesAction('revert-main-rules', 'Revert the main bot to its previous rules?', '/api/main/rules/revert', 'Main bot rules reverted.');
+function revertMainRules(btn) {
+  return mainRulesAction(btn, 'revert-main-rules', 'Revert the main bot to its previous rules?', '/api/main/rules/revert', 'Main bot rules reverted.');
 }
 
-function resumeMainLearner() {
-  return mainRulesAction('resume-main-learner', 'Resume auto-calibration? It may change the promoted values.', '/api/main/learner/resume', 'Auto-calibration resumed.');
+function resumeMainLearner(btn) {
+  return mainRulesAction(btn, 'resume-main-learner', 'Resume auto-calibration? It may change the promoted values.', '/api/main/learner/resume', 'Auto-calibration resumed.');
 }
 
 // Strength slider commits on release; history loads the first time its panel opens

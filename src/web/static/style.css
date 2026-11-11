@@ -940,3 +940,6 @@ input[type="range"].se-range:disabled { cursor: not-allowed; }
 .mr-banner-text { flex: 1 1 14rem; margin: 0; font-size: 14px; line-height: 1.45; color: var(--text); }
 .mr-banner-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .mr-banner-actions .ui-btn { min-height: 44px; }
+/* Title and mode badge stay on screen while the table scrolls */
+#promoteDialog .ts-head { position: sticky; top: calc(-1 * max(12px, env(safe-area-inset-top))); z-index: 1; margin-top: calc(-1 * max(12px, env(safe-area-inset-top))); padding: max(12px, env(safe-area-inset-top)) 0 10px; background: var(--surface); border-bottom: 1px solid var(--line-soft); }
+.pr-nochange { color: var(--text); }
