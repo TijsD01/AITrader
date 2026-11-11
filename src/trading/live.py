@@ -943,11 +943,6 @@ class LiveBroker(BaseBroker):
 
             utc_now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
-            # The main rule set that planned this entry: passed in, or carried by the trigger that filled
-            if rules_version is None and trigger_id:
-                fired = await session.get(OrderTrigger, trigger_id)
-                rules_version = fired.rules_version if fired else None
-
             # Record live position in database
             new_pos = Position(
                 ticker=ticker.upper(),
@@ -1753,7 +1748,8 @@ class LiveBroker(BaseBroker):
                         consensus_score=t.consensus_score or 80,
                         rationale=f"Live Trigger #{t.id} Hit ({t.trigger_type} @ {t.target_price})",
                         is_manual=False,
-                        trigger_id=t.id
+                        trigger_id=t.id,
+                        rules_version=t.rules_version
                     )
                     if trade_res.get("success"):
                         t.status = "TRIGGERED"
@@ -1809,7 +1805,7 @@ class LiveBroker(BaseBroker):
             price_native=price, stop_loss_native=trigger.stop_loss, take_profit_native=trigger.take_profit,
             rationale=f"Resting order #{trigger.id} filled ({trigger.trigger_type} @ {trigger.target_price})",
             consensus_score=trigger.consensus_score or 80, broker_order_id=trigger.broker_order_id,
-            trigger_id=trigger.id,
+            trigger_id=trigger.id, rules_version=trigger.rules_version,
         )
         return [dict(res, trigger_id=trigger.id)]
 

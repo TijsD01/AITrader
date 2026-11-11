@@ -1,6 +1,8 @@
 import logging
 import asyncio
 import datetime
+import html
+import math
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
@@ -58,16 +60,21 @@ class TradingScheduler:
         return evaluate_trigger_verdict(report, trigger_min_score, rules=rules).allowed
 
     @staticmethod
-    def _entry_levels(report: Dict[str, Any], price: float, rules) -> tuple:
+    def _entry_levels(ticker: str, report: Dict[str, Any], price: float, rules) -> Optional[tuple]:
         """
         (trigger_type, entry, stop, target) for an automated entry. A promoted rule set reshapes the levels
         (plan_entry; trigger_type may become MARKET). Default rules skip plan_entry, so levels match today exactly.
+        None when the shaped entry has no usable stop (missing, not finite, <= 0 or not below the entry): no entry then.
         """
         levels = derive_trigger_levels(report, price)
         if rules is None or is_default_shape(rules):
             return levels
         plan = plan_entry(rules.as_strategy(), *levels, price)
-        return plan["trigger_type"], plan["target_price"], plan["stop_loss"], plan["take_profit"]
+        entry, stop = plan["target_price"], plan["stop_loss"]
+        if stop is None or not math.isfinite(stop) or not math.isfinite(entry) or not 0 < stop < entry:
+            logger.info(f"No entry for {ticker}: main rules v{rules.version} leave no usable stop (entry {entry}, stop {stop}).")
+            return None
+        return plan["trigger_type"], entry, stop, plan["take_profit"]
 
     @staticmethod
     def _rules_kwargs(rules) -> Dict[str, Any]:
@@ -84,12 +91,17 @@ class TradingScheduler:
         """
         fresh = await asyncio.to_thread(market_data_provider.get_stock_data, ticker)
         price = (fresh or {}).get("price")
-        # Same invalidation as a pending trigger: no quote, or the price already through the stop or target
-        if not price or price <= 0 or (stop_loss and price <= stop_loss) or (take_profit and price >= take_profit):
+        # Same invalidation as a pending trigger, and never without a stop: no quote, or the price through the stop or target
+        if not price or price <= 0 or not stop_loss or price <= stop_loss or (take_profit and price >= take_profit):
             return {"success": False, "message": f"No market entry for {ticker}: price {price} vs stop {stop_loss} / target {take_profit}."}
         # The trigger monitor's lock: a market entry never overlaps a trigger fill or a stop check
         async with self._monitor_lock:
-            return await paper_broker.execute_buy(
+            try:
+                # Same as monitor_price_triggers before it fires: size the buy on the broker's current cash
+                await paper_broker.sync_cash_balance()
+            except Exception as e:
+                logger.error(f"Cash balance sync failed, continuing with last known balance: {e}")
+            res = await paper_broker.execute_buy(
                 ticker=ticker,
                 name=data.get("name", ticker),
                 price_native=price,
@@ -102,6 +114,18 @@ class TradingScheduler:
                 is_manual=False,
                 rules_version=rules.version
             )
+        if res.get("success"):
+            mode = "LIVE" if res.get("is_live") else "PAPER"
+            await telegram_bot.send_message(
+                f"🚀 <b>MARKET ENTRY EXECUTED ({mode})</b>\n\n"
+                f"<b>Asset:</b> <code>{html.escape(ticker)}</code>\n"
+                f"<b>Price:</b> {res.get('price_native')}\n"
+                f"<b>Shares Bought:</b> {res.get('shares')}\n"
+                f"<b>Total Cost:</b> €{res.get('total_eur') or 0:,.2f}\n"
+                f"<b>Stop Loss:</b> {stop_loss} | <b>Take Profit:</b> {take_profit}\n\n"
+                f"<i>Bought at market under main rules v{rules.version}; the position is open in the {mode} portfolio.</i>"
+            )
+        return res
 
     @staticmethod
     async def _save_report(ticker: str, report: Dict[str, Any]) -> AnalysisReport:
@@ -519,9 +543,12 @@ class TradingScheduler:
                             # Same slot the dashboard shows once the trigger is pending
                             alloc_eur = entry_allocation_from_summary(curr_summary, ticker, data["currency"])
 
-                            trigger_type, trigger_price, sl, tp = self._entry_levels(report, data["price"], rules)
+                            levels = self._entry_levels(ticker, report, data["price"], rules)
+                            trigger_type, trigger_price, sl, tp = levels or (None, None, None, None)
 
-                            if alloc_eur < 20.0:
+                            if levels is None:
+                                report["status_type"] = "ON_RADAR"
+                            elif alloc_eur < 20.0:
                                 logger.info(f"Skipping trigger for {ticker}: no free position slot or unreserved cash left.")
                                 report["status_type"] = "INSUFFICIENT_CASH"
                             elif not self._fits_whole_share(alloc_eur, trigger_price, data["currency"], sl,
@@ -535,7 +562,6 @@ class TradingScheduler:
                                     report["status_type"] = "BOUGHT"
                                     if session.upper() in ("OPEN", "MANUAL_SCAN", "REVIEW"):  # the close digest lists sells only
                                         executed_trades.append(buy_res)
-                                    await telegram_bot.notify_trigger_executed({**buy_res, "trigger_type": "MARKET"})
                                 else:
                                     logger.info(f"Market entry for {ticker} not placed: {buy_res.get('message')}")
                                     report["status_type"] = "ON_RADAR"
@@ -813,11 +839,14 @@ class TradingScheduler:
                     if self._should_arm_trigger(report, trigger_min_score, rules):
                         regime_ok, regime_msg = await asyncio.to_thread(check_market_regime, tk, data.get("currency"))
                         alloc = entry_allocation_from_summary(summary, tk, data["currency"])
-                        t_type, t_price, sl, tp = self._entry_levels(report, data["price"], rules)
+                        levels = self._entry_levels(tk, report, data["price"], rules)
+                        t_type, t_price, sl, tp = levels or (None, None, None, None)
 
                         # Skip arming, but still let the shadow portfolios see the verdict below
                         if not regime_ok:
                             logger.info(f"Opportunity Scanner skipped {tk}: {regime_msg}")
+                        elif levels is None:
+                            pass  # _entry_levels logged why
                         elif alloc < 20.0:
                             logger.info(f"Opportunity Scanner skipped {tk}: no free position slot or unreserved cash left.")
                         elif not self._fits_whole_share(alloc, t_price, data["currency"], sl,
@@ -828,7 +857,6 @@ class TradingScheduler:
                             if buy_res.get("success"):
                                 open_tickers.add(tk)
                                 logger.info(f"Opportunity Scanner bought {tk} at market (Score {report['consensus_score']}/100, main rules v{rules.version})")
-                                await telegram_bot.notify_trigger_executed({**buy_res, "trigger_type": "MARKET"})
                                 armed = True
                             else:
                                 logger.info(f"Opportunity Scanner market entry for {tk} not placed: {buy_res.get('message')}")

@@ -252,11 +252,6 @@ class PaperBroker(BaseBroker):
             if new_cash_eur < 0.0:
                 return {"success": False, "message": f"Execution halted: cash balance cannot be negative (€{new_cash_eur:.2f})."}
 
-            # The main rule set that planned this entry: passed in, or carried by the trigger that fired
-            if rules_version is None and trigger_id:
-                fired = await session.get(OrderTrigger, trigger_id)
-                rules_version = fired.rules_version if fired else None
-
             # Create Position
             new_pos = Position(
                 ticker=ticker.upper(),
@@ -965,7 +960,8 @@ class PaperBroker(BaseBroker):
                         consensus_score=t.consensus_score or 75,
                         rationale=f"AI Trigger #{t.id} Hit ({t.trigger_type} @ {t.target_price}): {t.ai_rationale}",
                         is_manual=False,
-                        trigger_id=t.id
+                        trigger_id=t.id,
+                        rules_version=t.rules_version
                     )
                     if trade_res.get("success"):
                         t.status = "TRIGGERED"

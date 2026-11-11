@@ -107,6 +107,11 @@ async def _positions():
         return res.scalars().all()
 
 
+async def _trades():
+    async with AsyncSessionLocal() as s:
+        return (await s.execute(select(Trade).where(Trade.ticker == TICKER))).scalars().all()
+
+
 # --- Verdict gate -------------------------------------------------------------------------------
 
 async def test_default_rules_give_the_same_verdict_as_no_rules():
@@ -276,6 +281,8 @@ async def test_ignore_risk_veto_with_kill_switch_on_places_nothing(monkeypatch):
         await _run_session(_report(approved=False, sl=90.0))
     assert len(results) == 1 and "kill switch" in results[0]["message"].lower()
     assert await _positions() == []
+    assert await _pending() == []
+    assert await _trades() == []
 
     # Trigger entry: the trigger may arm (as today), but firing it buys nothing
     await write_main_rules({"entry_mode": "trigger"}, promoted_from="test")
@@ -302,6 +309,7 @@ async def test_ignore_risk_veto_still_fails_validate_buy_order(monkeypatch):
         await _run_session(_report(approved=False, sl=90.0))
     assert await _positions() == []
     assert await _pending() == []
+    assert await _trades() == []
     assert all(not r["success"] for r in results)
 
     # A check only validate_buy_order makes (automated buying paused): the buy is attempted and refused there
@@ -365,3 +373,124 @@ async def test_opportunity_scan_market_entry_buys_through_execute_buy():
     assert pos.rules_version == version
     assert await _pending() == []
     assert follow.await_args.kwargs["followed_main"] is True
+
+
+# --- Fix round 1: a shaped entry must keep a usable stop ------------------------------------------
+
+async def test_shaped_stop_lost_by_stop_scale_arms_nothing():
+    await write_main_rules({"stop_scale": 2.0}, promoted_from="test")  # (95 - 40) x 2 = 110 > 95: no stop left
+    await _run_session(_report(entry=95.0, sl=40.0, tp=110.0))
+    assert await _pending() == []
+    assert await _positions() == []
+
+
+async def test_shaped_stop_lost_in_market_mode_buys_nothing():
+    await write_main_rules({"stop_scale": 2.0, "entry_mode": "market"}, promoted_from="test")
+    spy = AsyncMock(wraps=paper_broker.execute_buy)
+    with patch.object(paper_broker, "execute_buy", spy):
+        await _run_session(_report(entry=95.0, sl=40.0, tp=110.0))
+    assert spy.await_count == 0
+    assert await _positions() == []
+    assert await _trades() == []
+    assert await _pending() == []
+
+
+async def test_shaped_stop_lost_by_deep_pullback_arms_nothing():
+    await write_main_rules({"pullback_scale": 1.5}, promoted_from="test")  # entry 100 - 40 x 1.5 = 40, stop 40 - 50 < 0
+    await _run_session(_report(entry=60.0, sl=10.0, tp=110.0))
+    assert await _pending() == []
+    assert await _positions() == []
+
+
+async def test_ignore_risk_veto_with_stop_that_shapes_away_arms_nothing():
+    await write_main_rules({"ignore_risk_veto": True, "stop_scale": 2.0}, promoted_from="test")
+    report = _report(approved=False, entry=95.0, sl=40.0)
+    assert evaluate_trigger_verdict(report, 80, rules=await get_main_rules()).allowed  # the committee stop passes the gate
+    await _run_session(report)
+    assert await _pending() == []
+    assert await _positions() == []
+
+
+# --- Fix round 1: rules_version reaches the position from the trigger caller, not a lookup --------
+
+async def test_rules_trigger_fill_carries_its_version_and_default_fill_stays_null():
+    version = await write_main_rules({"pullback_scale": 0.5}, promoted_from="test")
+    await _run_session(_report(entry=95.0, sl=90.0, tp=110.0))
+    (trig,) = await _pending()
+    assert trig.rules_version == version
+    with patch("src.trading.paper.market_data_provider.get_stock_data", return_value=_stock(97.0)):
+        await paper_broker.check_and_execute_triggers()
+    (pos,) = await _positions()
+    assert pos.rules_version == version
+    await _clean_ticker()
+
+    async with AsyncSessionLocal() as s:
+        await s.execute(delete(SystemConfig).where(SystemConfig.key.like("MAIN\\_%", escape="\\")))
+        await s.commit()
+    await _run_session(_report(entry=95.0, sl=90.0, tp=110.0))
+    (trig,) = await _pending()
+    assert trig.rules_version is None
+    with patch("src.trading.paper.market_data_provider.get_stock_data", return_value=_stock(94.0)):
+        await paper_broker.check_and_execute_triggers()
+    (pos,) = await _positions()
+    assert pos.rules_version is None
+
+
+async def test_execute_buy_does_not_look_up_the_trigger_for_rules_version():
+    # Structural: a trigger row that carries a version is not read by execute_buy; only the caller's argument counts
+    await write_main_rules({"pullback_scale": 0.5}, promoted_from="test")
+    await _run_session(_report(entry=95.0, sl=90.0, tp=110.0))
+    (trig,) = await _pending()
+    assert trig.rules_version is not None
+    res = await paper_broker.execute_buy(
+        ticker=TICKER, name="Main Parity", price_native=97.0, currency="EUR", stop_loss_native=91.25,
+        take_profit_native=110.0, allocation_eur=trig.allocation_eur, consensus_score=85, rationale="t",
+        is_manual=False, trigger_id=trig.id)
+    assert res["success"]
+    (pos,) = await _positions()
+    assert pos.rules_version is None
+
+
+# --- Fix round 1: regime filter, cash sync, notification -------------------------------------------
+
+async def test_regime_filter_blocks_market_entry():
+    await write_main_rules({"entry_mode": "market", "regime_filter": True}, promoted_from="test")
+    assert settings.REGIME_FILTER_ENABLED is True
+    falling = {"above_sma": False, "price": 90.0, "sma": 100.0, "sma_days": 200}
+    spy = AsyncMock(wraps=paper_broker.execute_buy)
+    with patch("src.data.market.market_data_provider.get_index_regime", return_value=falling), \
+         patch.object(paper_broker, "execute_buy", spy):
+        await _run_session(_report())
+    assert spy.await_count == 0
+    assert await _positions() == []
+    assert await _pending() == []
+
+
+async def test_market_entry_syncs_cash_then_buys_and_notifies_as_market_entry():
+    await write_main_rules({"entry_mode": "market"}, promoted_from="test")
+    order = []
+    real_buy = paper_broker.execute_buy
+
+    async def buy(**kw):
+        order.append("buy")
+        return await real_buy(**kw)
+
+    async def sync():
+        order.append("sync")
+
+    sent = AsyncMock()
+    with patch.object(paper_broker, "sync_cash_balance", side_effect=sync), \
+         patch.object(paper_broker, "execute_buy", side_effect=buy), \
+         patch("src.scheduler.jobs.telegram_bot.send_message", sent):
+        await _run_session(_report())
+    assert order == ["sync", "buy"]
+    texts = [c.args[0] for c in sent.await_args_list if "MARKET ENTRY" in c.args[0]]
+    assert len(texts) == 1
+    assert "TRIGGER HIT" not in texts[0] and "PAPER" in texts[0]
+
+
+async def test_market_entry_survives_a_failed_cash_sync():
+    await write_main_rules({"entry_mode": "market"}, promoted_from="test")
+    with patch.object(paper_broker, "sync_cash_balance", AsyncMock(side_effect=RuntimeError("broker down"))):
+        await _run_session(_report())
+    assert len(await _positions()) == 1  # same as the trigger monitor: log and continue with the last balance
