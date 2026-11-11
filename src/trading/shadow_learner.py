@@ -14,10 +14,10 @@ from sqlalchemy import select
 from config.settings import settings
 from src.agents.base import LLMClient
 from src.db import session as db_session
-from src.db.models import ShadowPosition, ShadowStrategyRow
+from src.db.models import ShadowAccount, ShadowPosition, ShadowStrategyRow
 from src.memory.models import L1Atom
 from src.memory.store import memory_store
-from src.trading.shadow import apply_param_change, get_strategies, learning_strengths
+from src.trading.shadow import ShadowPortfolios, apply_param_change, get_strategies, learning_strengths
 from src.trading.strategy_params import SPECS, clamp_step
 
 logger = logging.getLogger(__name__)
@@ -26,6 +26,8 @@ MAX_CHANGES = 3
 MANUAL_MIN_TRADES = 5
 OWN_OUTCOMES = 40
 MAIN_OUTCOMES = 20
+# Params whose None means "use the main bot's value frozen at the shadow's start" (not "feature off")
+INHERITED = ("breakeven_pct", "max_positions", "risk_per_trade_pct", "trailing_atr_mult")
 OUTCOME_FIELDS = ("ticker", "pnl_pct", "r_multiple", "hold_days", "exit_reason", "score", "entry_type")
 
 SYSTEM_PROMPT = (
@@ -91,14 +93,26 @@ def _ranges() -> List[str]:
     return lines
 
 
-def _guard(reply: dict, params: dict, strength: int) -> dict:
+async def _inherited(strategy) -> dict:
+    """Working values of the INHERITED params the strategy leaves at None (the main bot's frozen values)."""
+    async with db_session.AsyncSessionLocal() as session:
+        acc = await session.get(ShadowAccount, strategy.key)
+    eff = ShadowPortfolios._effective(strategy, acc or ShadowAccount(frozen_params={}))
+    return {k: eff[k] for k in INHERITED if getattr(strategy, k) is None}
+
+
+def _guard(reply: dict, params: dict, strength: int, inherited: dict = None) -> dict:
     """Clamped proposals that differ from the current value. Takes the first MAX_CHANGES entries before filtering,
-    so junk entries cannot make room for a 4th real change."""
+    so junk entries cannot make room for a 4th real change. inherited: working values clamped from where a
+    param is None."""
+    inherited = inherited or {}
     kept = {}
     for name, value in list(reply["changes"].items())[:MAX_CHANGES]:
         if name not in SPECS or not SPECS[name].learnable:
             continue
         old = params.get(name)
+        if old is None:
+            old = inherited.get(name)
         new = clamp_step(name, old, value, strength)
         if new != old:
             kept[name] = new
@@ -142,7 +156,7 @@ class ShadowLearner:
             return _result(False, True, f"{new} new closed trades; learning starts at {settings.SHADOW_LEARN_MIN_TRADES}")
 
         stats = {"since_last_learn": compute_stats(closed[:new]), "all": compute_stats(closed)}
-        params = strategy.to_params()
+        params = {**strategy.to_params(), **await _inherited(strategy)}
         user_prompt = await self._prompt(key, params, stats)
         try:
             reply = await self.llm.generate_json(SYSTEM_PROMPT, user_prompt)
@@ -157,7 +171,7 @@ class ShadowLearner:
         strength = learning_strengths().get(key, 0)
         if strategy is None or strength <= 0:
             return _result(False, True, "Strategy was deleted, disabled or set to strength 0 during the LLM call")
-        kept = _guard(reply, strategy.to_params(), strength)
+        kept = _guard(reply, strategy.to_params(), strength, await _inherited(strategy))
         reason = reply.get("reason")
         reason = reason[:500] if isinstance(reason, str) else ""
         changes = {}

@@ -327,3 +327,38 @@ async def test_promote_equal_rules_still_records_and_pauses(client):
     r = await client.post("/api/shadow/baseline/promote", json={"confirm": True})
     assert r.status_code == 200
     assert (await get_main_rules()).promoted_from == "baseline" and await _main_learner_paused() is True
+
+
+async def test_write_failure_with_failed_pause_restore_still_raises_original_error(monkeypatch):
+    async def bad_write(*a, **kw):
+        raise ValueError("bad rules")
+    real_set_pause = promote_module._set_pause
+    calls = []
+
+    async def set_pause(value):
+        calls.append(value)
+        if len(calls) > 1:  # the restore after the failed write
+            raise RuntimeError("db locked")
+        await real_set_pause(value)
+    monkeypatch.setattr(promote_module, "write_main_rules", bad_write)
+    monkeypatch.setattr(promote_module, "_set_pause", set_pause)
+    with pytest.raises(ValueError, match="bad rules"):
+        await promote_module.promote("aggressive", confirm=True)
+    assert len(calls) == 2
+
+
+_SLOT_NOTE = ("Risk per trade only switches the risk cap on or off while RISK_BUDGET_BASE is \"slot\". "
+              "Position sizes will not match this shadow's; set RISK_BUDGET_BASE=portfolio to size by % of portfolio "
+              "at the stop.")
+
+
+@pytest.mark.parametrize("base,risk_changes,expect_note", [
+    ("slot", True, True), ("portfolio", True, False), ("slot", False, False),
+])
+async def test_preview_notes_slot_risk_budget(client, monkeypatch, base, risk_changes, expect_note):
+    monkeypatch.setattr(settings, "RISK_BUDGET_BASE", base)
+    risk = round(settings.RISK_PER_TRADE_PCT + 0.5, 1) if risk_changes else None
+    await create_strategy("Risky One", {"risk_per_trade_pct": risk})
+    preview = (await client.get("/api/shadow/risky_one/promote/preview")).json()
+    assert _param(preview, "risk_per_trade_pct")["changed"] is risk_changes
+    assert preview["notes"] == ([_SLOT_NOTE] if expect_note else [])

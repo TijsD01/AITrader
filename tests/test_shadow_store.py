@@ -31,6 +31,8 @@ async def _fresh_store(monkeypatch):
     monkeypatch.setattr(settings, "SHADOW_STRATEGIES", "baseline,aggressive")
     monkeypatch.setattr(settings, "SHADOW_CUSTOM_STRATEGIES", "")
     monkeypatch.setattr(settings, "SHADOW_INITIAL_CAPITAL", 10000.0)
+    # Tests lower the cap by plain assignment; monkeypatch restores it so later modules see the default
+    monkeypatch.setattr(settings, "SHADOW_MAX_STRATEGIES", settings.SHADOW_MAX_STRATEGIES)
     async with AsyncSessionLocal() as session:
         for model in (ShadowStrategyRow, ShadowPosition, ShadowTrigger, ShadowSnapshot, ShadowAccount):
             await session.execute(delete(model))
@@ -163,3 +165,14 @@ async def test_job_waiting_on_lock_does_not_resurrect_deleted_strategy():
     for model in (ShadowAccount, ShadowTrigger):
         async with AsyncSessionLocal() as session:
             assert (await session.execute(select(model).where(model.strategy == key))).scalars().all() == []
+
+
+async def test_delete_removes_change_history_so_a_recreated_label_starts_clean():
+    key = await create_strategy("Gone Soon", PRESETS["baseline"].to_params())
+    await apply_param_change(key, {"stop_scale": 1.3}, source="user")
+    [old] = [r for r in await _rows(ShadowParamChange) if r.strategy == key]
+    assert await delete_strategy(key) is True
+    assert await create_strategy("Gone Soon", PRESETS["baseline"].to_params()) == key
+    assert [r for r in await _rows(ShadowParamChange) if r.strategy == key] == []
+    with pytest.raises(LookupError):
+        await undo_param_change(old.id)

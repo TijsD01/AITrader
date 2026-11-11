@@ -27,6 +27,9 @@ PAUSE_KEY = "MAIN_LEARNER_PAUSED"
 CONFIRM_TEXT = "PROMOTE LIVE"
 # Changes that need the typed text in LIVE, in the order they are reported
 RISKY_FLAGS = ("ignore_risk_veto", "accept_hold", "entry_mode", "risk_per_trade_pct", "regime_filter", "trigger_min_score")
+SLOT_RISK_NOTE = ("Risk per trade only switches the risk cap on or off while RISK_BUDGET_BASE is \"slot\". "
+                  "Position sizes will not match this shadow's; set RISK_BUDGET_BASE=portfolio to size by % of "
+                  "portfolio at the stop.")
 RISKY_THRESHOLD_DROP = 5  # lowering the score threshold by this many points or more is risky
 # No main value to inherit: None is a real setting here ("no fixed R target / no R breakeven / no % trail / no time exit")
 _NONE_IS_A_SETTING = ("reward_risk", "breakeven_r", "trailing_stop_pct", "max_hold_days")
@@ -90,6 +93,9 @@ async def preview(key: str) -> Dict[str, Any]:
     except ValueError as e:
         blocked_reason = str(e)
     risky = _risky_flags(now, after)
+    notes = []
+    if settings.RISK_BUDGET_BASE != "portfolio" and now["risk_per_trade_pct"] != after["risk_per_trade_pct"]:
+        notes.append(SLOT_RISK_NOTE)
     params = [{"name": name, "label": SPECS[name].label if name in SPECS else "Score threshold",
                "current": now[name], "after": after[name], "changed": now[name] != after[name]}
               for name in MainRules.RULE_FIELDS]
@@ -97,7 +103,7 @@ async def preview(key: str) -> Dict[str, Any]:
         "key": strategy.key, "label": strategy.label, "live": live,
         "risky_flags": risky, "needs_confirm_text": live and bool(risky),
         "params": params, "has_changes": any(p["changed"] for p in params),
-        "blocked": bool(blocked_reason), "blocked_reason": blocked_reason,
+        "blocked": bool(blocked_reason), "blocked_reason": blocked_reason, "notes": notes,
     }
 
 
@@ -171,7 +177,10 @@ async def promote(key: str, confirm: Any, confirm_text: Any = "") -> Dict[str, A
     try:
         version = await write_main_rules(after, promoted_from=key, live=live)  # ValueError: nothing written
     except Exception:
-        await _set_pause(paused_before)
+        try:
+            await _set_pause(paused_before)
+        except Exception:  # never mask the write error the caller must see
+            logger.critical(f"Promote of '{key}': could not restore the learner pause after a failed write.")
         raise
     changes = {n: {"old": now[n], "new": after[n]} for n in MainRules.RULE_FIELDS if now[n] != after[n]}
     try:

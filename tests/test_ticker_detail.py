@@ -232,3 +232,24 @@ async def test_not_held_ticker_never_calls_t212(seeded, monkeypatch):
     _t212(monkeypatch, client)
     data = (await _get("/api/ticker/ZZNOPE/detail")).json()  # no user holding, no open live position
     assert client.calls == 0 and data["price_source"] == "yahoo"
+
+
+@pytest.mark.parametrize("rules_version,expected", [(5, 110.0), (4, 102.5), (None, 102.5)])
+async def test_breakeven_uses_promoted_rules_for_positions_opened_under_them(seeded, monkeypatch, rules_version, expected):
+    import dataclasses
+    from src.trading import main_strategy
+    rules = dataclasses.replace(await main_strategy.get_main_rules(), breakeven_r=1.0, version=5)
+
+    async def fake_rules():
+        return rules
+    monkeypatch.setattr(main_strategy, "get_main_rules", fake_rules)
+    async with db_session.AsyncSessionLocal() as s:
+        await s.execute(delete(Position).where(Position.ticker == T))
+        p = _position(False, 100.0, 95.0)
+        p.initial_stop_native, p.rules_version = 90.0, rules_version
+        s.add(p)
+        await s.commit()
+    data = (await _get(f"/api/ticker/{T}/detail")).json()
+    pos = [s for s in data["level_sets"] if s["kind"] == "position"][0]
+    # breakeven_r 1.0 x the 10-point initial stop distance = +10% for the active version; else the % row (2.5%)
+    assert pos["levels"]["breakeven_at"] == expected

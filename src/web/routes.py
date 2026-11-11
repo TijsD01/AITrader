@@ -1042,6 +1042,8 @@ async def get_ticker_detail(ticker: str, range: str = "3M"):
     Only side effect: active_broker.get_triggers() may re-adjust pending triggers, as the Triggers tab does.
     """
     from src.db.models import ShadowPosition, ShadowTrigger
+    from src.trading import main_strategy
+    from src.trading.levels import effective_breakeven_pct
     from src.trading.shadow import PRESETS, get_strategies
 
     sym = normalize_ticker(ticker)
@@ -1068,6 +1070,8 @@ async def get_ticker_detail(ticker: str, range: str = "3M"):
         be_row = (await session.execute(
             select(SystemConfig).where(SystemConfig.key == "BREAKEVEN_TRIGGER_PCT"))).scalars().first()
         be_pct = float(be_row.value) if be_row else 0.025
+        rules = await main_strategy.get_main_rules()
+        rules_strategy = rules.as_strategy()
 
         positions = (await session.execute(
             select(Position).where(Position.ticker == sym, Position.status == "OPEN", Position.is_live == live)
@@ -1075,8 +1079,11 @@ async def get_ticker_detail(ticker: str, range: str = "3M"):
         for p in positions:
             fallback_name, fallback_currency = fallback_name or p.name, fallback_currency or p.currency
             entry, stop = p.entry_price_native, p.stop_loss_native
+            pos_be = be_pct
+            if p.rules_version is not None and p.rules_version == rules.version:  # same rule as the brokers' ratchet
+                pos_be = effective_breakeven_pct(rules_strategy, rules.breakeven_pct, entry, p.initial_stop_native)
             # breakeven_at only matters until the stop has ratcheted up to entry
-            breakeven = round(entry * (1 + be_pct), 2) if entry and (stop is None or stop < entry) else None
+            breakeven = round(entry * (1 + pos_be), 2) if entry and (stop is None or stop < entry) else None
             level_sets.append(_level_set(
                 f"position:{p.id}", "position", "Open position", "live", status=p.status,
                 levels={"entry": entry, "stop": stop, "take_profit": p.take_profit_native,

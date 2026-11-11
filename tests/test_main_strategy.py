@@ -289,3 +289,39 @@ async def test_version_numbers_are_never_reused_when_the_version_row_is_lost(ver
         async with db_session.AsyncSessionLocal() as s:
             await s.execute(delete(Position).where(Position.id == pid))
             await s.commit()
+
+
+_ENV_OWNED_ROWS = ("MAIN_RISK_PER_TRADE_PCT", "MAIN_TRAILING_ATR_MULT", "MAIN_REGIME_FILTER")
+
+
+async def test_revert_to_owner_rules_lets_env_rule_again():
+    await write_main_rules({"risk_per_trade_pct": 1.0, "regime_filter": False}, promoted_from="a")
+    assert await revert_main_rules() is True
+    assert [await _row(k) for k in _ENV_OWNED_ROWS] == [None, None, None]
+    # The owner edits .env and restarts: the stored rules must not override it.
+    settings.RISK_PER_TRADE_PCT, settings.REGIME_FILTER_ENABLED, settings.TRAILING_STOP_ATR_MULT = 0.7, True, 2.5
+    await sync_settings_from_main_rules()
+    assert (settings.RISK_PER_TRADE_PCT, settings.REGIME_FILTER_ENABLED, settings.TRAILING_STOP_ATR_MULT) == (0.7, True, 2.5)
+
+
+async def test_revert_to_another_promoted_set_keeps_its_rows():
+    await write_main_rules({"risk_per_trade_pct": 1.0, "regime_filter": False}, promoted_from="a")
+    await write_main_rules({"risk_per_trade_pct": 0.5, "regime_filter": True}, promoted_from="b")
+    assert await revert_main_rules() is True
+    assert [await _row(k) for k in _ENV_OWNED_ROWS] == ["1.0", str(settings.TRAILING_STOP_ATR_MULT), "false"]
+
+
+async def test_next_version_starts_above_pending_trigger_versions():
+    from src.db.models import OrderTrigger
+    async with db_session.AsyncSessionLocal() as s:
+        t = OrderTrigger(ticker="RV.TRIG", target_price=1.0, current_price_at_creation=1.0, stop_loss=0.9,
+                         take_profit=1.2, allocation_eur=10.0, status="PENDING", is_live=False, rules_version=9)
+        s.add(t)
+        await s.commit()
+        tid = t.id
+    try:
+        assert await write_main_rules({"stop_scale": 1.2}, promoted_from="test") == 10
+    finally:
+        async with db_session.AsyncSessionLocal() as s:
+            await s.execute(delete(OrderTrigger).where(OrderTrigger.id == tid))
+            await s.commit()

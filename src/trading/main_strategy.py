@@ -16,7 +16,7 @@ from sqlalchemy import delete, func, select
 
 from config.settings import settings
 from src.db import session as db_session  # read AsyncSessionLocal at call time (tests rebind it)
-from src.db.models import Position, SystemConfig
+from src.db.models import OrderTrigger, Position, SystemConfig
 from src.trading.strategy_params import SPECS, validate as validate_params
 
 logger = logging.getLogger(__name__)
@@ -48,6 +48,9 @@ _KEYS: Dict[str, tuple] = {
 }
 
 # Rules that existing code reads from `settings`; kept in step so those readers follow without edits.
+# Rules with no row of their own before promote: their source of truth is .env, the stored row only a promote.
+_ENV_OWNED = ("risk_per_trade_pct", "trailing_atr_mult", "regime_filter")
+
 _SETTINGS_ATTR = {
     "trigger_min_score": "TRIGGER_MIN_SCORE",
     "max_positions": "MAX_POSITIONS",
@@ -227,8 +230,9 @@ def validate_main_rules(values: Dict[str, Any]) -> Dict[str, Any]:
 
 async def _next_version(session, stored: int) -> int:
     """Positions are matched to rules by version number, so never reuse one, even when the version row was lost."""
-    highest_used = (await session.execute(select(func.max(Position.rules_version)))).scalar() or 0
-    return max(stored, highest_used) + 1
+    highest_pos = (await session.execute(select(func.max(Position.rules_version)))).scalar() or 0
+    highest_trig = (await session.execute(select(func.max(OrderTrigger.rules_version)))).scalar() or 0
+    return max(stored, highest_pos, highest_trig) + 1
 
 
 async def _save(session, rules: Dict[str, Any], version: int, promoted_from: Optional[str], previous: Optional[str]):
@@ -285,7 +289,12 @@ async def revert_main_rules() -> bool:
             logger.warning(f"Main rules: cannot revert, {PREVIOUS_KEY} is unreadable ({e}).")
             return False
         version = await _next_version(session, _resolve(rows).version)
-        await _save(session, previous, version, promoted_from, None)
+        to_store = previous
+        if promoted_from is None:
+            # Back to the owner's own rules: drop the .env-owned rows so a later .env edit takes effect again.
+            to_store = {k: v for k, v in previous.items() if k not in _ENV_OWNED}
+            await session.execute(delete(SystemConfig).where(SystemConfig.key.in_([_KEYS[k][0] for k in _ENV_OWNED])))
+        await _save(session, to_store, version, promoted_from, None)
     _apply_settings(previous)
     logger.info(f"Main rules reverted to the previous set as v{version}.")
     return True

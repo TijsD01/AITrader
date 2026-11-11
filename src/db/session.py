@@ -138,7 +138,8 @@ async def init_db():
                 pass
         if "TRIGGER_MIN_SCORE" in db_configs:
             try:
-                settings.TRIGGER_MIN_SCORE = int(db_configs["TRIGGER_MIN_SCORE"])
+                # Same bounds the main rule resolver reads with
+                settings.TRIGGER_MIN_SCORE = min(100, max(0, int(db_configs["TRIGGER_MIN_SCORE"])))
             except Exception:
                 pass
         if "POSITION_SIZE_PCT" in db_configs:
@@ -162,7 +163,7 @@ async def init_db():
                 pass
         if "MAX_POSITIONS" in db_configs:
             try:
-                settings.MAX_POSITIONS = max(1, int(db_configs["MAX_POSITIONS"]))
+                settings.MAX_POSITIONS = min(50, max(1, int(db_configs["MAX_POSITIONS"])))
             except Exception:
                 pass
         if "TRADING_MODE" in db_configs:

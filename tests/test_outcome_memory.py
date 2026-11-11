@@ -99,6 +99,17 @@ async def test_shadow_close_survives_record_failure(shadows, monkeypatch):
     assert len(closed) == 1 and closed[0]["realized_pnl_eur"] < 0
 
 
+async def test_shadow_outcome_kept_when_position_id_is_reused_after_reset(shadows):
+    enable, reset_all = shadows
+    prices = enable(["baseline"])
+    await reset_all()
+    first = await _open_baseline_then_stop_out(prices)
+    await reset_all()  # deletes the shadow's positions, so SQLite hands out the same id again
+    second = await _open_baseline_then_stop_out(prices)
+    assert first[0]["position_id"] == second[0]["position_id"]
+    assert len(await memory_store.search_outcomes(strategy="baseline")) == 2
+
+
 # ---- main closes write outcomes ----
 import datetime  # noqa: E402
 from contextlib import contextmanager  # noqa: E402

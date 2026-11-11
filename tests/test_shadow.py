@@ -495,3 +495,28 @@ def test_effective_breakeven_pct():
     assert effective_breakeven_pct(s, 0.02, 100.0, 100.0) == 0.02
     # strategy without breakeven_r -> eff pct unchanged
     assert effective_breakeven_pct(PRESETS["baseline"], 0.02, 100.0, 92.0) == 0.02
+
+
+@pytest.mark.asyncio
+async def test_entry_type_lookup_failure_still_commits_closes(shadows):
+    enable, reset_all = shadows
+    prices = enable(["baseline"])
+    await reset_all()
+    prices["LKP.AS"] = 100.0
+    await shadow_portfolios.follow_report(_report("LKP.AS"), _data("LKP.AS"))
+    prices["LKP.AS"] = 94.0
+    assert len(await shadow_portfolios.check_triggers()) == 1
+    prices["LKP.AS"] = 89.0
+    real_select = shadow_module.select
+
+    def failing_select(*cols, **kw):
+        if cols and cols[0] is ShadowTrigger.id:
+            raise RuntimeError("lookup failed")
+        return real_select(*cols, **kw)
+
+    with patch.object(shadow_module, "select", failing_select):
+        closed = await shadow_portfolios.check_exits()
+    assert len(closed) == 1 and closed[0]["entry_type"] == "UNKNOWN"
+    async with AsyncSessionLocal() as session:
+        pos = (await session.execute(select(ShadowPosition).where(ShadowPosition.ticker == "LKP.AS"))).scalars().one()
+        assert pos.status == "CLOSED"

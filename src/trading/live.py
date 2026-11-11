@@ -2127,10 +2127,13 @@ class LiveBroker(BaseBroker):
             else:
                 pos.cost_basis_eur *= shares / pos.shares
             pos.shares = shares
-        if not pos.stop_loss_native or not pos.take_profit_native:
+        # Under promoted rules a missing target is deliberate (take-profit off); an older trigger's target is stale.
+        tp_missing = not pos.take_profit_native and pos.rules_version is None
+        if not pos.stop_loss_native or tp_missing:
             sl, tp = await self._planned_levels(session, level_ticker)
             pos.stop_loss_native = pos.stop_loss_native or sl
-            pos.take_profit_native = pos.take_profit_native or tp
+            if tp_missing:
+                pos.take_profit_native = tp
 
     async def _adopt_holding(
         self, session, ticker: str, name: str, curr_code: str, shares: float, cost_native: float, fees_eur: float,

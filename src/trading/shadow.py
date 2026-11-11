@@ -339,7 +339,7 @@ async def delete_strategy(key: str) -> bool:
             row = await session.get(ShadowStrategyRow, key)
             if not row:
                 return False
-            for model in (ShadowPosition, ShadowTrigger, ShadowSnapshot):
+            for model in (ShadowPosition, ShadowTrigger, ShadowSnapshot, ShadowParamChange):
                 await session.execute(delete(model).where(model.strategy == key))
             await session.execute(delete(ShadowAccount).where(ShadowAccount.strategy == key))
             await session.delete(row)
@@ -712,7 +712,7 @@ class ShadowPortfolios:
         for c in closed:
             try:
                 await record_outcome(
-                    source="shadow", strategy=c["strategy"], ref_id=c["position_id"], ticker=c["ticker"],
+                    source="shadow", strategy=c["strategy"], ref_id=c["outcome_ref"], ticker=c["ticker"],
                     pnl_pct=c["pnl_pct"], r_multiple=c["r_multiple"], hold_days=c["hold_days"],
                     exit_reason=c["reason"], score=c["score"], entry_type=c["entry_type"], params=c["params"],
                 )
@@ -770,9 +770,12 @@ class ShadowPortfolios:
                 wanted = {t for t in trigger_ids.values() if t is not None}
                 types = {}
                 if wanted:
-                    rows = await session.execute(
-                        select(ShadowTrigger.id, ShadowTrigger.trigger_type).where(ShadowTrigger.id.in_(wanted)))
-                    types = {i: t for i, t in rows.all()}
+                    try:  # the entry type is a label for outcome memory; never lose the closes over it
+                        rows = await session.execute(
+                            select(ShadowTrigger.id, ShadowTrigger.trigger_type).where(ShadowTrigger.id.in_(wanted)))
+                        types = {i: t for i, t in rows.all()}
+                    except Exception as e:
+                        logger.warning(f"Shadow exits: entry type lookup failed ({e}); recording UNKNOWN.")
                 for c in closed:
                     c["entry_type"] = types.get(trigger_ids[c["position_id"]]) or "UNKNOWN"
             await session.commit()
@@ -809,6 +812,8 @@ class ShadowPortfolios:
             "strategy": p.strategy, "ticker": p.ticker, "realized_pnl_eur": pnl, "reason": reason,
             "position_id": p.id, "pnl_pct": p.realized_pnl_pct, "r_multiple": r_multiple, "hold_days": hold_days,
             "score": p.consensus_score, "entry_type": "UNKNOWN", "params": {},
+            # SQLite reuses ids after a reset or delete; the open time keeps the outcome atom id unique
+            "outcome_ref": f"{p.strategy}:{p.id}:{p.opened_at.isoformat() if p.opened_at else ''}",
         }
 
     # ------------------------------------------------------------------ reporting

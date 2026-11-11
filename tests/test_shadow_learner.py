@@ -410,3 +410,34 @@ async def test_manual_refresh_schedules_learning_only_after_exits(monkeypatch, e
     if sl._learn_task is not None:
         await sl._learn_task
     assert shadow_learner.learn_due.await_count == (1 if expect_learn else 0)
+
+
+async def _freeze(**frozen):
+    from src.db.models import ShadowAccount
+    async with AsyncSessionLocal() as session:
+        session.add(ShadowAccount(strategy=KEY, cash_eur=10000.0, initial_capital_eur=10000.0, frozen_params=frozen))
+        await session.commit()
+
+
+async def test_learner_moves_param_inherited_from_main_from_its_effective_value(_learner):
+    await _freeze(breakeven_pct=0.025)
+    await _add_closed(10)
+    assert _params()["breakeven_pct"] is None  # baseline inherits the main bot's value
+    _learner.return_value = {"changes": {"breakeven_pct": 0.05}, "reason": "let winners breathe"}
+    res = await shadow_learner.learn(KEY)
+    new = _params()["breakeven_pct"]
+    # medium strength = 10% of the 0.005..0.10 learn range = 0.0095 per step
+    assert 0.025 < new <= 0.025 + 0.0095
+    assert res["changes"] == {"breakeven_pct": {"old": None, "new": new}}
+    _, user = _learner.await_args.args
+    assert '"breakeven_pct": 0.025' in user.split("Current values: ")[1].split("\n")[0]
+
+
+async def test_learner_leaves_feature_off_params_alone_when_none(_learner):
+    await _freeze(breakeven_pct=0.025)
+    await _add_closed(10)
+    _learner.return_value = {"changes": {"reward_risk": 3.0, "max_hold_days": 30, "regime_filter": True}}
+    res = await shadow_learner.learn(KEY)
+    assert res["changes"] == {}
+    p = _params()
+    assert p["reward_risk"] is None and p["max_hold_days"] is None and p["regime_filter"] is None
