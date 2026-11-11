@@ -120,6 +120,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initChart();
   applyTheme();
   loadAllData();
+  loadMainRulesBanner();
   switchTabUi('portfolio');
   updateMoreButton('portfolio');
   initFolds();
@@ -164,6 +165,10 @@ document.addEventListener('click', (e) => {
     case 'copy-shadow': copyShadow(el.dataset.key || ''); break;
     case 'delete-shadow': deleteShadow(el.dataset.key || ''); break;
     case 'undo-shadow-change': undoShadowChange(el.dataset.key || '', Number(el.dataset.id)); break;
+    case 'promote-shadow': openPromoteDialog(el.dataset.key || ''); break;
+    case 'confirm-promote': confirmPromote(); break;
+    case 'revert-main-rules': revertMainRules(); break;
+    case 'resume-main-learner': resumeMainLearner(); break;
     case 'open-ticker': openTickerSheet(ticker, el.dataset.source || ''); break;
     default: break;
   }
@@ -3102,6 +3107,7 @@ function renderShadowStrategy(s, mainLabel) {
         <button type="button" class="ui-btn ui-btn-sm" data-action="copy-shadow" data-key="${esc(s.key)}"><i class="fa-regular fa-copy" aria-hidden="true"></i> Copy</button>
         <button type="button" class="ui-btn ui-btn-sm" data-action="reset-shadow" data-key="${esc(s.key)}"><i class="fa-solid fa-rotate-left" aria-hidden="true"></i> Reset</button>
         <button type="button" class="ui-btn ui-btn-sm" data-action="delete-shadow" data-key="${esc(s.key)}" data-label="${esc(s.label)}"><i class="fa-regular fa-trash-can" aria-hidden="true"></i> Delete</button>
+        <button type="button" class="ui-btn ui-btn-sm sh-promote" data-action="promote-shadow" data-key="${esc(s.key)}"><i class="fa-solid fa-arrow-up-from-bracket" aria-hidden="true"></i> Use for main bot</button>
       </div>
       <div class="flex flex-wrap gap-1.5">${shadowParamChips(s.params || {})}</div>
       ${shadowStrengthControl(s)}
@@ -3542,6 +3548,194 @@ async function saveShadowEditor() {
     if (val && input) val.textContent = el.checked ? 'main bot' : input.value;
   });
 })();
+
+// ------------------------------------------------------------------
+// Promote: copy a shadow's rules onto the main bot (before/after sheet), and the banner while promoted rules are active
+// ------------------------------------------------------------------
+const PROMOTE_RISK_TEXT = {
+  ignore_risk_veto: 'Ignore risk veto: the bot will buy even when the Risk Officer rejected the trade.',
+  accept_hold: 'Act on HOLD: the bot will also buy on HOLD verdicts that clear the score threshold.',
+  entry_mode: 'Buy at market: the bot buys right away instead of waiting for a pullback or breakout.',
+  risk_per_trade_pct: 'Higher risk per trade: each trade can lose more at its stop (or the risk cap is switched off).',
+  regime_filter: 'Regime filter off: the bot also opens trades while the market index is below its average.',
+  trigger_min_score: 'Lower score threshold: the bot takes clearly more setups than now.',
+};
+const PROMOTE_CONFIRM_TEXT = 'PROMOTE LIVE';
+const promoteState = { key: null, label: '', needsText: false, blocked: false, busy: false, opening: false };
+
+// One main rule value as the owner reads it (fractions as %, flags On/Off, null per rule)
+function formatRuleValue(name, v) {
+  if (v === null || v === undefined) return { reward_risk: 'No fixed target', trailing_stop_pct: 'Off', max_hold_days: 'No limit', breakeven_r: 'Off' }[name] || 'Main default';
+  if (typeof v === 'boolean') return v ? 'On' : 'Off';
+  if (name === 'entry_mode') return v === 'market' ? 'Buy at market' : 'Wait for trigger';
+  const n = Number(v);
+  if (!Number.isFinite(n)) return String(v);
+  const trim = (x, d) => String(Number(x.toFixed(d)));
+  switch (name) {
+    case 'breakeven_pct': case 'trailing_stop_pct': return `${trim(n * 100, 2)}%`;
+    case 'risk_per_trade_pct': return n === 0 ? 'Off (no cap)' : `${trim(n, 2)}%`;
+    case 'trailing_atr_mult': return n === 0 ? 'Off' : `${trim(n, 2)}× ATR`;
+    case 'pullback_scale': case 'stop_scale': return `×${trim(n, 2)}`;
+    case 'reward_risk': case 'breakeven_r': return `${trim(n, 2)}R`;
+    case 'max_hold_days': return `${n} days`;
+    default: return trim(n, 2);
+  }
+}
+
+function syncPromoteConfirm() {
+  const btn = document.getElementById('prConfirm');
+  const input = document.getElementById('prConfirmText');
+  btn.disabled = promoteState.busy || (promoteState.needsText && (!input || input.value !== PROMOTE_CONFIRM_TEXT));
+  btn.textContent = promoteState.busy ? 'Applying…' : 'Confirm';
+}
+
+async function openPromoteDialog(key) {
+  const dlg = document.getElementById('promoteDialog');
+  if (!dlg || !key || promoteState.opening || dlg.open) return;
+  promoteState.opening = true;
+  let p;
+  try {
+    p = await shadowApi('GET', `/api/shadow/${encodeURIComponent(key)}/promote/preview`);
+  } catch (e) {
+    showToast(e.message, true);
+    return;
+  } finally {
+    promoteState.opening = false;
+  }
+  Object.assign(promoteState, { key, label: p.label || key, needsText: !!p.needs_confirm_text, blocked: !!p.blocked, busy: false });
+  document.getElementById('prTitle').textContent = `Use '${promoteState.label}' for the main bot?`;
+  const mode = document.getElementById('prMode');
+  mode.textContent = p.live ? 'LIVE: real money' : 'Paper';
+  mode.className = `ui-badge mt-1 ${p.live ? 'ui-badge-loss' : ''}`;
+
+  // Changed rows first, so nothing that changes sits below the fold on a phone
+  const params = [...(p.params || [])].sort((a, b) => Number(!!b.changed) - Number(!!a.changed));
+  const rows = params.map(r => `
+    <tr class="${r.changed ? 'is-changed' : ''}">
+      <th scope="row">${r.changed ? '<span class="sr-only">Changed: </span>' : ''}${esc(r.label)}</th>
+      <td>${esc(formatRuleValue(r.name, r.current))}</td>
+      <td>${esc(formatRuleValue(r.name, r.after))}</td>
+    </tr>`).join('');
+  const risky = (p.risky_flags || []).map(f => `<li><i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i><span>${esc(PROMOTE_RISK_TEXT[f] || f)}</span></li>`).join('');
+  document.getElementById('prBody').innerHTML = `
+    <p class="text-sm" style="color:var(--text-2)">New trades will use these rules. Open positions and pending triggers keep their current levels.</p>
+    ${p.blocked ? `<p class="ui-notice ui-notice-danger pr-blocked">${esc(p.blocked_reason || 'This promote cannot be done.')}</p>` : ''}
+    ${risky ? `<ul class="pr-risks" aria-label="Riskier than now">${risky}</ul>` : ''}
+    ${p.has_changes === false ? '<p class="text-sm ui-muted">These rules match the main bot already.</p>' : ''}
+    <table class="pr-table">
+      <caption class="sr-only">Main bot rules now and after this change</caption>
+      <thead><tr><th scope="col">Parameter</th><th scope="col">Main now</th><th scope="col">After</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    ${p.needs_confirm_text && !p.blocked ? `<div class="se-field">
+      <label class="ui-label" for="prConfirmText">Type PROMOTE LIVE to confirm</label>
+      <input id="prConfirmText" class="ui-input" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+    </div>` : ''}`;
+  document.getElementById('prError').classList.add('hidden');
+  document.getElementById('prConfirm').classList.toggle('hidden', promoteState.blocked);
+  document.getElementById('prCancel').textContent = promoteState.blocked ? 'Close' : 'Cancel';
+  syncPromoteConfirm();
+  dlg.classList.remove('is-closing');
+  dlg.showModal();
+  (document.getElementById('prConfirmText') || dlg.querySelector('[data-pr-close]')).focus();
+}
+
+function closePromoteDialog() {
+  const dlg = document.getElementById('promoteDialog');
+  if (!dlg || !dlg.open || dlg.classList.contains('is-closing') || promoteState.busy) return;
+  dlg.classList.add('is-closing');
+  let done = false;
+  const finish = () => { if (done) return; done = true; dlg.classList.remove('is-closing'); dlg.close(); };
+  dlg.addEventListener('animationend', e => { if (e.target === dlg) finish(); }, { once: true });
+  setTimeout(finish, 250);
+}
+
+async function confirmPromote() {
+  const btn = document.getElementById('prConfirm');
+  if (promoteState.busy || promoteState.blocked || btn.disabled) return;
+  const input = document.getElementById('prConfirmText');
+  const err = document.getElementById('prError');
+  err.classList.add('hidden');
+  promoteState.busy = true;
+  syncPromoteConfirm();
+  try {
+    await shadowApi('POST', `/api/shadow/${encodeURIComponent(promoteState.key)}/promote`, { confirm: true, confirm_text: input ? input.value : '' });
+  } catch (e) {
+    err.textContent = e.message;
+    err.classList.remove('hidden');
+    promoteState.busy = false;
+    syncPromoteConfirm();
+    return;
+  }
+  // Re-render before closing, so focus returns to the card's new button
+  await Promise.all([loadShadow(), loadMainRulesBanner()]);
+  promoteState.busy = false;
+  showToast(`Main bot now uses rules from ${promoteState.label}.`);
+  closePromoteDialog();
+}
+
+(function initPromoteDialog() {
+  const dlg = document.getElementById('promoteDialog');
+  if (!dlg) return;
+  dlg.addEventListener('cancel', e => { e.preventDefault(); closePromoteDialog(); });
+  // The card may have been re-rendered meanwhile: find its button again by key
+  dlg.addEventListener('close', () => {
+    const btn = promoteState.key && document.querySelector(`[data-action="promote-shadow"][data-key="${CSS.escape(promoteState.key)}"]`);
+    if (btn) btn.focus();
+  });
+  dlg.addEventListener('click', e => {
+    if (e.target === dlg || e.target.closest('[data-pr-close]')) closePromoteDialog();
+  });
+  dlg.addEventListener('input', e => { if (e.target.id === 'prConfirmText') syncPromoteConfirm(); });
+  dlg.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && e.target.id === 'prConfirmText') { e.preventDefault(); confirmPromote(); }
+  });
+})();
+
+function renderMainRulesBanner(st) {
+  const html = st && st.promoted_from ? `
+    <div class="ui-card ui-card-pad mr-banner">
+      <i class="fa-solid fa-code-branch mr-banner-icon" aria-hidden="true"></i>
+      <p class="mr-banner-text">Main bot uses rules from ${esc(st.promoted_label || st.promoted_from)}. ${st.learner_paused ? 'Auto-calibration paused.' : 'Auto-calibration is running.'}</p>
+      <div class="mr-banner-actions">
+        ${st.can_revert ? '<button type="button" class="ui-btn ui-btn-sm" data-action="revert-main-rules"><i class="fa-solid fa-rotate-left" aria-hidden="true"></i> Revert</button>' : ''}
+        ${st.learner_paused ? '<button type="button" class="ui-btn ui-btn-sm" data-action="resume-main-learner"><i class="fa-solid fa-play" aria-hidden="true"></i> Resume calibration</button>' : ''}
+      </div>
+    </div>` : '';
+  document.querySelectorAll('[data-main-rules-banner]').forEach(el => {
+    el.innerHTML = html;
+    el.hidden = !html;
+  });
+}
+
+async function loadMainRulesBanner() {
+  try {
+    renderMainRulesBanner(await shadowApi('GET', '/api/main/rules'));
+  } catch (e) {
+    renderMainRulesBanner(null); // no banner and no toast on every page load
+    console.warn('Could not load main rules status:', e);
+  }
+}
+
+async function mainRulesAction(btnAction, question, url, done) {
+  if (!confirm(question)) return;
+  document.querySelectorAll(`[data-action="${btnAction}"]`).forEach(b => { b.disabled = true; });
+  try {
+    await shadowApi('POST', url);
+    showToast(done);
+  } catch (e) {
+    showToast(e.message, true);
+  }
+  await Promise.all([loadMainRulesBanner(), loadShadow()]);
+}
+
+function revertMainRules() {
+  return mainRulesAction('revert-main-rules', 'Revert the main bot to its previous rules?', '/api/main/rules/revert', 'Main bot rules reverted.');
+}
+
+function resumeMainLearner() {
+  return mainRulesAction('resume-main-learner', 'Resume auto-calibration? It may change the promoted values.', '/api/main/learner/resume', 'Auto-calibration resumed.');
+}
 
 // Strength slider commits on release; history loads the first time its panel opens
 document.addEventListener('input', e => {
