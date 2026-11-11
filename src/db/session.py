@@ -172,6 +172,10 @@ async def init_db():
 
         await session.commit()
 
+    # Rules promoted onto the main bot (risk per trade, ATR trail, regime filter, ...) live in MAIN_* rows.
+    from src.trading import main_strategy  # lazy: main_strategy imports this module
+    await main_strategy.sync_settings_from_main_rules()
+
 
 
 async def set_kill_switch(active: bool) -> bool:

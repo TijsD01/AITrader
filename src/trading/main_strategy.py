@@ -149,6 +149,19 @@ def _parse(kind: str, raw: str):
     return raw
 
 
+def _check_range(name: str, v):
+    """Raise ValueError when a stored value is outside what the money logic can safely use."""
+    if name == "trigger_min_score":
+        if not 0 <= v <= 100:
+            raise ValueError("must be between 0 and 100")
+    elif name == "max_positions":
+        if not 1 <= v <= 50:  # the settings route writes up to 50, wider than the shadow schema
+            raise ValueError("must be between 1 and 50")
+    else:
+        validate_params({name: v})
+    return v
+
+
 def _dump(v) -> str:
     if v is None:
         return ""
@@ -168,7 +181,7 @@ def _resolve(rows: Dict[str, str]) -> MainRules:
     for name, (key, kind) in _KEYS.items():
         if key in rows:
             try:
-                values[name] = _parse(kind, rows[key])
+                values[name] = _check_range(name, _parse(kind, rows[key]))
             except (ValueError, TypeError):
                 logger.warning(f"Main rules: bad {key} value {rows[key]!r}; using default {values[name]!r}.")
     version = 0
@@ -198,8 +211,8 @@ def _clean(values: Dict[str, Any]) -> Dict[str, Any]:
     clean.update(validate_params({k: v for k, v in values.items() if k in SPECS}))
     if "trigger_min_score" in clean:
         v = clean["trigger_min_score"]
-        if isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= 100:
-            raise ValueError("trigger_min_score: must be an integer between 0 and 100")
+        if isinstance(v, bool) or not isinstance(v, int) or not 50 <= v <= 100:
+            raise ValueError("trigger_min_score: must be an integer between 50 and 100")
     for name, v in clean.items():
         if v is None and not _KEYS[name][1].startswith("opt_"):
             raise ValueError(f"{name}: may not be empty")
@@ -251,7 +264,8 @@ async def revert_main_rules() -> bool:
             return False
         try:
             stored = json.loads(raw)
-            previous = {name: stored[name] for name in _KEYS}
+            # Same parse and range checks as a read: an out-of-range stored value reverts to its default.
+            previous = _resolve({key: _dump(stored[name]) for name, (key, _) in _KEYS.items()}).rules()
         except (ValueError, TypeError, KeyError) as e:
             logger.warning(f"Main rules: cannot revert, {PREVIOUS_KEY} is unreadable ({e}).")
             return False
@@ -260,3 +274,11 @@ async def revert_main_rules() -> bool:
     _apply_settings(previous)
     logger.info(f"Main rules reverted to the previous set as v{version}.")
     return True
+
+
+async def sync_settings_from_main_rules() -> None:
+    """At startup, put the stored main rules into `settings` so risk.py and the brokers read the same values."""
+    try:
+        _apply_settings((await get_main_rules()).rules())
+    except Exception as e:
+        logger.warning(f"Main rules: could not apply to settings at startup ({e}).")

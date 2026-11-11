@@ -13,6 +13,7 @@ from src.trading.main_strategy import (
     get_main_rules,
     is_default_shape,
     revert_main_rules,
+    sync_settings_from_main_rules,
     write_main_rules,
 )
 
@@ -111,6 +112,7 @@ async def test_write_sets_in_memory_settings():
     {"stop_scale": 9.0},                # out of schema bounds
     {"no_such_rule": 1},                # unknown key
     {"trigger_min_score": 101},
+    {"trigger_min_score": 49},          # a promoted threshold below 50 would arm almost every report
     {"trigger_min_score": True},
     {"max_positions": None},            # rule that may not be empty
     {"stop_scale": 1.5, "entry_mode": "limit"},  # one bad value blocks the whole write
@@ -120,6 +122,68 @@ async def test_invalid_values_write_nothing(values):
         await write_main_rules(values, promoted_from="x")
     r = await get_main_rules()
     assert r.version == 0 and r.stop_scale == 1.0 and await _row("MAIN_RULES_PREVIOUS") is None
+
+
+@pytest.mark.parametrize("key,raw,field", [
+    ("MAIN_STOP_SCALE", "1e9", "stop_scale"),
+    ("MAIN_STOP_SCALE", "0", "stop_scale"),
+    ("MAIN_STOP_SCALE", "-1", "stop_scale"),
+    ("MAIN_STOP_SCALE", "nan", "stop_scale"),
+    ("MAX_POSITIONS", "0", "max_positions"),
+    ("MAX_POSITIONS", "-3", "max_positions"),
+    ("MAX_POSITIONS", "999", "max_positions"),
+    ("MAIN_REWARD_RISK", "-1", "reward_risk"),
+    ("MAIN_PULLBACK_SCALE", "-2", "pullback_scale"),
+    ("MAIN_TRAILING_STOP_PCT", "5", "trailing_stop_pct"),
+    ("MAIN_RISK_PER_TRADE_PCT", "-1", "risk_per_trade_pct"),
+    ("TRIGGER_MIN_SCORE", "-5", "trigger_min_score"),
+    ("TRIGGER_MIN_SCORE", "150", "trigger_min_score"),
+    ("BREAKEVEN_TRIGGER_PCT", "0", "breakeven_pct"),
+])
+async def test_out_of_range_row_falls_back(key, raw, field):
+    default = getattr(await get_main_rules(), field)
+    await _set_row(key, raw)
+    assert getattr(await get_main_rules(), field) == default
+
+
+async def test_max_positions_read_allows_settings_route_range():
+    await _set_row("MAX_POSITIONS", "50")  # the settings route accepts up to 50
+    assert (await get_main_rules()).max_positions == 50
+
+
+async def test_revert_never_restores_out_of_range_values():
+    await write_main_rules({"stop_scale": 1.5}, promoted_from="x")
+    prev = json.loads(await _row("MAIN_RULES_PREVIOUS"))
+    prev["stop_scale"] = 1e9
+    await _set_row("MAIN_RULES_PREVIOUS", json.dumps(prev))
+    assert await revert_main_rules() is True
+    assert (await get_main_rules()).stop_scale == 1.0 and await _row("MAIN_STOP_SCALE") == "1.0"
+
+
+async def test_startup_sync_applies_rules_to_settings():
+    await write_main_rules({"risk_per_trade_pct": 1.0, "trailing_atr_mult": 3.0, "regime_filter": True}, promoted_from="x")
+    settings.RISK_PER_TRADE_PCT, settings.TRAILING_STOP_ATR_MULT, settings.REGIME_FILTER_ENABLED = 0.2, 1.0, False
+    await sync_settings_from_main_rules()
+    r = await get_main_rules()
+    assert (settings.RISK_PER_TRADE_PCT, settings.TRAILING_STOP_ATR_MULT, settings.REGIME_FILTER_ENABLED) == (1.0, 3.0, True)
+    assert (r.risk_per_trade_pct, r.trailing_atr_mult, r.regime_filter) == (1.0, 3.0, True)
+    assert (settings.TRIGGER_MIN_SCORE, settings.MAX_POSITIONS) == (r.trigger_min_score, r.max_positions)
+
+
+async def test_startup_sync_with_default_rules_changes_nothing():
+    before = {a: getattr(settings, a) for a in _SETTINGS}
+    await sync_settings_from_main_rules()
+    assert {a: getattr(settings, a) for a in _SETTINGS} == before
+
+
+async def test_init_db_syncs_main_rules(monkeypatch):
+    called = []
+
+    async def fake_sync():
+        called.append(True)
+    monkeypatch.setattr("src.trading.main_strategy.sync_settings_from_main_rules", fake_sync)
+    await db_session.init_db()
+    assert called == [True]
 
 
 async def test_live_write_cannot_raise_max_positions():
