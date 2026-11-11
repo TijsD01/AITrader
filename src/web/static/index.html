@@ -1086,8 +1086,9 @@
         <button type="button" class="ui-btn ui-btn-quiet ui-icon-btn" data-pr-close aria-label="Close"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
       </header>
       <div id="prBody" class="se-body"></div>
+      <!-- In the scroll area, not the sticky footer, so it never covers the confirm input -->
+      <p id="prError" class="ui-notice ui-notice-danger hidden" role="alert"></p>
       <div class="se-actions">
-        <p id="prError" class="ui-notice ui-notice-danger hidden" role="alert"></p>
         <div class="se-buttons">
           <button type="button" class="ui-btn" data-pr-close id="prCancel">Cancel</button>
           <button type="button" class="ui-btn ui-btn-primary" data-action="confirm-promote" id="prConfirm">Confirm</button>

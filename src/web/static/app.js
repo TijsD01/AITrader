@@ -3619,7 +3619,8 @@ function renderPromotePreview(p) {
   }).join('');
   const risky = (p.risky_flags || []).map(f => `<li><i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i><span>${esc(PROMOTE_RISK_TEXT[f] || f)}</span></li>`).join('');
   document.getElementById('prBody').innerHTML = `
-    <p class="text-sm" style="color:var(--text-2)">New trades will use these rules. Open positions and pending triggers keep their current levels.</p>
+    <p class="text-sm" style="color:var(--text-2)">New trades will use these rules. Open positions and pending triggers keep their current stop and target. Their stops keep trailing with the new breakeven and ATR settings.</p>
+    ${(p.notes || []).map(n => `<p class="ui-notice pr-note">${esc(n)}</p>`).join('')}
     ${blocked ? `<p class="ui-notice ui-notice-danger pr-blocked">${esc(p.blocked_reason || 'This promote cannot be done.')}</p>` : ''}
     ${noChange ? '<p class="ui-notice pr-blocked pr-nochange">These rules match the main bot already.</p>' : ''}
     ${risky ? `<ul class="pr-risks" aria-label="Riskier than now">${risky}</ul>` : ''}
@@ -3689,6 +3690,9 @@ async function confirmPromote() {
     catch (e2) { console.warn('Could not refresh promote preview:', e2); }
     promoteState.busy = false;
     syncPromoteConfirm();
+    // The error sits last before the sticky footer: scroll to the end so it and the input above it are both in view
+    const panel = document.querySelector('#promoteDialog .ts-panel');
+    panel.scrollTop = panel.scrollHeight;
     if (!document.activeElement || document.activeElement.offsetParent === null || document.activeElement.disabled) {
       (document.getElementById('prConfirmText') || document.getElementById('prCancel')).focus();
     }
