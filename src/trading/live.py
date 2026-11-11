@@ -689,7 +689,8 @@ class LiveBroker(BaseBroker):
         consensus_score: int,
         rationale: str,
         is_manual: bool = False,
-        trigger_id: Optional[int] = None
+        trigger_id: Optional[int] = None,
+        rules_version: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Submits real buy order to the brokerage API (Trading 212 / Alpaca) with real money.
@@ -727,7 +728,7 @@ class LiveBroker(BaseBroker):
                 ticker=ticker, name=name, currency=currency, shares=filled, price_native=fill_price,
                 stop_loss_native=stop_loss_native, take_profit_native=take_profit_native,
                 rationale=rationale, consensus_score=consensus_score, broker_order_id=broker_order_id,
-                trigger_id=trigger_id
+                trigger_id=trigger_id, rules_version=rules_version
             )
         await self.adjust_triggers_dynamically()
 
@@ -913,7 +914,8 @@ class LiveBroker(BaseBroker):
         rationale: str,
         consensus_score: int,
         broker_order_id: str,
-        trigger_id: Optional[int] = None
+        trigger_id: Optional[int] = None,
+        rules_version: Optional[int] = None
     ) -> Dict[str, Any]:
         """Record a filled live BUY: position, trade and snapshot. Callers hold _t212_lock (Trading 212)."""
         from src.trading.fees import calculate_broker_fee
@@ -941,6 +943,11 @@ class LiveBroker(BaseBroker):
 
             utc_now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
+            # The main rule set that planned this entry: passed in, or carried by the trigger that filled
+            if rules_version is None and trigger_id:
+                fired = await session.get(OrderTrigger, trigger_id)
+                rules_version = fired.rules_version if fired else None
+
             # Record live position in database
             new_pos = Position(
                 ticker=ticker.upper(),
@@ -962,6 +969,7 @@ class LiveBroker(BaseBroker):
                 is_live=True,
                 broker_order_id=broker_order_id,
                 trigger_id=trigger_id,
+                rules_version=rules_version,
                 opened_at=utc_now
             )
             session.add(new_pos)
@@ -1201,7 +1209,8 @@ class LiveBroker(BaseBroker):
         consensus_score: int,
         ai_rationale: str,
         report_id: Optional[int] = None,
-        forced: bool = False
+        forced: bool = False,
+        rules_version: Optional[int] = None
     ) -> Dict[str, Any]:
         """Creates an armed price trigger for live execution. report_id links it to its AnalysisReport."""
         target_price = round(target_price, 2)
@@ -1306,6 +1315,7 @@ class LiveBroker(BaseBroker):
                 ai_rationale=f"[LIVE ARMED] {ai_rationale}",
                 report_id=report_id,
                 forced=forced,
+                rules_version=rules_version,
                 status="PENDING",
                 is_live=True,
                 created_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)

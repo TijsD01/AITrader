@@ -43,6 +43,7 @@ def _run_migrations(connection):
         ("order_triggers", "forced", "BOOLEAN DEFAULT 0"),
         ("positions", "trigger_id", "INTEGER"),
         ("positions", "rules_version", "INTEGER"),
+        ("order_triggers", "rules_version", "INTEGER"),
     ]
     for table, col, col_type in migrations:
         try:

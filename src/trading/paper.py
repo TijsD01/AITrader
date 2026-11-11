@@ -135,7 +135,8 @@ class PaperBroker(BaseBroker):
         consensus_score: int,
         rationale: str,
         is_manual: bool = False,
-        trigger_id: Optional[int] = None
+        trigger_id: Optional[int] = None,
+        rules_version: Optional[int] = None
     ) -> Dict[str, Any]:
         # Check market hours (No buying when market is closed)
         is_open, open_msg = check_market_hours(ticker)
@@ -251,6 +252,11 @@ class PaperBroker(BaseBroker):
             if new_cash_eur < 0.0:
                 return {"success": False, "message": f"Execution halted: cash balance cannot be negative (€{new_cash_eur:.2f})."}
 
+            # The main rule set that planned this entry: passed in, or carried by the trigger that fired
+            if rules_version is None and trigger_id:
+                fired = await session.get(OrderTrigger, trigger_id)
+                rules_version = fired.rules_version if fired else None
+
             # Create Position
             new_pos = Position(
                 ticker=ticker.upper(),
@@ -270,6 +276,7 @@ class PaperBroker(BaseBroker):
                 unrealized_pnl_pct=0.0,
                 status="OPEN",
                 trigger_id=trigger_id,
+                rules_version=rules_version,
                 opened_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
             )
             session.add(new_pos)
@@ -576,7 +583,8 @@ class PaperBroker(BaseBroker):
         consensus_score: int,
         ai_rationale: str,
         report_id: Optional[int] = None,
-        forced: bool = False
+        forced: bool = False,
+        rules_version: Optional[int] = None
     ) -> Dict[str, Any]:
         """Creates an active pending price trigger (limit pullback or breakout order)."""
         async with AsyncSessionLocal() as session:
@@ -702,6 +710,7 @@ class PaperBroker(BaseBroker):
                 ai_rationale=ai_rationale,
                 report_id=report_id,
                 forced=forced,
+                rules_version=rules_version,
                 status="PENDING",
                 is_live=False,
                 created_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)

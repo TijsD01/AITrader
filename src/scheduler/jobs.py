@@ -22,6 +22,8 @@ from src.db.models import AnalysisReport, MarketDigest, Position, OrderTrigger, 
 from src.data.review_tracker import review_tracker
 from src.trading.risk import check_market_regime
 from src.trading.trigger_gate import evaluate_trigger_verdict, get_trigger_min_score
+from src.trading.main_strategy import get_main_rules, is_default_shape
+from src.trading.levels import plan_entry
 from src.trading.holdings import mine_tickers
 
 logger = logging.getLogger(__name__)
@@ -46,13 +48,60 @@ class TradingScheduler:
         self._monitor_lock = asyncio.Lock()
 
     @staticmethod
-    def _should_arm_trigger(report: Dict[str, Any], trigger_min_score: int) -> bool:
+    def _should_arm_trigger(report: Dict[str, Any], trigger_min_score: int, rules=None) -> bool:
         """
         Arms only a buy verdict that the Risk Officer approved and that scores at or above the threshold.
         The verdict matters on its own: when the learner raises MIN_CONSENSUS_SCORE above TRIGGER_MIN_SCORE,
         a score can clear the trigger threshold while the committee still says HOLD.
+        rules: the main rule set (accept_hold / ignore_risk_veto); None or defaults give today's gate.
         """
-        return evaluate_trigger_verdict(report, trigger_min_score).allowed
+        return evaluate_trigger_verdict(report, trigger_min_score, rules=rules).allowed
+
+    @staticmethod
+    def _entry_levels(report: Dict[str, Any], price: float, rules) -> tuple:
+        """
+        (trigger_type, entry, stop, target) for an automated entry. A promoted rule set reshapes the levels
+        (plan_entry; trigger_type may become MARKET). Default rules skip plan_entry, so levels match today exactly.
+        """
+        levels = derive_trigger_levels(report, price)
+        if rules is None or is_default_shape(rules):
+            return levels
+        plan = plan_entry(rules.as_strategy(), *levels, price)
+        return plan["trigger_type"], plan["target_price"], plan["stop_loss"], plan["take_profit"]
+
+    @staticmethod
+    def _rules_kwargs(rules) -> Dict[str, Any]:
+        """Tags a trigger with the rule set version only when non-default rules planned it."""
+        return {} if rules is None or is_default_shape(rules) else {"rules_version": rules.version}
+
+    async def _market_entry(
+        self, ticker: str, data: Dict[str, Any], stop_loss: Optional[float], take_profit: Optional[float],
+        allocation_eur: float, report: Dict[str, Any], rules
+    ) -> Dict[str, Any]:
+        """
+        Buys now (entry_mode "market") through the broker's execute_buy, the same call a fired trigger makes,
+        so sizing, validate_buy_order, fee viability, whole shares, market hours and the kill switch all decide.
+        """
+        fresh = await asyncio.to_thread(market_data_provider.get_stock_data, ticker)
+        price = (fresh or {}).get("price")
+        # Same invalidation as a pending trigger: no quote, or the price already through the stop or target
+        if not price or price <= 0 or (stop_loss and price <= stop_loss) or (take_profit and price >= take_profit):
+            return {"success": False, "message": f"No market entry for {ticker}: price {price} vs stop {stop_loss} / target {take_profit}."}
+        # The trigger monitor's lock: a market entry never overlaps a trigger fill or a stop check
+        async with self._monitor_lock:
+            return await paper_broker.execute_buy(
+                ticker=ticker,
+                name=data.get("name", ticker),
+                price_native=price,
+                currency=data["currency"],
+                stop_loss_native=stop_loss,
+                take_profit_native=take_profit,
+                allocation_eur=allocation_eur,
+                consensus_score=report["consensus_score"],
+                rationale=f"Market entry (main rules v{rules.version}): {report.get('trigger_rationale') or report['summary']}",
+                is_manual=False,
+                rules_version=rules.version
+            )
 
     @staticmethod
     async def _save_report(ticker: str, report: Dict[str, Any]) -> AnalysisReport:
@@ -76,28 +125,31 @@ class TradingScheduler:
             await db_session.commit()
             return rep_entry
 
-    async def _cancel_downgraded_triggers(self, ticker: str, report: Dict[str, Any], trigger_min_score: int) -> bool:
+    async def _cancel_downgraded_triggers(self, ticker: str, report: Dict[str, Any], trigger_min_score: int, rules=None) -> bool:
         """
         Cancels the pending trigger(s) of the active mode for `ticker` when a fresh debate would no longer arm one
         (lower score, non-buy verdict or risk veto). An old high score must not buy on a stale verdict.
         Only a trigger the user forced against a soft block (HOLD, low score) survives a soft block, and only while
         the score has not fallen below its armed score. Hard blocks (veto, SELL, below minimum) always cancel.
+        A trigger armed under promoted main rules (rules_version set) is judged by those rules; others by today's gate.
         Returns True when at least one trigger was cancelled.
         """
         verdict = evaluate_trigger_verdict(report, trigger_min_score)
         if verdict.allowed:
-            return False
+            return False  # rules only relax the gate, so a rules-armed trigger passes too
+        ruled_ok = rules is not None and evaluate_trigger_verdict(report, trigger_min_score, rules=rules).allowed
         live = get_active_broker() is live_broker
         async with AsyncSessionLocal() as db_session:
             res = await db_session.execute(
-                select(OrderTrigger.id, OrderTrigger.forced, OrderTrigger.consensus_score).where(
+                select(OrderTrigger.id, OrderTrigger.forced, OrderTrigger.consensus_score, OrderTrigger.rules_version).where(
                     OrderTrigger.ticker == ticker, OrderTrigger.status == "PENDING", OrderTrigger.is_live == live
                 )
             )
             trigger_ids = [
-                trigger_id for trigger_id, forced, armed_score in res.all()
+                trigger_id for trigger_id, forced, armed_score, rules_version in res.all()
                 if not (forced and verdict.overridable and armed_score is not None
                         and verdict.consensus_score >= armed_score)
+                and not (rules_version is not None and ruled_ok)
             ]
         reason = f"New debate no longer supports this buy: {verdict.message}"
         cancelled = False
@@ -121,6 +173,7 @@ class TradingScheduler:
         """
         result: Dict[str, List[str]] = {"kept": [], "cancelled": [], "failed": []}
         trigger_min_score = await get_trigger_min_score()
+        rules = await get_main_rules()
         live = get_active_broker() is live_broker
         since = datetime.datetime.utcnow() - datetime.timedelta(hours=settings.TRIGGER_REDEBATE_SKIP_HOURS)
         async with AsyncSessionLocal() as db_session:
@@ -150,7 +203,7 @@ class TradingScheduler:
                         investment_committee.evaluate_ticker(data, summary["total_value_eur"]), timeout=300.0
                     )
                     await self._save_report(ticker, report)
-                if await self._cancel_downgraded_triggers(ticker, report, trigger_min_score):
+                if await self._cancel_downgraded_triggers(ticker, report, trigger_min_score, rules):
                     result["cancelled"].append(f"{ticker} ({report['consensus_score']}/100)")
                     continue
                 result["kept"].append(f"{ticker} ({report['consensus_score']}/100)")
@@ -393,6 +446,7 @@ class TradingScheduler:
 
             # Fetch existing open positions and pending triggers to enforce anti-overlap
             trigger_min_score = settings.TRIGGER_MIN_SCORE
+            rules = await get_main_rules()  # once per session: entry rules for every candidate below
             async with AsyncSessionLocal() as db_session:
                 open_tickers, pending_tickers = await _tickers_in_use(db_session)
                 # The user's own holdings are never evaluated, shadowed or reported
@@ -440,13 +494,13 @@ class TradingScheduler:
                         logger.info(f"Skipping trigger for {ticker}: position already open (anti-overlap).")
                         report["status_type"] = "ALREADY_HELD"
                     elif ticker in pending_tickers:
-                        if await self._cancel_downgraded_triggers(ticker, report, trigger_min_score):
+                        if await self._cancel_downgraded_triggers(ticker, report, trigger_min_score, rules):
                             pending_tickers.discard(ticker)
                             report["status_type"] = "TRIGGER_CANCELLED"
                         else:
                             logger.info(f"Skipping trigger for {ticker}: pending trigger already active (anti-overlap).")
                             report["status_type"] = "TRIGGER_PENDING"
-                    elif self._should_arm_trigger(report, trigger_min_score):
+                    elif self._should_arm_trigger(report, trigger_min_score, rules):
                         # Automatically arm trigger for approved buy setups scoring >= 80
                         curr_summary = await paper_broker.get_portfolio_summary()
                         available_cash = curr_summary.get("available_cash_eur", 0.0)
@@ -465,7 +519,7 @@ class TradingScheduler:
                             # Same slot the dashboard shows once the trigger is pending
                             alloc_eur = entry_allocation_from_summary(curr_summary, ticker, data["currency"])
 
-                            trigger_type, trigger_price, sl, tp = derive_trigger_levels(report, data["price"])
+                            trigger_type, trigger_price, sl, tp = self._entry_levels(report, data["price"], rules)
 
                             if alloc_eur < 20.0:
                                 logger.info(f"Skipping trigger for {ticker}: no free position slot or unreserved cash left.")
@@ -474,6 +528,17 @@ class TradingScheduler:
                                                             curr_summary.get("total_value_eur", 0.0), available_cash):
                                 logger.info(f"Skipping trigger for {ticker}: one share costs more than the €{alloc_eur:.2f} allocation after the risk cap.")
                                 report["status_type"] = "SHARE_TOO_EXPENSIVE"
+                            elif trigger_type == "MARKET":
+                                buy_res = await self._market_entry(ticker, data, sl, tp, alloc_eur, report, rules)
+                                if buy_res.get("success"):
+                                    open_tickers.add(ticker)
+                                    report["status_type"] = "BOUGHT"
+                                    if session.upper() in ("OPEN", "MANUAL_SCAN", "REVIEW"):  # the close digest lists sells only
+                                        executed_trades.append(buy_res)
+                                    await telegram_bot.notify_trigger_executed({**buy_res, "trigger_type": "MARKET"})
+                                else:
+                                    logger.info(f"Market entry for {ticker} not placed: {buy_res.get('message')}")
+                                    report["status_type"] = "ON_RADAR"
                             else:
                                 trig_res = await paper_broker.create_price_trigger(
                                     ticker=ticker,
@@ -487,7 +552,8 @@ class TradingScheduler:
                                     allocation_eur=alloc_eur,
                                     consensus_score=report["consensus_score"],
                                     ai_rationale=report.get("trigger_rationale", report["summary"]),
-                                    report_id=rep_entry.id
+                                    report_id=rep_entry.id,
+                                    **self._rules_kwargs(rules)
                                 )
                                 if trig_res.get("success"):
                                     pending_tickers.add(ticker)
@@ -502,7 +568,7 @@ class TradingScheduler:
                         report["status_type"] = "ON_RADAR"
 
                     await shadow_portfolios.follow_report(
-                        report, data, followed_main=report.get("status_type") == "TRIGGER_ARMED"
+                        report, data, followed_main=report.get("status_type") in ("TRIGGER_ARMED", "BOUGHT")
                     )
                     reports.append(report)
                 except asyncio.TimeoutError:
@@ -720,6 +786,7 @@ class TradingScheduler:
 
                 open_tickers, pending_tickers = await _tickers_in_use(db_session)
                 mine = await mine_tickers(db_session)
+            rules = await get_main_rules()  # once per scan
 
             extra = await market_scanner.load_watchlist_tickers()
             for mkt in active_markets:
@@ -743,10 +810,10 @@ class TradingScheduler:
                     reused = investment_committee.cached_report(tk, settings.SCAN_REPORT_REUSE_MINUTES * 60)
                     report = reused or await investment_committee.evaluate_ticker(data, summary["total_value_eur"])
                     armed = False
-                    if self._should_arm_trigger(report, trigger_min_score):
+                    if self._should_arm_trigger(report, trigger_min_score, rules):
                         regime_ok, regime_msg = await asyncio.to_thread(check_market_regime, tk, data.get("currency"))
                         alloc = entry_allocation_from_summary(summary, tk, data["currency"])
-                        t_type, t_price, sl, tp = derive_trigger_levels(report, data["price"])
+                        t_type, t_price, sl, tp = self._entry_levels(report, data["price"], rules)
 
                         # Skip arming, but still let the shadow portfolios see the verdict below
                         if not regime_ok:
@@ -756,6 +823,15 @@ class TradingScheduler:
                         elif not self._fits_whole_share(alloc, t_price, data["currency"], sl,
                                                         summary.get("total_value_eur", 0.0), avail):
                             logger.info(f"Opportunity Scanner skipped {tk}: one share costs more than the €{alloc:.2f} allocation after the risk cap.")
+                        elif t_type == "MARKET":
+                            buy_res = await self._market_entry(tk, data, sl, tp, alloc, report, rules)
+                            if buy_res.get("success"):
+                                open_tickers.add(tk)
+                                logger.info(f"Opportunity Scanner bought {tk} at market (Score {report['consensus_score']}/100, main rules v{rules.version})")
+                                await telegram_bot.notify_trigger_executed({**buy_res, "trigger_type": "MARKET"})
+                                armed = True
+                            else:
+                                logger.info(f"Opportunity Scanner market entry for {tk} not placed: {buy_res.get('message')}")
                         else:
                             trig_res = await paper_broker.create_price_trigger(
                                 ticker=tk,
@@ -768,7 +844,8 @@ class TradingScheduler:
                                 take_profit=tp,
                                 allocation_eur=alloc,
                                 consensus_score=report["consensus_score"],
-                                ai_rationale=report.get("trigger_rationale", report["summary"])
+                                ai_rationale=report.get("trigger_rationale", report["summary"]),
+                                **self._rules_kwargs(rules)
                             )
                             if trig_res.get("success"):
                                 pending_tickers.add(tk)

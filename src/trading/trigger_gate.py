@@ -6,6 +6,7 @@ a hard block (Risk Officer veto, SELL verdict, falling market, share too expensi
 """
 import asyncio
 import logging
+import math
 import re
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, Optional
@@ -85,11 +86,27 @@ def _short(text: Any) -> str:
     return text if len(text) <= _MAX_REASON_CHARS else text[:_MAX_REASON_CHARS - 3].rstrip() + "..."
 
 
-def evaluate_trigger_verdict(report: Dict[str, Any], trigger_min_score: int, force: bool = False) -> TriggerGateResult:
+def _has_stop_below_entry(report: Dict[str, Any]) -> bool:
+    """True when the report carries a stop level above zero and below its entry price."""
+    try:
+        stop = float((report.get("risk") or {}).get("stop_loss_price") or 0)
+        entry = float(report.get("entry_trigger_price") or report.get("price") or 0)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(stop) and math.isfinite(entry) and 0 < stop < entry
+
+
+def evaluate_trigger_verdict(
+    report: Dict[str, Any], trigger_min_score: int, force: bool = False, rules: Optional[Any] = None
+) -> TriggerGateResult:
     """
     Rules 1-4 on a committee report, in order: Risk Officer veto and SELL verdict (hard), then a non-buy
     verdict and a score below the trigger threshold (soft). The first failing rule decides.
     A soft block comes back allowed with code OK_FORCED when force is set.
+
+    rules (a MainRules, automated entries only) relaxes two verdict checks and nothing else:
+    ignore_risk_veto passes a Risk Officer veto when the report has a stop above zero and below the entry,
+    and accept_hold treats HOLD like a buy verdict. rules=None is today's result.
     """
     risk = report.get("risk") or {}
     action = str(report.get("action") or "").strip().upper()
@@ -102,7 +119,7 @@ def evaluate_trigger_verdict(report: Dict[str, Any], trigger_min_score: int, for
     def result(allowed: bool, code: str, message: str, overridable: bool = False) -> TriggerGateResult:
         return TriggerGateResult(allowed, code, message, overridable, shown_action, score, trigger_min_score)
 
-    if not risk.get("approved", True):
+    if not risk.get("approved", True) and not (rules and rules.ignore_risk_veto and _has_stop_below_entry(report)):
         reason = _short(risk.get("risk_summary"))
         return result(False, "RISK_VETO", f"The Risk Officer vetoed this trade: {reason}" if reason else "The Risk Officer vetoed this trade.")
 
@@ -118,7 +135,7 @@ def evaluate_trigger_verdict(report: Dict[str, Any], trigger_min_score: int, for
         )
 
     block = None
-    if action not in _BUY_ACTIONS:
+    if action not in _BUY_ACTIONS and not (rules and rules.accept_hold and action == "HOLD"):
         verdict = action or "missing"
         block = result(False, "NOT_BUY_VERDICT", f"The committee's verdict is {verdict} (score {score}/100), not a buy.", True)
     elif score < trigger_min_score:
