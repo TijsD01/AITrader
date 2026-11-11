@@ -4,6 +4,7 @@ No DB, broker or shadow imports: callers pass the strategy as any object with th
 ShadowStrategy attributes these functions read.
 """
 import datetime
+import math
 from typing import Any, Dict, Optional
 
 from config.settings import settings
@@ -54,16 +55,26 @@ def plan_entry(
     }
 
 
+def _positive_number(x: Any) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x > 0
+
+
+def _naive_utc(dt: datetime.datetime) -> datetime.datetime:
+    return dt.astimezone(datetime.timezone.utc).replace(tzinfo=None) if dt.tzinfo else dt
+
+
 def pct_trail_stop(current_stop: Optional[float], highest: float, trailing_stop_pct: Optional[float]) -> Optional[float]:
-    """Stop trailing the highest price by trailing_stop_pct; never lowers current_stop. Off (None/0) = unchanged."""
-    if not trailing_stop_pct:
+    """Stop trailing the highest price by trailing_stop_pct; never lowers current_stop.
+    Off (None/0), a pct outside (0, 1) or a bad highest price = unchanged."""
+    if not _positive_number(trailing_stop_pct) or trailing_stop_pct >= 1 or not _positive_number(highest):
         return current_stop
     trail = round(highest * (1.0 - trailing_stop_pct), 2)
     return trail if current_stop is None or trail > current_stop else current_stop
 
 
 def max_hold_exceeded(opened_at: Optional[datetime.datetime], now: datetime.datetime, max_hold_days: Optional[int]) -> bool:
-    """True once a position has been open strictly longer than max_hold_days (None/0 = no limit)."""
-    if not max_hold_days or opened_at is None:
+    """True once a position has been open strictly longer than max_hold_days (None/0/negative = no limit).
+    Timezone-aware datetimes are compared as naive UTC, like the DB stores them."""
+    if not _positive_number(max_hold_days) or opened_at is None:
         return False
-    return (now - opened_at) > datetime.timedelta(days=max_hold_days)
+    return (_naive_utc(now) - _naive_utc(opened_at)) > datetime.timedelta(days=max_hold_days)

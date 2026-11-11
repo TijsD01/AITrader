@@ -51,6 +51,7 @@ class Position(Base):
     broker_order_id = Column(String(100), nullable=True)
     trigger_id = Column(Integer, nullable=True)  # OrderTrigger that opened this position (NULL = manual/direct buy)
     rules_version = Column(Integer, nullable=True)  # MAIN_RULES_VERSION in force when the position opened
+    initial_stop_native = Column(Float, nullable=True)  # Stop the position opened with, before any ratchet (NULL = older rows)
     opened_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 

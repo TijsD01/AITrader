@@ -44,6 +44,7 @@ def _run_migrations(connection):
         ("positions", "trigger_id", "INTEGER"),
         ("positions", "rules_version", "INTEGER"),
         ("order_triggers", "rules_version", "INTEGER"),
+        ("positions", "initial_stop_native", "FLOAT"),
     ]
     for table, col, col_type in migrations:
         try:

@@ -51,3 +51,29 @@ def test_shadow_reexports_the_same_functions():
 ])
 def test_plan_entry_parity_with_shadow(key, args):
     assert levels.plan_entry(PRESETS[key], *args) == shadow.plan_entry(PRESETS[key], *args)
+
+
+@pytest.mark.parametrize("pct", [float("nan"), float("inf"), -0.1, 1.0, 1.5, "0.1"])
+def test_pct_trail_stop_out_of_range_pct_keeps_current_stop(pct):
+    assert pct_trail_stop(90.0, 120.0, pct) == 90.0
+    assert pct_trail_stop(None, 120.0, pct) is None
+
+
+@pytest.mark.parametrize("highest", [float("nan"), float("inf"), 0.0, -5.0, None])
+def test_pct_trail_stop_bad_highest_keeps_current_stop(highest):
+    assert pct_trail_stop(90.0, highest, 0.10) == 90.0
+
+
+@pytest.mark.parametrize("days", [-1, 0, float("nan"), "20"])
+def test_max_hold_exceeded_non_positive_or_bad_days_is_false(days):
+    opened = datetime.datetime(2026, 1, 1, 12, 0)
+    assert max_hold_exceeded(opened, opened + datetime.timedelta(days=400), days) is False
+
+
+def test_max_hold_exceeded_mixes_aware_and_naive_utc():
+    naive = datetime.datetime(2026, 1, 1, 12, 0)
+    aware_later = datetime.datetime(2026, 1, 22, 12, 0, tzinfo=datetime.timezone.utc)
+    assert max_hold_exceeded(naive, aware_later, 20) is True
+    assert max_hold_exceeded(aware_later, naive, 20) is False
+    aware_cet = datetime.datetime(2026, 1, 1, 13, 0, tzinfo=datetime.timezone(datetime.timedelta(hours=1)))
+    assert max_hold_exceeded(aware_cet, naive + datetime.timedelta(days=20, seconds=1), 20) is True
