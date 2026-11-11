@@ -16,6 +16,7 @@ from src.trading.trigger_gate import (
     normalize_ticker, invalid_ticker_result, precheck_manual_trigger, evaluate_trigger_verdict,
     evaluate_manual_trigger, get_trigger_min_score
 )
+from src.trading.trading212 import broker_can_buy
 
 logger = logging.getLogger(__name__)
 
@@ -673,6 +674,10 @@ class TelegramAssistant:
                 data = await asyncio.to_thread(market_data_provider.get_stock_data, target_ticker)
                 if not data:
                     await self._reply_chat(chat_id, f"❌ Could not fetch market data for <b>{target_ticker}</b>. Please check ticker symbol.")
+                    return
+                on_broker, why = await broker_can_buy(target_ticker, data.get("currency"))
+                if not on_broker:
+                    await self._reply_chat(chat_id, f"🛑 <b>BUY NOT EXECUTED:</b> {html.escape(why)}")
                     return
 
                 summary = await paper_broker.get_portfolio_summary()

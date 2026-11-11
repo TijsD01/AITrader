@@ -27,6 +27,7 @@ from src.trading.trigger_gate import evaluate_trigger_verdict, get_trigger_min_s
 from src.trading.main_strategy import get_main_rules, is_default_shape
 from src.trading.levels import plan_entry
 from src.trading.holdings import mine_tickers
+from src.trading.trading212 import broker_can_buy
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +176,20 @@ class TradingScheduler:
                         and verdict.consensus_score >= armed_score)
                 and not (rules_version is not None and ruled_ok)
             ]
-        reason = f"New debate no longer supports this buy: {verdict.message}"
+        return await self._cancel_triggers(
+            ticker, f"New debate no longer supports this buy: {verdict.message}", trigger_ids,
+            log_note=f"{verdict.code}, score {verdict.consensus_score}"
+        )
+
+    async def _cancel_triggers(self, ticker: str, reason: str, trigger_ids: Optional[List[int]] = None, log_note: str = "") -> bool:
+        """Cancels the given pending triggers (default: all of the active mode for `ticker`). True when one was cancelled."""
+        if trigger_ids is None:
+            live = get_active_broker() is live_broker
+            async with AsyncSessionLocal() as db_session:
+                res = await db_session.execute(select(OrderTrigger.id).where(
+                    OrderTrigger.ticker == ticker, OrderTrigger.status == "PENDING", OrderTrigger.is_live == live
+                ))
+                trigger_ids = list(res.scalars().all())
         cancelled = False
         # Same lock as the trigger monitor, so a fill check cannot run mid-cancel
         async with self._monitor_lock:
@@ -183,7 +197,7 @@ class TradingScheduler:
                 res = await active_broker.cancel_price_trigger(trigger_id, reason=reason)
                 if res.get("success"):
                     cancelled = True
-                    logger.info(f"Cancelled trigger #{trigger_id} for {ticker} after re-debate ({verdict.code}, score {verdict.consensus_score}).")
+                    logger.info(f"Cancelled trigger #{trigger_id} for {ticker} after re-debate ({log_note or reason}).")
                 else:
                     logger.warning(f"Could not cancel trigger #{trigger_id} for {ticker} after re-debate: {res.get('message')}")
         return cancelled
@@ -202,9 +216,10 @@ class TradingScheduler:
         since = datetime.datetime.utcnow() - datetime.timedelta(hours=settings.TRIGGER_REDEBATE_SKIP_HOURS)
         async with AsyncSessionLocal() as db_session:
             res = await db_session.execute(
-                select(OrderTrigger.ticker).where(OrderTrigger.status == "PENDING", OrderTrigger.is_live == live)
+                select(OrderTrigger.ticker, OrderTrigger.currency).where(OrderTrigger.status == "PENDING", OrderTrigger.is_live == live)
             )
-            tickers = sorted({t.upper() for t in res.scalars().all()})
+            currencies = {t.upper(): ccy for t, ccy in res.all()}
+            tickers = sorted(currencies)
             recent = await db_session.execute(
                 select(AnalysisReport).where(AnalysisReport.created_at >= since).order_by(desc(AnalysisReport.created_at))
             )
@@ -216,6 +231,11 @@ class TradingScheduler:
 
         for ticker in tickers:
             try:
+                on_broker, why = await broker_can_buy(ticker, currencies[ticker])
+                if not on_broker:
+                    if await self._cancel_triggers(ticker, why):
+                        result["cancelled"].append(f"{ticker} (not on Trading 212)")
+                    continue
                 report = recent_reports.get(ticker)
                 if report is None:
                     data = await asyncio.to_thread(market_data_provider.get_stock_data, ticker)
@@ -503,6 +523,10 @@ class TradingScheduler:
                 try:
                     data = await asyncio.to_thread(market_data_provider.get_stock_data, ticker)
                     if not data:
+                        continue
+                    on_broker, why = await broker_can_buy(ticker, data.get("currency"))
+                    if not on_broker:
+                        logger.info(f"Skipping {ticker} in {market} session: {why}")
                         continue
 
                     summary = await paper_broker.get_portfolio_summary()
@@ -825,6 +849,10 @@ class TradingScheduler:
                     tk = cand["ticker"].upper()
                     data = await asyncio.to_thread(market_data_provider.get_stock_data, tk)
                     if not data:
+                        continue
+                    on_broker, why = await broker_can_buy(tk, data.get("currency"))
+                    if not on_broker:
+                        logger.info(f"Opportunity Scanner skipped {tk}: {why}")
                         continue
 
                     summary = await paper_broker.get_portfolio_summary()

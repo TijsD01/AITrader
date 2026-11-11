@@ -18,6 +18,7 @@ from src.db.session import AsyncSessionLocal
 from src.db.models import Position, OrderTrigger, SystemConfig
 from src.trading.risk import check_market_regime, plan_buy
 from src.trading.holdings import holdings_enabled, is_mine
+from src.trading.trading212 import broker_can_buy
 
 logger = logging.getLogger(__name__)
 
@@ -232,7 +233,7 @@ async def _ticker_in_use(ticker: str) -> Optional[TriggerGateResult]:
 async def precheck_manual_trigger(ticker: str, data: Optional[Dict[str, Any]], available_cash_eur: Optional[float] = None) -> Optional[TriggerGateResult]:
     """
     Cheap checks before the committee runs, all hard: market data found, a tradable instrument type, no open
-    position or pending trigger for the ticker, and (when given) enough available cash.
+    position or pending trigger for the ticker, offered by the broker (broker_can_buy), and (when given) enough available cash.
     Returns the blocking result, or None when the committee may run. The ticker must already be normalized.
     """
     if not data:
@@ -243,6 +244,9 @@ async def precheck_manual_trigger(ticker: str, data: Optional[Dict[str, Any]], a
     in_use = await _ticker_in_use(ticker)
     if in_use:
         return in_use
+    on_broker, why = await broker_can_buy(ticker, data.get("currency"))
+    if not on_broker:
+        return TriggerGateResult(False, "NOT_ON_BROKER", why)
     if available_cash_eur is not None and available_cash_eur < _MIN_TRIGGER_CASH_EUR:
         return TriggerGateResult(False, "INSUFFICIENT_CASH", f"Insufficient available cash (€{available_cash_eur:.2f}) to arm trigger.")
     return None

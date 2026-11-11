@@ -276,6 +276,9 @@ async def manual_buy(req: BuyRequest):
     data = await asyncio.to_thread(market_data_provider.get_stock_data, ticker)
     if not data:
         raise HTTPException(status_code=404, detail=f"Stock data not found for '{ticker}'.")
+    on_broker, why = await trading212.broker_can_buy(ticker, data.get("currency"))
+    if not on_broker:
+        raise HTTPException(status_code=400, detail=why)
 
     summary = await active_broker.get_portfolio_summary()
     available_cash = summary.get("available_cash_eur", 0.0)

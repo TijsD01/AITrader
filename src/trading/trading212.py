@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 DEMO_URL = "https://demo.trading212.com/api/v0"
 LIVE_URL = "https://live.trading212.com/api/v0"
 INSTRUMENTS_TTL = 6 * 3600.0   # instrument list changes rarely; the endpoint allows 1 req/50s
+INSTRUMENTS_RETRY = 300.0      # wait after a failed instrument fetch
 SUMMARY_TTL = 5.0              # account summary allows 1 req/5s
 MAX_RATE_WAIT = 10.0
 
@@ -66,6 +67,19 @@ def _suffix_for(exchange: str) -> Optional[str]:
     return next((s for s, hints in EXCHANGE_HINTS.items() if any(h in name for h in hints)), None)
 
 
+def _matching(instruments: List[Dict[str, Any]], yahoo_ticker: str, currency: Optional[str]) -> List[Dict[str, Any]]:
+    """The Invest STOCK/ETF instruments that fit a Yahoo ticker, its currency and the exchange of its suffix."""
+    base, _, suffix = yahoo_ticker.upper().partition(".")
+    found = [
+        i for i in instruments
+        if i.get("type") in ("STOCK", "ETF") and (i.get("shortName") or "").upper() == base
+        and _ccy(i.get("currencyCode")) == _ccy(currency)
+    ]
+    # Always require the exchange to fit the Yahoo suffix: a lone symbol match on another venue may be another company
+    hints = EXCHANGE_HINTS.get(suffix, ())
+    return [i for i in found if any(h in i["exchange"].lower() for h in hints)]
+
+
 class Trading212Client:
     def __init__(self, key: str, secret: str, demo: bool = True, transport: Optional[httpx.AsyncBaseTransport] = None):
         self._http = httpx.AsyncClient(
@@ -73,6 +87,7 @@ class Trading212Client:
         )
         self._instruments: Optional[List[Dict[str, Any]]] = None
         self._instruments_at = 0.0
+        self._instruments_failed_at = float("-inf")  # last failed fetch while no list was cached
         self._instruments_lock = asyncio.Lock()
         self._summary: Optional[Dict[str, Any]] = None
         self._summary_at = 0.0
@@ -112,9 +127,10 @@ class Trading212Client:
                 exchanges = await self._request("GET", "/equity/metadata/exchanges") or []
             except Exception as e:
                 if self._instruments is None:
+                    self._instruments_failed_at = time.monotonic()
                     raise
                 logger.warning(f"Trading 212 instrument refresh failed, using the cached list: {e}")
-                self._instruments_at = time.monotonic() - INSTRUMENTS_TTL + 300  # try again in 5 minutes
+                self._instruments_at = time.monotonic() - INSTRUMENTS_TTL + INSTRUMENTS_RETRY  # try again in 5 minutes
                 return self._instruments
             schedule_names = {ws["id"]: ex.get("name", "") for ex in exchanges for ws in ex.get("workingSchedules", [])}
             for i in instruments:
@@ -124,15 +140,7 @@ class Trading212Client:
 
     async def resolve_ticker(self, yahoo_ticker: str, currency: str) -> Optional[str]:
         """Maps a Yahoo ticker (ASML.AS, AAPL) to one T212 ticker, or None when nothing or several instruments fit."""
-        base, _, suffix = yahoo_ticker.upper().partition(".")
-        found = [
-            i for i in await self.instruments()
-            if i.get("type") in ("STOCK", "ETF") and (i.get("shortName") or "").upper() == base
-            and _ccy(i.get("currencyCode")) == _ccy(currency)
-        ]
-        # Always require the exchange to fit the Yahoo suffix: a lone symbol match on another venue may be another company
-        hints = EXCHANGE_HINTS.get(suffix, ())
-        found = [i for i in found if any(h in i["exchange"].lower() for h in hints)]
+        found = _matching(await self.instruments(), yahoo_ticker, currency)
         if len(found) != 1:
             logger.error(f"Trading 212: {len(found)} instruments match {yahoo_ticker} ({currency}); no unique ticker.")
             return None
@@ -224,3 +232,34 @@ def get_client() -> Optional[Trading212Client]:
     if _client is None or _client_key != key:
         _client, _client_key = Trading212Client(*key), key
     return _client
+
+
+async def broker_can_buy(ticker: str, currency: Optional[str]) -> tuple:
+    """
+    (False, reason) when Trading 212 is the broker and its API cannot buy this ticker (CFD-only, not listed, or
+    ambiguous); (True, "") otherwise. Applies in paper mode too, so paper results stay honest.
+    Fails open when the instrument list is unavailable: the order path still refuses an unresolved ticker.
+    """
+    client = get_client() if (settings.LIVE_BROKER or "").lower() == "trading212" else None
+    if client is None:
+        return True, ""
+    # No list yet and the last fetch failed: skip until the 5-minute retry window ends, so an outage never slows scans
+    if client._instruments is None and time.monotonic() - client._instruments_failed_at < INSTRUMENTS_RETRY:
+        return True, ""
+    try:
+        instruments = await client.instruments()
+    except Exception as e:
+        logger.warning(f"Trading 212 instrument list unavailable ({e}); not pre-checking tickers for {INSTRUMENTS_RETRY:.0f}s.")
+        return True, ""
+    if not instruments:
+        logger.info(f"Trading 212 instrument list is empty; not pre-checking {ticker}.")
+        return True, ""
+    found = _matching(instruments, ticker, currency)
+    if len(found) == 1:
+        return True, ""
+    if found:
+        why = f"{ticker} is ambiguous on Trading 212 ({len(found)} matching instruments), so the API cannot buy it."
+    else:
+        why = f"{ticker} is not offered on Trading 212 Invest (CFD-only or not listed), so the API cannot buy it."
+    logger.info(why)
+    return False, why
