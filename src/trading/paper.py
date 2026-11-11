@@ -10,6 +10,8 @@ from src.db.models import Position, Trade, PortfolioSnapshot, SystemConfig, Orde
 from src.db.session import AsyncSessionLocal
 from src.data.currency import currency_service
 from src.data.market import market_data_provider
+from src.trading.levels import effective_breakeven_pct, max_hold_exceeded, pct_trail_stop
+from src.trading.main_strategy import MainRules, get_main_rules
 from src.trading.risk import risk_guardrail, get_effective_deployable_cash, allocate_pending_triggers, evaluate_trigger_condition, is_trigger_expired, validate_trigger_levels, compute_trailing_stop, check_market_regime, affordable_share_count, fit_allocation_to_share, new_entry_allocation, risk_capped_allocation, plan_pending_triggers
 from src.data.market_hours import check_market_hours, quotes_moving
 from src.trading.base import BaseBroker
@@ -135,7 +137,8 @@ class PaperBroker(BaseBroker):
         consensus_score: int,
         rationale: str,
         is_manual: bool = False,
-        trigger_id: Optional[int] = None
+        trigger_id: Optional[int] = None,
+        rules_version: Optional[int] = None
     ) -> Dict[str, Any]:
         # Check market hours (No buying when market is closed)
         is_open, open_msg = check_market_hours(ticker)
@@ -270,6 +273,8 @@ class PaperBroker(BaseBroker):
                 unrealized_pnl_pct=0.0,
                 status="OPEN",
                 trigger_id=trigger_id,
+                rules_version=rules_version,
+                initial_stop_native=stop_loss_native,
                 opened_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
             )
             session.add(new_pos)
@@ -456,6 +461,11 @@ class PaperBroker(BaseBroker):
                 adjustments = calib.get("adjustments", []) if calib else []
             except Exception as learn_err:
                 logger.error(f"Error in trade learning post-mortem/calibration for trade #{trade.id}: {learn_err}")
+            try:
+                from src.memory.outcomes import record_main_outcome
+                record_main_outcome(pos, trade, reason)
+            except Exception as mem_err:
+                logger.warning(f"Could not record outcome for trade #{trade.id}: {mem_err}")
 
             sell_res = {
                 "success": True,
@@ -483,12 +493,14 @@ class PaperBroker(BaseBroker):
 
             return sell_res
 
-    async def refresh_positions_pnl(self):
+    async def refresh_positions_pnl(self, rules: Optional[MainRules] = None):
         """Fetches latest quotes and updates unrealized PnL and trailing high for all open positions."""
         async with self._refresh_lock:
             now = time.time()
             if (now - self._last_pnl_refresh) < self._pnl_refresh_ttl:
                 return
+            rules = rules or await get_main_rules()
+            strategy = None
 
             async with AsyncSessionLocal() as session:
                 # Query dynamic breakeven trigger pct
@@ -519,10 +531,17 @@ class PaperBroker(BaseBroker):
                         if is_open and curr_price > p.highest_price_native:
                             p.highest_price_native = curr_price
                             # Trailing stop: past breakeven_trigger_pct the stop moves to breakeven + 1%, then trails by N x ATR
+                            be_pct = breakeven_trigger_pct
+                            shaped = p.rules_version is not None and p.rules_version == rules.version
+                            if shaped:  # opened under the active promoted rules: their breakeven trigger and % trail
+                                strategy = strategy or rules.as_strategy()
+                                be_pct = effective_breakeven_pct(strategy, rules.breakeven_pct, p.entry_price_native, p.initial_stop_native)
                             new_stop = compute_trailing_stop(
                                 p.entry_price_native, p.stop_loss_native, p.highest_price_native,
-                                data.get("technicals", {}).get("atr14"), breakeven_trigger_pct
+                                data.get("technicals", {}).get("atr14"), be_pct
                             )
+                            if shaped:
+                                new_stop = pct_trail_stop(new_stop, p.highest_price_native, rules.trailing_stop_pct)
                             if new_stop is not None and new_stop != p.stop_loss_native:
                                 p.stop_loss_native = new_stop
                                 logger.info(f"Trailing stop raised for {p.ticker} to {new_stop} (high {p.highest_price_native})")
@@ -537,8 +556,10 @@ class PaperBroker(BaseBroker):
 
     async def check_stops_and_targets(self) -> List[Dict[str, Any]]:
         """Scans open positions to trigger stop loss or take profit orders."""
-        await self.refresh_positions_pnl()
+        rules = await get_main_rules()
+        await self.refresh_positions_pnl(rules)
         triggered = []
+        utc_now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
         async with AsyncSessionLocal() as session:
             res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == False))
             positions = res.scalars().all()
@@ -549,6 +570,9 @@ class PaperBroker(BaseBroker):
                     tickers_to_close.append((p.ticker, f"Stop-Loss triggered at {p.current_price_native} <= {p.stop_loss_native}"))
                 elif p.take_profit_native and p.current_price_native >= p.take_profit_native:
                     tickers_to_close.append((p.ticker, f"Take-Profit triggered at {p.current_price_native} >= {p.take_profit_native}"))
+                elif (p.rules_version is not None and p.rules_version == rules.version
+                      and max_hold_exceeded(p.opened_at, utc_now, rules.max_hold_days)):
+                    tickers_to_close.append((p.ticker, f"Time exit after {rules.max_hold_days} days"))
 
         for ticker, reason in tickers_to_close:
             sell_res = await self.execute_sell(ticker, reason=reason)
@@ -571,7 +595,8 @@ class PaperBroker(BaseBroker):
         consensus_score: int,
         ai_rationale: str,
         report_id: Optional[int] = None,
-        forced: bool = False
+        forced: bool = False,
+        rules_version: Optional[int] = None
     ) -> Dict[str, Any]:
         """Creates an active pending price trigger (limit pullback or breakout order)."""
         async with AsyncSessionLocal() as session:
@@ -697,6 +722,7 @@ class PaperBroker(BaseBroker):
                 ai_rationale=ai_rationale,
                 report_id=report_id,
                 forced=forced,
+                rules_version=rules_version,
                 status="PENDING",
                 is_live=False,
                 created_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
@@ -951,7 +977,8 @@ class PaperBroker(BaseBroker):
                         consensus_score=t.consensus_score or 75,
                         rationale=f"AI Trigger #{t.id} Hit ({t.trigger_type} @ {t.target_price}): {t.ai_rationale}",
                         is_manual=False,
-                        trigger_id=t.id
+                        trigger_id=t.id,
+                        rules_version=t.rules_version
                     )
                     if trade_res.get("success"):
                         t.status = "TRIGGERED"

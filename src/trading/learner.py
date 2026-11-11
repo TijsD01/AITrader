@@ -10,6 +10,20 @@ from src.agents.base import llm_client
 
 logger = logging.getLogger(__name__)
 
+PAUSED_MESSAGE = "Auto-calibration is paused while promoted shadow rules are active."
+
+
+async def _main_learner_paused() -> bool:
+    """True while promoted shadow rules are active: automatic tuning would overwrite them within days."""
+    try:
+        async with AsyncSessionLocal() as session:
+            row = (await session.execute(select(SystemConfig).where(SystemConfig.key == "MAIN_LEARNER_PAUSED"))).scalars().first()
+    except Exception as e:
+        logger.warning(f"Could not read MAIN_LEARNER_PAUSED, treating the learner as not paused: {e}")
+        return False
+    return bool(row and (row.value or "").strip().lower() == "true")
+
+
 class TradeLearner:
     """
     Self-Reflective Trading Intelligence Engine.
@@ -215,6 +229,9 @@ class TradeLearner:
         """
         # Calibrate on the active mode's trades only: paper fills would tune the live bot on simulated prices
         live = settings.TRADING_MODE.upper() == "LIVE" and settings.LIVE_TRADING_ENABLED
+        if automatic and await _main_learner_paused():
+            logger.info(PAUSED_MESSAGE)
+            return {"success": False, "skipped": True, "message": PAUSED_MESSAGE, "adjustments": []}
         async with AsyncSessionLocal() as session:
             if automatic and settings.LEARNER_MIN_TRADES > 1:
                 last_res = await session.execute(select(SystemConfig).where(SystemConfig.key == "LAST_CALIBRATION_TIMESTAMP"))
@@ -523,6 +540,8 @@ Return valid JSON with exactly these keys:
             logger.info(f"Idle threshold decay skipped: {msg}")
             return {"success": False, "skipped": True, "message": msg, "adjustments": []}
 
+        if await _main_learner_paused():
+            return skip(PAUSED_MESSAGE)
         days = settings.LEARNER_IDLE_DECAY_DAYS
         if days <= 0:
             return skip("disabled (LEARNER_IDLE_DECAY_DAYS <= 0).")

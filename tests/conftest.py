@@ -86,3 +86,10 @@ def _no_real_env_writes(monkeypatch):
 def _telegram_owner_chat(monkeypatch):
     """The Telegram bot only accepts commands from the configured owner chat (12345 in tests)."""
     monkeypatch.setattr(settings, "TELEGRAM_CHAT_ID", "12345")
+
+
+@pytest.fixture(autouse=True)
+def _reset_shadow_strategy_cache():
+    """Shadow strategies come from the env settings until a test loads them from the DB."""
+    from src.trading.shadow import reset_strategy_cache
+    reset_strategy_cache()

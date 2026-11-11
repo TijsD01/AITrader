@@ -30,7 +30,8 @@ class BaseBroker(ABC):
         consensus_score: int,
         rationale: str,
         is_manual: bool = False,
-        trigger_id: Optional[int] = None
+        trigger_id: Optional[int] = None,
+        rules_version: Optional[int] = None
     ) -> Dict[str, Any]:
         """Executes a buy order (or submits real market/limit order to broker)."""
         pass
@@ -59,7 +60,8 @@ class BaseBroker(ABC):
         consensus_score: int,
         ai_rationale: str,
         report_id: Optional[int] = None,
-        forced: bool = False
+        forced: bool = False,
+        rules_version: Optional[int] = None
     ) -> Dict[str, Any]:
         """Creates a pending limit pullback or breakout trigger. report_id links it to its AnalysisReport."""
         pass

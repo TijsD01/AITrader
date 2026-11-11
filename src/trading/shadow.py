@@ -18,6 +18,7 @@ import datetime
 import json
 import logging
 import math
+import re
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
@@ -27,9 +28,15 @@ from config.settings import settings
 from src.data.currency import currency_service
 from src.data.market import market_data_provider
 from src.data.market_hours import check_market_hours
-from src.db.models import OrderTrigger, Position, ShadowAccount, ShadowPosition, ShadowSnapshot, ShadowTrigger, SystemConfig, Trade
+from src.db.models import (
+    OrderTrigger, Position, ShadowAccount, ShadowParamChange, ShadowPosition, ShadowSnapshot, ShadowStrategyRow,
+    ShadowTrigger, SystemConfig, Trade,
+)
 from src.db.session import AsyncSessionLocal
+from src.memory.outcomes import record_outcome
 from src.trading.cash_flows import list_cash_flow_points
+from src.trading.levels import effective_breakeven_pct, max_hold_exceeded, pct_trail_stop, plan_entry
+from src.trading.strategy_params import SPECS, validate as validate_params
 from src.trading.risk import (
     apply_risk_budget,
     calculate_position_allocation,
@@ -86,13 +93,6 @@ class ShadowStrategy:
 
     def to_params(self) -> Dict[str, Any]:
         return {k: v for k, v in dataclasses.asdict(self).items() if k not in ("key", "label", "description")}
-
-
-def effective_breakeven_pct(strategy: "ShadowStrategy", eff_pct: float, entry: float, initial_stop: Optional[float]) -> float:
-    """Breakeven trigger as a gain fraction: breakeven_r x the initial stop distance when set, else eff_pct."""
-    if strategy.breakeven_r and initial_stop and entry > initial_stop:
-        return strategy.breakeven_r * (entry - initial_stop) / entry
-    return eff_pct
 
 
 PRESETS: Dict[str, ShadowStrategy] = {
@@ -186,10 +186,8 @@ def _custom_strategies() -> Dict[str, ShadowStrategy]:
     return custom
 
 
-def get_strategies() -> List[ShadowStrategy]:
-    """The enabled shadow strategies, in the order of SHADOW_STRATEGIES."""
-    if not settings.SHADOW_ENABLED:
-        return []
+def _env_strategies() -> List[ShadowStrategy]:
+    """Strategies named in SHADOW_STRATEGIES: presets plus SHADOW_CUSTOM_STRATEGIES. Seeds the table; fallback before it is loaded."""
     available = {**PRESETS, **_custom_strategies()}
     result = []
     for key in (settings.SHADOW_STRATEGIES or "").split(","):
@@ -204,42 +202,160 @@ def get_strategies() -> List[ShadowStrategy]:
     return result
 
 
-def plan_entry(
-    strategy: ShadowStrategy,
-    trigger_type: str,
-    trigger_price: float,
-    stop_loss: Optional[float],
-    take_profit: Optional[float],
-    current_price: float,
-) -> Dict[str, Any]:
-    """Maps the main bot's entry/stop/target onto a strategy's own levels (all in native currency)."""
-    if strategy.entry_mode == "market":
-        entry_type, entry = "MARKET", current_price
-    elif trigger_type == "LIMIT_PULLBACK":
-        entry_type = trigger_type
-        entry = current_price - (current_price - trigger_price) * strategy.pullback_scale
-        if entry >= current_price:  # pullback_scale 0 means "buy now"
-            entry_type, entry = "MARKET", current_price
-    else:
-        entry_type, entry = trigger_type, trigger_price
+# (strategy, learning_strength) of the enabled DB rows; None = never loaded (env-based behaviour)
+_CACHE: Optional[List[tuple]] = None
 
-    stop_distance = (trigger_price - stop_loss) if stop_loss else trigger_price * settings.DEFAULT_STOP_LOSS_PCT
-    stop_distance = max(stop_distance, entry * 0.005) * strategy.stop_scale
-    stop = entry - stop_distance
 
-    if not strategy.use_take_profit:
-        target = None
-    elif strategy.reward_risk:
-        target = entry + strategy.reward_risk * stop_distance
-    else:
-        target = take_profit if take_profit and take_profit > entry else entry * (1 + settings.DEFAULT_TAKE_PROFIT_PCT)
+def reset_strategy_cache() -> None:
+    global _CACHE
+    _CACHE = None
 
-    return {
-        "trigger_type": entry_type,
-        "target_price": round(entry, 2),
-        "stop_loss": round(stop, 2) if stop > 0 else None,
-        "take_profit": round(target, 2) if target else None,
-    }
+
+def _row_to_strategy(row: ShadowStrategyRow) -> ShadowStrategy:
+    params = {k: v for k, v in (row.params or {}).items() if k in _FIELD_NAMES - {"label", "description"}}
+    return ShadowStrategy(key=row.key, label=row.label, description=row.description or "", **params)
+
+
+async def load_strategies() -> None:
+    """Seeds the table from the env settings when it is empty, then refreshes the cache from the enabled rows."""
+    global _CACHE
+    async with AsyncSessionLocal() as session:
+        # Seed once per database: later an empty table means the user deleted everything
+        if await session.get(SystemConfig, "SHADOW_SEEDED") is None:
+            session.add(SystemConfig(key="SHADOW_SEEDED", value="true"))
+            now = _utcnow()
+            for i, s in enumerate(_env_strategies()):
+                session.add(ShadowStrategyRow(
+                    key=s.key, label=s.label, description=s.description, params=s.to_params(),
+                    is_preset=s.key in PRESETS, created_at=now + datetime.timedelta(microseconds=i),
+                ))
+            await session.commit()
+        rows = (await session.execute(
+            select(ShadowStrategyRow).where(ShadowStrategyRow.enabled.is_(True)).order_by(ShadowStrategyRow.created_at)
+        )).scalars().all()
+        _CACHE = [(_row_to_strategy(r), r.learning_strength or 0) for r in rows]
+
+
+def get_strategies() -> List[ShadowStrategy]:
+    """The enabled shadow strategies (from the DB once loaded, else in the order of SHADOW_STRATEGIES)."""
+    if not settings.SHADOW_ENABLED:
+        return []
+    if _CACHE is None:
+        return _env_strategies()
+    return [s for s, _ in _CACHE]
+
+
+def learning_strengths() -> Dict[str, int]:
+    return {s.key: strength for s, strength in (_CACHE or [])}
+
+
+def slug(label: str) -> str:
+    return re.sub(r"[^a-z0-9]", "_", (label or "").lower()).strip("_")[:40]
+
+
+async def _get_row(session, key: str) -> ShadowStrategyRow:
+    row = await session.get(ShadowStrategyRow, key)
+    if not row:
+        raise LookupError(f"Unknown shadow strategy '{key}'")
+    return row
+
+
+async def create_strategy(label: str, params: dict, description: str = "", copied_from: Optional[str] = None,
+                          learning_strength: int = 0) -> str:
+    key = slug(label)
+    if not key or key == MAIN_KEY.lower():
+        raise ValueError("Strategy name is empty or reserved")
+    # Defaults for unspecified fields, so the stored row is complete
+    full = ShadowStrategy(key=key, label=label, description=description, **validate_params(params)).to_params()
+    async with AsyncSessionLocal() as session:
+        if await session.get(ShadowStrategyRow, key):
+            raise ValueError(f"A strategy with key '{key}' already exists")
+        count = (await session.execute(select(func.count()).select_from(ShadowStrategyRow))).scalar_one()
+        if count >= settings.SHADOW_MAX_STRATEGIES:
+            raise ValueError(f"At most {settings.SHADOW_MAX_STRATEGIES} strategies are allowed")
+        session.add(ShadowStrategyRow(key=key, label=_clean_label(label), description=description, params=full,
+                                      copied_from=copied_from, learning_strength=learning_strength))
+        await session.commit()
+    await load_strategies()
+    return key
+
+
+async def copy_strategy(key: str, label: str) -> str:
+    async with AsyncSessionLocal() as session:
+        row = await _get_row(session, key)
+        params, description = dict(row.params), row.description or ""
+    return await create_strategy(label, params, description, copied_from=key)
+
+
+def _clean_label(label: str) -> str:
+    label = (label or "").strip()
+    if not label:
+        raise ValueError("Strategy name is empty")
+    return label[:60]
+
+
+async def edit_strategy(key: str, *, label=None, description=None, learning_strength=None, enabled=None,
+                        params: Optional[dict] = None, source: str = "user", reason: str = "",
+                        stats: Optional[dict] = None) -> dict:
+    """Saves the given fields, changed params and their history row in one commit; returns the param changes.
+
+    Open positions keep their levels: nothing else is touched. Nothing is written when any input is invalid.
+    """
+    if learning_strength is not None and not 0 <= learning_strength <= 3:
+        raise ValueError("learning_strength must be 0..3")
+    if label is not None:
+        label = _clean_label(label)
+    changes: dict = {}
+    async with AsyncSessionLocal() as session:
+        row = await _get_row(session, key)
+        if params is not None:
+            old = {k: v for k, v in row.params.items() if k in SPECS}  # drop keys no longer in the schema
+            merged = {**old, **validate_params(params)}
+            changes = {k: {"old": old.get(k), "new": merged[k]} for k in params if old.get(k) != merged[k]}
+            if changes:
+                row.params = merged
+                session.add(ShadowParamChange(strategy=key, source=source, changes=changes, reason=reason, stats=stats))
+        for name, value in (("label", label), ("description", description),
+                            ("learning_strength", learning_strength), ("enabled", enabled)):
+            if value is not None:
+                setattr(row, name, value)
+        await session.commit()
+    await load_strategies()
+    return changes
+
+
+async def apply_param_change(key: str, new_params: dict, source: str, reason: str = "",
+                             stats: Optional[dict] = None) -> dict:
+    return await edit_strategy(key, params=new_params, source=source, reason=reason, stats=stats)
+
+
+async def update_strategy(key: str, *, label=None, description=None, learning_strength=None, enabled=None) -> None:
+    await edit_strategy(key, label=label, description=description, learning_strength=learning_strength, enabled=enabled)
+
+
+async def delete_strategy(key: str) -> bool:
+    async with shadow_portfolios._lock:
+        async with AsyncSessionLocal() as session:
+            row = await session.get(ShadowStrategyRow, key)
+            if not row:
+                return False
+            for model in (ShadowPosition, ShadowTrigger, ShadowSnapshot, ShadowParamChange):
+                await session.execute(delete(model).where(model.strategy == key))
+            await session.execute(delete(ShadowAccount).where(ShadowAccount.strategy == key))
+            await session.delete(row)
+            await session.commit()
+        # Reload before releasing the lock, so a waiting job never sees the deleted strategy
+        await load_strategies()
+    return True
+
+
+async def undo_param_change(change_id: int) -> dict:
+    async with AsyncSessionLocal() as session:
+        change = await session.get(ShadowParamChange, change_id)
+        if not change:
+            raise LookupError(f"Unknown param change {change_id}")
+        key, old = change.strategy, {k: v["old"] for k, v in (change.changes or {}).items()}
+    return await apply_param_change(key, old, source="undo", reason=f"Undo change {change_id}")
 
 
 class ShadowPortfolios:
@@ -369,12 +485,12 @@ class ShadowPortfolios:
         followed_main: bool = False,
     ) -> List[Dict[str, Any]]:
         """Lets every shadow strategy decide on a committee verdict the main bot just received."""
-        strategies = get_strategies()
-        if not strategies:
+        if not get_strategies():
             return []
         try:
             async with self._lock:
-                armed = await self._follow_report(report, data, followed_main, strategies)
+                # Read under the lock: a strategy deleted while this job waited must not get an account back
+                armed = await self._follow_report(report, data, followed_main, get_strategies())
             if any(a["trigger_type"] == "MARKET" for a in armed):
                 await self.check_triggers()
             return armed
@@ -436,12 +552,11 @@ class ShadowPortfolios:
 
     async def check_triggers(self) -> List[Dict[str, Any]]:
         """Fills pending shadow triggers whose price level is hit while the market is open."""
-        strategies = {s.key: s for s in get_strategies()}
-        if not strategies:
+        if not get_strategies():
             return []
         try:
             async with self._lock:
-                return await self._check_triggers(strategies)
+                return await self._check_triggers({s.key: s for s in get_strategies()})
         except Exception as e:
             logger.error(f"Shadow trigger check failed: {e}", exc_info=True)
             return []
@@ -585,18 +700,29 @@ class ShadowPortfolios:
 
     async def check_exits(self) -> List[Dict[str, Any]]:
         """Updates prices, ratchets stops and closes shadow positions that hit their exit rules."""
-        strategies = {s.key: s for s in get_strategies()}
-        if not strategies:
+        if not get_strategies():
             return []
         try:
             async with self._lock:
-                return await self._check_exits(strategies)
+                closed = await self._check_exits({s.key: s for s in get_strategies()})
         except Exception as e:
             logger.error(f"Shadow exit check failed: {e}", exc_info=True)
             return []
+        # Outside the lock and after the commit, so a slow memory DB never blocks shadow monitoring
+        for c in closed:
+            try:
+                await record_outcome(
+                    source="shadow", strategy=c["strategy"], ref_id=c["outcome_ref"], ticker=c["ticker"],
+                    pnl_pct=c["pnl_pct"], r_multiple=c["r_multiple"], hold_days=c["hold_days"],
+                    exit_reason=c["reason"], score=c["score"], entry_type=c["entry_type"], params=c["params"],
+                )
+            except Exception as e:
+                logger.warning(f"Shadow outcome not recorded for {c['ticker']}: {e}")
+        return closed
 
     async def _check_exits(self, strategies: Dict[str, ShadowStrategy]) -> List[Dict[str, Any]]:
         closed = []
+        trigger_ids: Dict[int, Optional[int]] = {}
         now = _utcnow()
         quotes: Dict[str, Optional[Dict[str, Any]]] = {}
         async with AsyncSessionLocal() as session:
@@ -627,20 +753,31 @@ class ShadowPortfolios:
                     effective_breakeven_pct(s, eff["breakeven_pct"], p.entry_price_native, p.initial_stop_native),
                     atr_mult=eff["trailing_atr_mult"],
                 )
-                if s.trailing_stop_pct:
-                    trail = round(p.highest_price_native * (1.0 - s.trailing_stop_pct), 2)
-                    if p.stop_loss_native is None or trail > p.stop_loss_native:
-                        p.stop_loss_native = trail
+                p.stop_loss_native = pct_trail_stop(p.stop_loss_native, p.highest_price_native, s.trailing_stop_pct)
 
                 reason = None
                 if p.stop_loss_native and price <= p.stop_loss_native:
                     reason = f"Stop-Loss hit at {price} <= {p.stop_loss_native}"
                 elif p.take_profit_native and price >= p.take_profit_native:
                     reason = f"Take-Profit hit at {price} >= {p.take_profit_native}"
-                elif s.max_hold_days and p.opened_at and (now - p.opened_at) > datetime.timedelta(days=s.max_hold_days):
+                elif max_hold_exceeded(p.opened_at, now, s.max_hold_days):
                     reason = f"Time exit after {s.max_hold_days} days"
                 if reason:
                     closed.append(self._close_position(accounts[s.key], p, price, reason, now))
+                    closed[-1]["params"] = s.to_params()
+                    trigger_ids[p.id] = p.trigger_id
+            if trigger_ids:
+                wanted = {t for t in trigger_ids.values() if t is not None}
+                types = {}
+                if wanted:
+                    try:  # the entry type is a label for outcome memory; never lose the closes over it
+                        rows = await session.execute(
+                            select(ShadowTrigger.id, ShadowTrigger.trigger_type).where(ShadowTrigger.id.in_(wanted)))
+                        types = {i: t for i, t in rows.all()}
+                    except Exception as e:
+                        logger.warning(f"Shadow exits: entry type lookup failed ({e}); recording UNKNOWN.")
+                for c in closed:
+                    c["entry_type"] = types.get(trigger_ids[c["position_id"]]) or "UNKNOWN"
             await session.commit()
         return closed
 
@@ -667,17 +804,27 @@ class ShadowPortfolios:
         p.exit_reason = reason
         p.closed_at = now
         logger.info(f"Shadow '{p.strategy}' sold {p.shares} {p.ticker} @ {price}: €{pnl:+.2f} ({reason})")
-        return {"strategy": p.strategy, "ticker": p.ticker, "realized_pnl_eur": pnl, "reason": reason}
+        stop = p.initial_stop_native
+        r_multiple = round((price - p.entry_price_native) / (p.entry_price_native - stop), 2) \
+            if stop and stop < p.entry_price_native else None
+        hold_days = (now - p.opened_at).total_seconds() / 86400 if p.opened_at else 0.0
+        return {
+            "strategy": p.strategy, "ticker": p.ticker, "realized_pnl_eur": pnl, "reason": reason,
+            "position_id": p.id, "pnl_pct": p.realized_pnl_pct, "r_multiple": r_multiple, "hold_days": hold_days,
+            "score": p.consensus_score, "entry_type": "UNKNOWN", "params": {},
+            # SQLite reuses ids after a reset or delete; the open time keeps the outcome atom id unique
+            "outcome_ref": f"{p.strategy}:{p.id}:{p.opened_at.isoformat() if p.opened_at else ''}",
+        }
 
     # ------------------------------------------------------------------ reporting
 
     async def record_snapshots(self, main_summary_fn: Optional[Callable[[], Awaitable[Dict[str, Any]]]] = None) -> None:
         """Stores roughly hourly values of every shadow and of the main portfolio, for the comparison chart."""
-        strategies = get_strategies()
-        if not strategies:
+        if not get_strategies():
             return
         try:
             async with self._lock:
+                strategies = get_strategies()
                 async with AsyncSessionLocal() as session:
                     accounts = await self._ensure_accounts(session, strategies)
                     now = _utcnow()
@@ -771,9 +918,11 @@ class ShadowPortfolios:
         async with AsyncSessionLocal() as session:
             # Locked: booking a deposit into cash must not race a shadow buy on the same account
             async with self._lock:
+                strategies = get_strategies()
                 accounts = await self._ensure_accounts(session, strategies)
                 await self._mark_followed_by_main(session, main_is_live)
             current_main = await self._main_params(session)
+            meta = {r.key: r for r in (await session.execute(select(ShadowStrategyRow))).scalars().all()}
             for s in strategies:
                 acc = accounts[s.key]
                 since = acc.started_at
@@ -832,6 +981,9 @@ class ShadowPortfolios:
                     "label": s.label,
                     "description": s.description,
                     "params": params,
+                    "learning_strength": (meta[s.key].learning_strength or 0) if s.key in meta else 0,
+                    "copied_from": meta[s.key].copied_from if s.key in meta else None,
+                    "is_preset": bool(meta[s.key].is_preset) if s.key in meta else s.key in PRESETS,
                     "started_at": since.strftime("%Y-%m-%d %H:%M") if since else None,
                     "initial_capital_eur": round(acc.initial_capital_eur, 2),
                     "cash_eur": round(acc.cash_eur, 2),
@@ -896,6 +1048,8 @@ class ShadowPortfolios:
                 await session.execute(delete(ShadowTrigger).where(ShadowTrigger.strategy == strategy_key))
                 await session.execute(delete(ShadowSnapshot).where(ShadowSnapshot.strategy == strategy_key))
                 await session.delete(acc)
+                await session.execute(update(ShadowStrategyRow).where(ShadowStrategyRow.key == strategy_key)
+                                      .values(closed_at_last_learn=0))
                 await session.commit()
         logger.info(f"Shadow portfolio '{strategy_key}' was reset.")
         return True

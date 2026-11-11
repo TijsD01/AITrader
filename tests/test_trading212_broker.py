@@ -25,6 +25,8 @@ INSTRUMENTS = [
     {"ticker": "FOOa_EQ", "shortName": "FOO", "currencyCode": "EUR", "type": "STOCK", "exchange": "Euronext Paris"},
     {"ticker": "FOOb_EQ", "shortName": "FOO", "currencyCode": "EUR", "type": "STOCK", "exchange": "Euronext Paris"},
     {"ticker": "T212UNF_EQ", "shortName": "T212UNF", "currencyCode": "EUR", "type": "STOCK", "exchange": "Euronext Amsterdam"},
+    {"ticker": "MINEGRD_EQ", "shortName": "MINEGRD", "currencyCode": "EUR", "type": "STOCK", "exchange": "NASDAQ"},
+    {"ticker": "KOGUARDB_EQ", "shortName": "KOGUARDB", "currencyCode": "EUR", "type": "STOCK", "exchange": "NASDAQ"},
 ]
 
 

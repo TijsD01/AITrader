@@ -94,6 +94,8 @@ class Settings(BaseSettings):
     SHADOW_STRATEGIES: str = "aggressive,baseline,breakeven_1r,no_breakeven,score_76"   # Comma-separated preset keys: aggressive, momentum, baseline, breakeven_1r, no_breakeven, score_76 (or custom keys)
     SHADOW_INITIAL_CAPITAL: Optional[float] = None  # Starting cash per shadow (empty = INITIAL_PAPER_CAPITAL)
     SHADOW_CUSTOM_STRATEGIES: str = ""      # JSON: {"key": {"base": "aggressive", "score_offset": -5, ...}}
+    SHADOW_LEARN_MIN_TRADES: int = 10       # Closed trades needed before a shadow's params are learned from
+    SHADOW_MAX_STRATEGIES: int = 12         # Upper bound on shadow strategies kept at once
 
     @field_validator("SHADOW_INITIAL_CAPITAL", mode="before")
     @classmethod

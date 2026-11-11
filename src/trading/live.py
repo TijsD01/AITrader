@@ -12,6 +12,8 @@ from src.db.models import Position, Trade, PortfolioSnapshot, SystemConfig, Orde
 from src.db.session import AsyncSessionLocal
 from src.data.currency import currency_service
 from src.data.market import market_data_provider
+from src.trading.levels import effective_breakeven_pct, max_hold_exceeded, pct_trail_stop
+from src.trading.main_strategy import MainRules, get_main_rules
 from src.trading.risk import risk_guardrail, get_effective_deployable_cash, allocate_pending_triggers, evaluate_trigger_condition, is_trigger_expired, validate_trigger_levels, compute_trailing_stop, check_market_regime, affordable_share_count, fit_allocation_to_share, new_entry_allocation, risk_capped_allocation, plan_pending_triggers
 from src.data.market_hours import check_market_hours, quotes_moving
 from src.trading.base import BaseBroker
@@ -689,7 +691,8 @@ class LiveBroker(BaseBroker):
         consensus_score: int,
         rationale: str,
         is_manual: bool = False,
-        trigger_id: Optional[int] = None
+        trigger_id: Optional[int] = None,
+        rules_version: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Submits real buy order to the brokerage API (Trading 212 / Alpaca) with real money.
@@ -727,7 +730,7 @@ class LiveBroker(BaseBroker):
                 ticker=ticker, name=name, currency=currency, shares=filled, price_native=fill_price,
                 stop_loss_native=stop_loss_native, take_profit_native=take_profit_native,
                 rationale=rationale, consensus_score=consensus_score, broker_order_id=broker_order_id,
-                trigger_id=trigger_id
+                trigger_id=trigger_id, rules_version=rules_version
             )
         await self.adjust_triggers_dynamically()
 
@@ -913,7 +916,8 @@ class LiveBroker(BaseBroker):
         rationale: str,
         consensus_score: int,
         broker_order_id: str,
-        trigger_id: Optional[int] = None
+        trigger_id: Optional[int] = None,
+        rules_version: Optional[int] = None
     ) -> Dict[str, Any]:
         """Record a filled live BUY: position, trade and snapshot. Callers hold _t212_lock (Trading 212)."""
         from src.trading.fees import calculate_broker_fee
@@ -962,6 +966,8 @@ class LiveBroker(BaseBroker):
                 is_live=True,
                 broker_order_id=broker_order_id,
                 trigger_id=trigger_id,
+                rules_version=rules_version,
+                initial_stop_native=stop_loss_native,
                 opened_at=utc_now
             )
             session.add(new_pos)
@@ -1157,6 +1163,11 @@ class LiveBroker(BaseBroker):
                 ))
             except Exception:
                 pass
+            try:
+                from src.memory.outcomes import record_main_outcome
+                record_main_outcome(pos, trade, reason)
+            except Exception as mem_err:
+                logger.warning(f"Could not record outcome for trade #{trade.id}: {mem_err}")
 
             sell_res = {
                 "success": True,
@@ -1196,7 +1207,8 @@ class LiveBroker(BaseBroker):
         consensus_score: int,
         ai_rationale: str,
         report_id: Optional[int] = None,
-        forced: bool = False
+        forced: bool = False,
+        rules_version: Optional[int] = None
     ) -> Dict[str, Any]:
         """Creates an armed price trigger for live execution. report_id links it to its AnalysisReport."""
         target_price = round(target_price, 2)
@@ -1301,6 +1313,7 @@ class LiveBroker(BaseBroker):
                 ai_rationale=f"[LIVE ARMED] {ai_rationale}",
                 report_id=report_id,
                 forced=forced,
+                rules_version=rules_version,
                 status="PENDING",
                 is_live=True,
                 created_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
@@ -1738,7 +1751,8 @@ class LiveBroker(BaseBroker):
                         consensus_score=t.consensus_score or 80,
                         rationale=f"Live Trigger #{t.id} Hit ({t.trigger_type} @ {t.target_price})",
                         is_manual=False,
-                        trigger_id=t.id
+                        trigger_id=t.id,
+                        rules_version=t.rules_version
                     )
                     if trade_res.get("success"):
                         t.status = "TRIGGERED"
@@ -1794,7 +1808,7 @@ class LiveBroker(BaseBroker):
             price_native=price, stop_loss_native=trigger.stop_loss, take_profit_native=trigger.take_profit,
             rationale=f"Resting order #{trigger.id} filled ({trigger.trigger_type} @ {trigger.target_price})",
             consensus_score=trigger.consensus_score or 80, broker_order_id=trigger.broker_order_id,
-            trigger_id=trigger.id,
+            trigger_id=trigger.id, rules_version=trigger.rules_version,
         )
         return [dict(res, trigger_id=trigger.id)]
 
@@ -1914,10 +1928,12 @@ class LiveBroker(BaseBroker):
         return booked
 
     async def check_stops_and_targets(self) -> List[Dict[str, Any]]:
-        """Monitors open live positions for stop-loss and take-profit."""
-        await self.refresh_positions_pnl()
+        """Monitors open live positions for stop-loss, take-profit and (promoted rules) maximum hold time."""
+        rules = await get_main_rules()
+        await self.refresh_positions_pnl(rules)
         await self.enforce_daily_loss_limit()
         triggered = []
+        utc_now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
         async with AsyncSessionLocal() as session:
             res = await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == True))
             positions = res.scalars().all()
@@ -1930,6 +1946,9 @@ class LiveBroker(BaseBroker):
                     # Resting mode: a limit at the target, so a spike seen on the T212 price cannot sell below it
                     limit = p.take_profit_native if self.resting_orders_on() else None
                     tickers_to_close.append((p.ticker, f"Live Take-Profit triggered at {p.current_price_native} >= {p.take_profit_native}", limit))
+                elif (p.rules_version is not None and p.rules_version == rules.version
+                      and max_hold_exceeded(p.opened_at, utc_now, rules.max_hold_days)):
+                    tickers_to_close.append((p.ticker, f"Time exit after {rules.max_hold_days} days", None))
 
         for ticker, reason, limit in tickers_to_close:
             sell_res = await self.execute_sell(ticker, reason=reason, limit_price_native=limit)
@@ -1938,12 +1957,14 @@ class LiveBroker(BaseBroker):
 
         return triggered
 
-    async def refresh_positions_pnl(self):
+    async def refresh_positions_pnl(self, rules: Optional[MainRules] = None):
         """Refreshes quotes, unrealized PnL, trailing high and breakeven stop for active positions."""
         async with self._refresh_lock:
             now = time.time()
             if (now - self._last_pnl_refresh) < self._pnl_refresh_ttl:
                 return
+            rules = rules or await get_main_rules()
+            strategy = None
 
             async with AsyncSessionLocal() as session:
                 # User holdings refresh even when the bot holds nothing; a failure here must not block bot stops
@@ -1997,17 +2018,30 @@ class LiveBroker(BaseBroker):
                             # Positions without a stop are left alone: those are holdings synced from the broker, not bot trades.
                             if p.stop_loss_native and p.entry_price_native:
                                 gain_pct = (curr_price / p.entry_price_native) - 1.0
-                                if gain_pct >= breakeven_trigger_pct:
+                                be_pct = breakeven_trigger_pct
+                                shaped = p.rules_version is not None and p.rules_version == rules.version
+                                if shaped:  # opened under the active promoted rules: their breakeven trigger and % trail
+                                    strategy = strategy or rules.as_strategy()
+                                    be_pct = effective_breakeven_pct(strategy, rules.breakeven_pct, p.entry_price_native, p.initial_stop_native)
+                                new_stop = p.stop_loss_native
+                                if gain_pct >= be_pct:
                                     atr = None
                                     if settings.TRAILING_STOP_ATR_MULT > 0:
                                         atr_data = await asyncio.to_thread(market_data_provider.get_stock_data, p.ticker)
                                         atr = atr_data.get("technicals", {}).get("atr14") if atr_data else None
                                     new_stop = compute_trailing_stop(
-                                        p.entry_price_native, p.stop_loss_native, p.highest_price_native, atr, breakeven_trigger_pct
+                                        p.entry_price_native, p.stop_loss_native, p.highest_price_native, atr, be_pct
                                     )
-                                    if new_stop is not None and new_stop != p.stop_loss_native:
-                                        p.stop_loss_native = new_stop
-                                        logger.info(f"Live trailing stop raised for {p.ticker} to {new_stop} (+{gain_pct*100:.1f}%)")
+                                if shaped:
+                                    new_stop = pct_trail_stop(new_stop, p.highest_price_native, rules.trailing_stop_pct)
+                                if new_stop is not None and new_stop != p.stop_loss_native:
+                                    p.stop_loss_native = new_stop
+                                    logger.info(f"Live trailing stop raised for {p.ticker} to {new_stop} (+{gain_pct*100:.1f}%)")
+                                    if new_stop >= curr_price:
+                                        # A sell stop at or above market is rejected or fills at once: the bot's own stop
+                                        # check sells this run, and the old broker stop stays in place as the fallback
+                                        logger.info(f"Broker stop for {p.ticker} left in place: new stop {new_stop} is not below the price {curr_price}.")
+                                    else:
                                         # Re-check under the T212 lock: a flip to Mine may have landed during this refresh
                                         async with self._t212_lock, AsyncSessionLocal() as check:
                                             if getattr(await check.get(Position, p.id), "status", None) == "OPEN":
@@ -2093,10 +2127,13 @@ class LiveBroker(BaseBroker):
             else:
                 pos.cost_basis_eur *= shares / pos.shares
             pos.shares = shares
-        if not pos.stop_loss_native or not pos.take_profit_native:
+        # Under promoted rules a missing target is deliberate (take-profit off); an older trigger's target is stale.
+        tp_missing = not pos.take_profit_native and pos.rules_version is None
+        if not pos.stop_loss_native or tp_missing:
             sl, tp = await self._planned_levels(session, level_ticker)
             pos.stop_loss_native = pos.stop_loss_native or sl
-            pos.take_profit_native = pos.take_profit_native or tp
+            if tp_missing:
+                pos.take_profit_native = tp
 
     async def _adopt_holding(
         self, session, ticker: str, name: str, curr_code: str, shares: float, cost_native: float, fees_eur: float,

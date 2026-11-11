@@ -4,9 +4,9 @@ import logging
 import time
 import uuid
 from typing import Dict, Any, List, Literal, Optional, Tuple
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Path
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select, desc, func
 
 from config.settings import settings, update_env_file
@@ -276,6 +276,9 @@ async def manual_buy(req: BuyRequest):
     data = await asyncio.to_thread(market_data_provider.get_stock_data, ticker)
     if not data:
         raise HTTPException(status_code=404, detail=f"Stock data not found for '{ticker}'.")
+    on_broker, why = await trading212.broker_can_buy(ticker, data.get("currency"))
+    if not on_broker:
+        raise HTTPException(status_code=400, detail=why)
 
     summary = await active_broker.get_portfolio_summary()
     available_cash = summary.get("available_cash_eur", 0.0)
@@ -851,6 +854,94 @@ async def get_shadow_comparison():
         main_summary = {}
     return await shadow_portfolios.get_comparison(main_summary, main_is_live)
 
+class ShadowCreate(BaseModel):
+    label: str = Field(min_length=1)
+    params: Dict[str, Any] = {}
+    base: str = "baseline"
+    description: str = ""
+
+class ShadowCopy(BaseModel):
+    label: str = Field(min_length=1)
+
+class ShadowPatch(BaseModel):
+    label: Optional[str] = Field(default=None, min_length=1)
+    description: Optional[str] = None
+    params: Optional[Dict[str, Any]] = None
+    learning_strength: Optional[int] = None
+    enabled: Optional[bool] = None
+
+async def _shadow_call(coro):
+    """Maps the shadow store's errors to HTTP: bad input is 422, an unknown strategy or change is 404."""
+    try:
+        return await coro
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+# Declared before any /api/shadow/{key} GET so "schema" is not read as a key
+@router.get("/api/shadow/schema")
+async def get_shadow_schema():
+    from src.trading.strategy_params import to_json_schema
+    return to_json_schema()
+
+@router.post("/api/shadow")
+async def create_shadow(body: ShadowCreate):
+    from src.trading.shadow import PRESETS, create_strategy
+    if body.base not in PRESETS:
+        raise HTTPException(status_code=422, detail=f"base: unknown preset '{body.base}'")
+    params = {**PRESETS[body.base].to_params(), **body.params}
+    return {"success": True, "key": await _shadow_call(create_strategy(body.label, params, body.description))}
+
+@router.post("/api/shadow/{strategy_key}/copy")
+async def copy_shadow(strategy_key: str, body: ShadowCopy):
+    from src.trading.shadow import copy_strategy
+    return {"success": True, "key": await _shadow_call(copy_strategy(strategy_key, body.label))}
+
+@router.patch("/api/shadow/{strategy_key}")
+async def edit_shadow(strategy_key: str, body: ShadowPatch):
+    from src.trading.shadow import edit_strategy
+    changes = await _shadow_call(edit_strategy(
+        strategy_key, label=body.label, description=body.description, params=body.params,
+        learning_strength=body.learning_strength, enabled=body.enabled))
+    return {"success": True, "changes": changes}
+
+@router.delete("/api/shadow/{strategy_key}")
+async def delete_shadow(strategy_key: str):
+    from src.trading.shadow import delete_strategy
+    if not await delete_strategy(strategy_key):
+        raise HTTPException(status_code=404, detail=f"No shadow portfolio named '{strategy_key}'.")
+    return {"success": True}
+
+@router.get("/api/shadow/{strategy_key}/history")
+async def shadow_history(strategy_key: str):
+    from src.db.models import ShadowParamChange
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(
+            select(ShadowParamChange).where(ShadowParamChange.strategy == strategy_key)
+            .order_by(desc(ShadowParamChange.id)).limit(50))).scalars().all()
+    return [{"id": r.id, "source": r.source, "changes": r.changes, "reason": r.reason,
+             "created_at": r.created_at.isoformat() if r.created_at else None} for r in rows]
+
+@router.post("/api/shadow/{strategy_key}/history/{change_id}/undo")
+async def undo_shadow_change(strategy_key: str, change_id: int = Path(ge=1, le=2**63 - 1)):
+    from src.db.models import ShadowParamChange
+    from src.trading.shadow import undo_param_change
+    async with AsyncSessionLocal() as session:
+        change = await session.get(ShadowParamChange, change_id)
+    if not change or change.strategy != strategy_key:
+        raise HTTPException(status_code=404, detail=f"No change {change_id} for '{strategy_key}'.")
+    return {"success": True, "changes": await _shadow_call(undo_param_change(change_id))}
+
+@router.post("/api/shadow/{strategy_key}/learn")
+async def learn_shadow(strategy_key: str):
+    """Runs one learning pass now. The LLM call can take minutes, so this simply awaits it."""
+    from src.trading.shadow import get_strategies
+    from src.trading.shadow_learner import shadow_learner
+    if strategy_key not in {s.key for s in get_strategies()}:
+        raise HTTPException(status_code=404, detail=f"No shadow portfolio named '{strategy_key}'.")
+    return await shadow_learner.learn(strategy_key, manual=True)
+
 @router.post("/api/shadow/{strategy_key}/reset")
 async def reset_shadow(strategy_key: str):
     """Restarts one shadow portfolio from fresh simulated capital. Never touches the main portfolio."""
@@ -858,6 +949,48 @@ async def reset_shadow(strategy_key: str):
     if not await shadow_portfolios.reset(strategy_key.strip().lower()):
         raise HTTPException(status_code=404, detail=f"No shadow portfolio named '{strategy_key}'.")
     return {"success": True, "message": f"Shadow portfolio '{strategy_key}' was reset."}
+
+# 10. Promote: the owner copies a shadow's rules onto the main bot (rules only; positions and triggers keep their levels)
+class PromoteRequest(BaseModel):
+    confirm: Any = None       # must be exactly true; checked in promote()
+    confirm_text: Any = ""    # "PROMOTE LIVE" when a LIVE promote newly turns on a risky rule
+
+async def _promote_call(coro):
+    """Maps promote errors to HTTP: a refused promote is 400, an unknown shadow is 404."""
+    try:
+        return await coro
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+@router.get("/api/shadow/{strategy_key}/promote/preview")
+async def preview_promote(strategy_key: str):
+    from src.trading.promote import preview
+    return await _promote_call(preview(strategy_key))
+
+@router.post("/api/shadow/{strategy_key}/promote")
+async def promote_shadow(strategy_key: str, body: PromoteRequest):
+    from src.trading.promote import promote
+    return await _promote_call(promote(strategy_key, body.confirm, body.confirm_text))
+
+@router.get("/api/main/rules")
+async def get_main_rules_status():
+    from src.trading.promote import status
+    return await status()
+
+@router.post("/api/main/rules/revert")
+async def revert_main_rules_route():
+    from src.trading.promote import revert
+    if not await revert():
+        raise HTTPException(status_code=400, detail="Nothing to revert: no previous main rule set is stored.")
+    return {"success": True}
+
+@router.post("/api/main/learner/resume")
+async def resume_main_learner():
+    from src.trading.promote import set_learner_paused
+    await set_learner_paused(False)
+    return {"success": True}
 
 
 class OwnerRequest(BaseModel):
@@ -912,6 +1045,8 @@ async def get_ticker_detail(ticker: str, range: str = "3M"):
     Only side effect: active_broker.get_triggers() may re-adjust pending triggers, as the Triggers tab does.
     """
     from src.db.models import ShadowPosition, ShadowTrigger
+    from src.trading import main_strategy
+    from src.trading.levels import effective_breakeven_pct
     from src.trading.shadow import PRESETS, get_strategies
 
     sym = normalize_ticker(ticker)
@@ -938,6 +1073,8 @@ async def get_ticker_detail(ticker: str, range: str = "3M"):
         be_row = (await session.execute(
             select(SystemConfig).where(SystemConfig.key == "BREAKEVEN_TRIGGER_PCT"))).scalars().first()
         be_pct = float(be_row.value) if be_row else 0.025
+        rules = await main_strategy.get_main_rules()
+        rules_strategy = rules.as_strategy()
 
         positions = (await session.execute(
             select(Position).where(Position.ticker == sym, Position.status == "OPEN", Position.is_live == live)
@@ -945,8 +1082,11 @@ async def get_ticker_detail(ticker: str, range: str = "3M"):
         for p in positions:
             fallback_name, fallback_currency = fallback_name or p.name, fallback_currency or p.currency
             entry, stop = p.entry_price_native, p.stop_loss_native
+            pos_be = be_pct
+            if p.rules_version is not None and p.rules_version == rules.version:  # same rule as the brokers' ratchet
+                pos_be = effective_breakeven_pct(rules_strategy, rules.breakeven_pct, entry, p.initial_stop_native)
             # breakeven_at only matters until the stop has ratcheted up to entry
-            breakeven = round(entry * (1 + be_pct), 2) if entry and (stop is None or stop < entry) else None
+            breakeven = round(entry * (1 + pos_be), 2) if entry and (stop is None or stop < entry) else None
             level_sets.append(_level_set(
                 f"position:{p.id}", "position", "Open position", "live", status=p.status,
                 levels={"entry": entry, "stop": stop, "take_profit": p.take_profit_native,

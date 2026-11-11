@@ -104,3 +104,43 @@ async def test_live_sync_fills_levels_from_latest_trigger():
             await s.execute(delete(Position).where(Position.ticker.in_(["SYNCNEW", "SYNCOLD"])))
             await s.execute(delete(OrderTrigger).where(OrderTrigger.ticker.in_(["SYNCNEW", "SYNCOLD"])))
             await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_live_sync_never_backfills_take_profit_under_promoted_rules():
+    """A position opened under promoted rules without a target keeps none; an older trigger's target is stale."""
+    from sqlalchemy import select, delete
+    from src.db.models import Position, OrderTrigger
+    from src.db.session import AsyncSessionLocal
+    from src.trading.live import LiveBroker
+
+    await init_db()
+    async with AsyncSessionLocal() as s:
+        s.add_all([
+            OrderTrigger(ticker=t, target_price=221.0, current_price_at_creation=225.0, stop_loss=215.02,
+                         take_profit=230.18, allocation_eur=200.0, status="TRIGGERED", is_live=True)
+            for t in ("SYNCRV", "SYNCNORV")
+        ])
+        s.add_all([
+            Position(ticker=t, name=t, currency="USD", shares=1.0, entry_price_native=221.37,
+                     current_price_native=221.37, highest_price_native=221.37, entry_price_eur=200.0,
+                     current_price_eur=200.0, cost_basis_eur=200.0, status="OPEN", is_live=True, rules_version=rv)
+            for t, rv in (("SYNCRV", 3), ("SYNCNORV", None))
+        ])
+        await s.commit()
+    broker = LiveBroker()
+    try:
+        async with AsyncSessionLocal() as s:
+            for t in ("SYNCRV", "SYNCNORV"):
+                pos = (await s.execute(select(Position).where(Position.ticker == t))).scalars().first()
+                await broker._update_tracked_holding(s, pos, t, 1.0, 221.37, "USD")
+            await s.commit()
+        async with AsyncSessionLocal() as s:
+            rows = (await s.execute(select(Position).where(Position.ticker.in_(["SYNCRV", "SYNCNORV"])))).scalars().all()
+            assert {p.ticker: (p.stop_loss_native, p.take_profit_native) for p in rows} == {
+                "SYNCRV": (215.02, None), "SYNCNORV": (215.02, 230.18)}
+    finally:
+        async with AsyncSessionLocal() as s:
+            await s.execute(delete(Position).where(Position.ticker.in_(["SYNCRV", "SYNCNORV"])))
+            await s.execute(delete(OrderTrigger).where(OrderTrigger.ticker.in_(["SYNCRV", "SYNCNORV"])))
+            await s.commit()

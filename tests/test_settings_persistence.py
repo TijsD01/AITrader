@@ -124,3 +124,26 @@ def test_unknown_live_broker_fails_at_startup():
     with pytest.raises(ValidationError, match="not supported"):
         Settings(_env_file=None, LIVE_BROKER="ibkr")
     assert Settings(_env_file=None, LIVE_BROKER="Trading212").LIVE_BROKER == "Trading212"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("score_raw,pos_raw,expected", [("150", "999", (100, 50)), ("-5", "-3", (0, 1)), ("72", "4", (72, 4))])
+async def test_startup_clamps_stored_threshold_and_max_positions(monkeypatch, score_raw, pos_raw, expected):
+    from src.db.session import init_db
+    monkeypatch.setattr(settings, "TRIGGER_MIN_SCORE", settings.TRIGGER_MIN_SCORE)
+    monkeypatch.setattr(settings, "MAX_POSITIONS", settings.MAX_POSITIONS)
+    keys = ["TRIGGER_MIN_SCORE", "MAX_POSITIONS"]
+    async with AsyncSessionLocal() as session:
+        saved = {r.key: r.value for r in (await session.execute(select(SystemConfig).where(SystemConfig.key.in_(keys)))).scalars().all()}
+    try:
+        async with AsyncSessionLocal() as session:
+            await session.merge(SystemConfig(key="TRIGGER_MIN_SCORE", value=score_raw))
+            await session.merge(SystemConfig(key="MAX_POSITIONS", value=pos_raw))
+            await session.commit()
+        await init_db()
+        assert (settings.TRIGGER_MIN_SCORE, settings.MAX_POSITIONS) == expected
+    finally:
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(SystemConfig).where(SystemConfig.key.in_(keys)))
+            session.add_all([SystemConfig(key=k, value=v) for k, v in saved.items()])
+            await session.commit()

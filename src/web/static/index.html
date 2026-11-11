@@ -184,6 +184,9 @@
         </div>
       </div>
 
+      <!-- Promoted main rules banner (app.js loadMainRulesBanner) -->
+      <div data-main-rules-banner hidden></div>
+
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 md:gap-8">
         <div class="lg:col-span-2 space-y-6 md:space-y-8 min-w-0">
 
@@ -707,6 +710,8 @@
           <i class="fa-solid fa-arrows-rotate"></i>
         </button>
       </div>
+      <div data-main-rules-banner hidden></div>
+      <button type="button" class="ui-btn ui-btn-primary" style="min-height:44px" data-action="new-shadow"><i class="fa-solid fa-plus" aria-hidden="true"></i> New shadow</button>
       <div id="shadowContainer" class="space-y-6" data-loading>
         <div class="ui-card ui-card-pad text-[13px] ui-muted">Loading shadow portfolios...</div>
       </div>
@@ -1051,6 +1056,46 @@
     <i id="toastIcon" class="fa-solid fa-circle-check ui-gain"></i>
     <span id="toastMsg">Action executed.</span>
   </div>
+
+  <!-- Shadow editor sheet (app.js openShadowEditor) -->
+  <dialog id="shadowEditor" class="ticker-sheet" aria-labelledby="seTitle">
+    <div class="ts-panel">
+      <header class="ts-head">
+        <div class="min-w-0"><h2 id="seTitle" class="ts-ticker">Shadow</h2></div>
+        <button type="button" class="ui-btn ui-btn-quiet ui-icon-btn" data-se-close aria-label="Close"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
+      </header>
+      <div id="seBody" class="se-body"></div>
+      <div class="se-actions">
+        <p id="seError" class="ui-notice ui-notice-danger hidden" role="alert"></p>
+        <div class="se-buttons">
+          <button type="button" class="ui-btn" data-se-close>Cancel</button>
+          <button type="button" class="ui-btn ui-btn-primary" data-se-save>Save</button>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Promote sheet: before/after of a shadow's rules on the main bot (app.js openPromoteDialog) -->
+  <dialog id="promoteDialog" class="ticker-sheet" aria-labelledby="prTitle">
+    <div class="ts-panel">
+      <header class="ts-head">
+        <div class="min-w-0">
+          <h2 id="prTitle" class="ts-ticker pr-title">Use for main bot</h2>
+          <span id="prMode" class="ui-badge mt-1"></span>
+        </div>
+        <button type="button" class="ui-btn ui-btn-quiet ui-icon-btn" data-pr-close aria-label="Close"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
+      </header>
+      <div id="prBody" class="se-body"></div>
+      <!-- In the scroll area, not the sticky footer, so it never covers the confirm input -->
+      <p id="prError" class="ui-notice ui-notice-danger hidden" role="alert"></p>
+      <div class="se-actions">
+        <div class="se-buttons">
+          <button type="button" class="ui-btn" data-pr-close id="prCancel">Cancel</button>
+          <button type="button" class="ui-btn ui-btn-primary" data-action="confirm-promote" id="prConfirm">Confirm</button>
+        </div>
+      </div>
+    </div>
+  </dialog>
 
   <!-- Ticker detail sheet (app.js openTickerSheet) -->
   <dialog id="tickerSheet" class="ticker-sheet" aria-labelledby="tsTicker" data-state="loading">

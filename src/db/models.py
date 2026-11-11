@@ -50,6 +50,8 @@ class Position(Base):
     is_live = Column(Boolean, default=False)
     broker_order_id = Column(String(100), nullable=True)
     trigger_id = Column(Integer, nullable=True)  # OrderTrigger that opened this position (NULL = manual/direct buy)
+    rules_version = Column(Integer, nullable=True)  # MAIN_RULES_VERSION in force when the position opened
+    initial_stop_native = Column(Float, nullable=True)  # Stop the position opened with, before any ratchet (NULL = older rows)
     opened_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
@@ -189,6 +191,7 @@ class OrderTrigger(Base):
     cancel_reason = Column(String(255), nullable=True)  # why the trigger was CANCELLED or EXPIRED
     report_id = Column(Integer, nullable=True)  # AnalysisReport that armed this trigger (NULL = manual/scanner)
     forced = Column(Boolean, default=False)  # armed with force against a soft block (HOLD / low score)
+    rules_version = Column(Integer, nullable=True)  # MAIN_RULES_VERSION that planned it (NULL = default rules or manual)
 
 class TradeLesson(Base):
     __tablename__ = "trade_lessons"
@@ -282,3 +285,31 @@ class ShadowSnapshot(Base):
     timestamp = Column(DateTime, default=datetime.datetime.utcnow, index=True)
     total_value_eur = Column(Float, nullable=False)
     return_pct = Column(Float, default=0.0)
+
+
+class ShadowStrategyRow(Base):
+    __tablename__ = "shadow_strategies"
+
+    key = Column(String(40), primary_key=True)
+    label = Column(String(60), nullable=False)
+    description = Column(Text, nullable=True)
+    params = Column(JSON, nullable=False)
+    learning_strength = Column(Integer, default=0, nullable=False)
+    enabled = Column(Boolean, default=True, nullable=False)
+    copied_from = Column(String(40), nullable=True)
+    is_preset = Column(Boolean, default=False, nullable=False)
+    closed_at_last_learn = Column(Integer, default=0, nullable=False)  # Closed-trade count at last learning pass
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+
+
+class ShadowParamChange(Base):
+    __tablename__ = "shadow_param_changes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    strategy = Column(String(40), nullable=False, index=True)
+    source = Column(String(20))  # Who changed the params, e.g. manual or learner
+    changes = Column(JSON)
+    reason = Column(Text, nullable=True)
+    stats = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow, index=True)

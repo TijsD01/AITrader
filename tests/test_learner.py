@@ -377,3 +377,122 @@ async def test_idle_decay_skips_when_slots_full(monkeypatch, idle_decay_db):
     res = await trade_learner.decay_idle_thresholds()
     assert res["skipped"] is True
     assert (settings.MIN_CONSENSUS_SCORE, settings.TRIGGER_MIN_SCORE) == (78, 84)
+
+
+_PAUSE_MSG = "Auto-calibration is paused while promoted shadow rules are active."
+_CALIBRATION_KEYS = ["TRIGGER_MIN_SCORE", "MIN_CONSENSUS_SCORE", "BREAKEVEN_TRIGGER_PCT", "TAKE_PROFIT_RR", "LAST_CALIBRATION_TIMESTAMP"]
+
+
+@pytest.fixture
+async def paused_learner(monkeypatch):
+    """Sets MAIN_LEARNER_PAUSED=true and restores every SystemConfig row, the trades and the lesson afterwards."""
+    await init_db()
+    # Calibration writes these into settings; monkeypatch puts them back
+    monkeypatch.setattr(settings, "MIN_CONSENSUS_SCORE", settings.MIN_CONSENSUS_SCORE)
+    monkeypatch.setattr(settings, "TRIGGER_MIN_SCORE", settings.TRIGGER_MIN_SCORE)
+    async with AsyncSessionLocal() as session:
+        saved = {r.key: r.value for r in (await session.execute(select(SystemConfig))).scalars().all()}
+        await session.execute(delete(SystemConfig).where(SystemConfig.key == "MAIN_LEARNER_PAUSED"))
+        session.add(SystemConfig(key="MAIN_LEARNER_PAUSED", value="True"))
+        await session.commit()
+    yield
+    async with AsyncSessionLocal() as session:
+        await session.execute(delete(Trade).where(Trade.ticker.like("PAUSE_LOSS_%")))
+        await session.execute(delete(TradeLesson).where(TradeLesson.ticker == "PAUSE_LOSS_0"))
+        await session.execute(delete(SystemConfig))
+        session.add_all([SystemConfig(key=k, value=v) for k, v in saved.items() if k != "MAIN_LEARNER_PAUSED"])
+        await session.commit()
+
+
+async def _arrange_calibration_trades(monkeypatch):
+    """Three fresh paper losses since an old calibration plus a lesson, so calibration would call the LLM."""
+    monkeypatch.setattr(settings, "LEARNER_MIN_TRADES", 3)
+    now = datetime.datetime.utcnow()
+    async with AsyncSessionLocal() as session:
+        await session.execute(delete(SystemConfig).where(SystemConfig.key.in_(_CALIBRATION_KEYS)))
+        session.add_all([
+            SystemConfig(key="TRIGGER_MIN_SCORE", value="80"),
+            SystemConfig(key="MIN_CONSENSUS_SCORE", value="74"),
+            SystemConfig(key="BREAKEVEN_TRIGGER_PCT", value="0.025"),
+            SystemConfig(key="TAKE_PROFIT_RR", value="2.1"),
+            SystemConfig(key="LAST_CALIBRATION_TIMESTAMP", value=(now - datetime.timedelta(days=30)).isoformat()),
+        ])
+        for i in range(3):
+            session.add(Trade(
+                ticker=f"PAUSE_LOSS_{i}", name="Loss", order_type="SELL", shares=5.0, currency="EUR",
+                price_native=95.0, price_eur=95.0, total_eur=475.0, realized_pnl_eur=-25.0, realized_pnl_pct=-5.0,
+                rationale="Stop-Loss triggered", is_live=False, executed_at=now + datetime.timedelta(minutes=i)))
+        session.add(TradeLesson(trade_id=-2, ticker="PAUSE_LOSS_0", outcome="LOSS", lesson="Pause test lesson"))
+        await session.commit()
+
+
+async def _calibration_rows():
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(select(SystemConfig).where(SystemConfig.key.in_(_CALIBRATION_KEYS)))).scalars().all()
+        return {r.key: r.value for r in rows}
+
+
+async def _set_paused(value):
+    async with AsyncSessionLocal() as session:
+        await session.execute(delete(SystemConfig).where(SystemConfig.key == "MAIN_LEARNER_PAUSED"))
+        if value is not None:
+            session.add(SystemConfig(key="MAIN_LEARNER_PAUSED", value=value))
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_paused_learner_skips_automatic_calibration(monkeypatch, paused_learner):
+    from unittest.mock import AsyncMock
+    await _arrange_calibration_trades(monkeypatch)
+    before = await _calibration_rows()
+    llm = AsyncMock(return_value={})
+    with patch("src.agents.base.llm_client.has_active_key", return_value=True), \
+         patch("src.agents.base.llm_client.generate_json", llm):
+        res = await trade_learner.calibrate_internal_parameters(automatic=True)
+        assert res == {"success": False, "skipped": True, "message": _PAUSE_MSG, "adjustments": []}
+        assert await _calibration_rows() == before
+        llm.assert_not_awaited()
+
+        # Control: the same state calibrates once the pause is lifted
+        await _set_paused(None)
+        res = await trade_learner.calibrate_internal_parameters(automatic=True)
+    assert res["success"] is True
+    llm.assert_awaited()
+    assert (await _calibration_rows())["LAST_CALIBRATION_TIMESTAMP"] != before["LAST_CALIBRATION_TIMESTAMP"]
+
+
+@pytest.mark.asyncio
+async def test_paused_learner_still_runs_manual_calibration(monkeypatch, paused_learner):
+    from unittest.mock import AsyncMock
+    await _arrange_calibration_trades(monkeypatch)
+    llm = AsyncMock(return_value={})
+    with patch("src.agents.base.llm_client.has_active_key", return_value=True), \
+         patch("src.agents.base.llm_client.generate_json", llm):
+        res = await trade_learner.calibrate_internal_parameters(automatic=False)
+    assert res["success"] is True
+    llm.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_paused_learner_skips_idle_decay(monkeypatch, idle_decay_db, paused_learner):
+    await _arrange_idle_decay(monkeypatch, buy_days_ago=10)
+    before = await _db_scores()
+    res = await trade_learner.decay_idle_thresholds()
+    assert res == {"success": False, "skipped": True, "message": _PAUSE_MSG, "adjustments": []}
+    assert (settings.MIN_CONSENSUS_SCORE, settings.TRIGGER_MIN_SCORE) == (78, 84)
+    assert await _db_scores() == before
+    async with AsyncSessionLocal() as session:
+        assert (await session.execute(select(SystemConfig).where(SystemConfig.key == "LAST_IDLE_DECAY_DATE"))).scalars().first() is None
+
+    # Control: any value other than "true" means not paused, and the same state decays
+    await _set_paused("false")
+    res = await trade_learner.decay_idle_thresholds()
+    assert res["success"] is True
+    assert (settings.MIN_CONSENSUS_SCORE, settings.TRIGGER_MIN_SCORE) == (77, 83)
+
+
+@pytest.mark.asyncio
+async def test_pause_flag_read_error_means_not_paused():
+    from src.trading import learner
+    with patch.object(learner, "AsyncSessionLocal", side_effect=RuntimeError("db down")):
+        assert await learner._main_learner_paused() is False

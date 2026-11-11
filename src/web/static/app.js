@@ -120,6 +120,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initChart();
   applyTheme();
   loadAllData();
+  loadMainRulesBanner();
   switchTabUi('portfolio');
   updateMoreButton('portfolio');
   initFolds();
@@ -158,6 +159,16 @@ document.addEventListener('click', (e) => {
     case 'inspect': inspectReport(Number(el.dataset.idx)); break;
     case 'cancel-trigger': cancelTrigger(Number(el.dataset.id), ticker); break;
     case 'reset-shadow': resetShadow(el.dataset.key || ''); break;
+    case 'new-shadow': openShadowEditor(null); break;
+    case 'edit-shadow': openShadowEditor(el.dataset.key || ''); break;
+    case 'learn-shadow': learnShadow(el); break;
+    case 'copy-shadow': copyShadow(el.dataset.key || ''); break;
+    case 'delete-shadow': deleteShadow(el.dataset.key || ''); break;
+    case 'undo-shadow-change': undoShadowChange(el.dataset.key || '', Number(el.dataset.id)); break;
+    case 'promote-shadow': openPromoteDialog(el.dataset.key || ''); break;
+    case 'confirm-promote': confirmPromote(); break;
+    case 'revert-main-rules': revertMainRules(el); break;
+    case 'resume-main-learner': resumeMainLearner(el); break;
     case 'open-ticker': openTickerSheet(ticker, el.dataset.source || ''); break;
     default: break;
   }
@@ -3084,16 +3095,26 @@ function renderShadowStrategy(s, mainLabel) {
     <div class="ui-card ui-card-pad space-y-4">
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0">
-          <h3 class="ui-section-title">${esc(s.label)}</h3>
+          <h3 class="ui-section-title">${esc(s.label)}<span class="ui-badge ui-badge-accent ${s.learning_strength > 0 ? '' : 'hidden'}" data-sh-badge>Learning</span></h3>
           <p class="text-[13px] ui-muted mt-1">${esc(s.description)}</p>
           <p class="text-xs ui-faint mt-1 ui-num">Since ${esc(s.started_at || '--')} · start ${esc(eur(s.initial_capital_eur))}</p>
           ${shadowFrozenNote(s.params || {})}
         </div>
-        <button type="button" class="ui-btn ui-btn-sm shrink-0" style="min-height:44px" data-action="reset-shadow" data-key="${esc(s.key)}">
-          <i class="fa-solid fa-rotate-left"></i> Reset
-        </button>
+      </div>
+      <div class="sh-actions">
+        <button type="button" class="ui-btn ui-btn-sm ${s.learning_strength > 0 ? '' : 'hidden'}" data-action="learn-shadow" data-key="${esc(s.key)}" data-sh-learn style="min-height:44px"><i class="fa-solid fa-graduation-cap" aria-hidden="true"></i> <span>Learn now</span></button>
+        <button type="button" class="ui-btn ui-btn-sm" data-action="edit-shadow" data-key="${esc(s.key)}"><i class="fa-solid fa-sliders" aria-hidden="true"></i> Edit</button>
+        <button type="button" class="ui-btn ui-btn-sm" data-action="copy-shadow" data-key="${esc(s.key)}"><i class="fa-regular fa-copy" aria-hidden="true"></i> Copy</button>
+        <button type="button" class="ui-btn ui-btn-sm" data-action="reset-shadow" data-key="${esc(s.key)}"><i class="fa-solid fa-rotate-left" aria-hidden="true"></i> Reset</button>
+        <button type="button" class="ui-btn ui-btn-sm" data-action="delete-shadow" data-key="${esc(s.key)}" data-label="${esc(s.label)}"><i class="fa-regular fa-trash-can" aria-hidden="true"></i> Delete</button>
+        <button type="button" class="ui-btn ui-btn-sm sh-promote" data-action="promote-shadow" data-key="${esc(s.key)}"><i class="fa-solid fa-arrow-up-from-bracket" aria-hidden="true"></i> Use for main bot</button>
       </div>
       <div class="flex flex-wrap gap-1.5">${shadowParamChips(s.params || {})}</div>
+      ${shadowStrengthControl(s)}
+      <details class="sh-hist" data-key="${esc(s.key)}">
+        <summary>Change history</summary>
+        <div class="sh-hist-list divide-y divide-borderCol"></div>
+      </details>
 
       <div class="ui-inset px-3 divide-y divide-borderCol">
         <div class="grid grid-cols-3 gap-2 py-2 ui-eyebrow">
@@ -3184,6 +3205,7 @@ async function loadShadow() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || 'Request failed');
     const mainLabel = (data.main && data.main.label) || 'Main';
+    shadowData = data;
     if (!data.enabled || !(data.strategies || []).length) {
       const presets = (data.presets || []).map(p => `<li><span class="ui-num" style="color:var(--text)">${esc(p.key)}</span>: ${esc(p.description)}</li>`).join('');
       container.innerHTML = `<div class="ui-card ui-card-pad text-[13px] ui-muted space-y-2">
@@ -3192,8 +3214,12 @@ async function loadShadow() {
       </div>`;
       return;
     }
+    const openHist = [...container.querySelectorAll('details.sh-hist[open]')].map(d => d.dataset.key);
     container.innerHTML = data.strategies.map(s => renderShadowStrategy(s, mainLabel)).join('');
     data.strategies.forEach(s => drawShadowChart(s, mainLabel));
+    container.querySelectorAll('details.sh-hist').forEach(d => {
+      if (openHist.includes(d.dataset.key)) { d.open = true; loadShadowHistory(d.dataset.key); }
+    });
   } catch (e) {
     container.innerHTML = `<div class="ui-card ui-card-pad text-[13px] ui-muted">Could not load shadow portfolios.</div>`;
     console.debug('Error loading shadow portfolios:', e);
@@ -3216,6 +3242,559 @@ async function resetShadow(key) {
     showToast('Error resetting shadow portfolio.', true);
   }
 }
+
+// ------------------------------------------------------------------
+// Shadow editor: create / edit / copy / delete, learning strength, change history
+// ------------------------------------------------------------------
+let shadowData = null;      // last /api/shadow payload
+let shadowSchema = null;    // /api/shadow/schema, fetched once
+const shadowEditor = { key: null, initial: {}, touched: new Set(), afterClose: null };
+const SHADOW_STRENGTH = ['Off', 'Low', 'Medium', 'High'];
+
+async function shadowApi(method, url, body) {
+  const res = await fetch(url, {
+    method,
+    headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || data.message || 'Request failed.');
+  return data;
+}
+
+function shadowStrengthControl(s) {
+  const n = s.learning_strength || 0;
+  const stops = SHADOW_STRENGTH.map((l, i) => `<span style="--i:${i}" class="${i === n ? 'is-on' : ''}">${l}</span>`).join('');
+  return `<div class="sh-strength" data-sh-strength="${esc(s.key)}">
+    <label class="ui-label" for="shStrength-${esc(s.key)}">Learning strength</label>
+    <input type="range" class="se-range" id="shStrength-${esc(s.key)}" min="0" max="3" step="1" value="${esc(n)}"
+      data-action="set-shadow-strength" data-key="${esc(s.key)}" aria-valuetext="${SHADOW_STRENGTH[n]}">
+    <div class="sh-stops" aria-hidden="true">${stops}</div>
+    <p class="se-note ${n > 0 ? '' : 'hidden'}" data-sh-note>Under 30 closed trades the result is noise. A learning shadow is no longer a clean comparison.</p>
+  </div>`;
+}
+
+// Stop labels, aria text, badge and note follow the slider in place, so keyboard focus stays on it
+function syncShadowStrength(el) {
+  const n = Number(el.value);
+  const box = el.closest('.sh-strength');
+  el.setAttribute('aria-valuetext', SHADOW_STRENGTH[n]);
+  box.querySelectorAll('.sh-stops span').forEach((sp, i) => sp.classList.toggle('is-on', i === n));
+  box.querySelector('[data-sh-note]').classList.toggle('hidden', n === 0);
+  el.closest('.ui-card').querySelector('[data-sh-learn]').classList.toggle('hidden', n === 0);
+  const badge = el.closest('.ui-card').querySelector('[data-sh-badge]');
+  if (badge) badge.classList.toggle('hidden', n === 0);
+}
+
+async function setShadowStrength(key, value) {
+  try {
+    await shadowApi('PATCH', `/api/shadow/${encodeURIComponent(key)}`, { learning_strength: value });
+    showToast(`Learning ${SHADOW_STRENGTH[value].toLowerCase()}.`);
+  } catch (e) {
+    showToast(e.message, true);
+    loadShadow(); // put the slider back to the saved value
+  }
+}
+
+// One learning pass can take a minute or more: only this button is locked, the rest of the card stays usable
+async function learnShadow(btn) {
+  if (btn.disabled) return;
+  const label = btn.querySelector('span');
+  const icon = btn.querySelector('i');
+  btn.disabled = true;
+  label.textContent = 'Learning\u2026';
+  icon.className = 'fa-solid fa-circle-notch fa-spin';
+  try {
+    const data = await shadowApi('POST', `/api/shadow/${encodeURIComponent(btn.dataset.key)}/learn`);
+    // A skip ("needs 5 closed trades") is information, not a failure
+    showToast(data.message || 'Learning finished.', data.success === false && !data.skipped);
+  } catch (e) {
+    showToast(e.message, true);
+  } finally {
+    btn.disabled = false;
+    label.textContent = 'Learn now';
+    icon.className = 'fa-solid fa-graduation-cap';
+    loadShadow();
+  }
+}
+
+async function copyShadow(key) {
+  const src = shadowData && (shadowData.strategies || []).find(x => x.key === key);
+  const label = prompt('Name for the copy:', src ? `${src.label} copy` : '');
+  if (!label || !label.trim()) return;
+  try {
+    await shadowApi('POST', `/api/shadow/${encodeURIComponent(key)}/copy`, { label: label.trim() });
+    showToast('Shadow copied.');
+    loadShadow();
+  } catch (e) {
+    showToast(e.message, true);
+  }
+}
+
+async function deleteShadow(key) {
+  const src = shadowData && (shadowData.strategies || []).find(x => x.key === key);
+  if (!confirm(`Delete shadow '${src ? src.label : key}' with all its positions and history?`)) return;
+  try {
+    await shadowApi('DELETE', `/api/shadow/${encodeURIComponent(key)}`);
+    showToast('Shadow deleted.');
+    loadShadow();
+  } catch (e) {
+    showToast(e.message, true);
+  }
+}
+
+async function loadShadowHistory(key) {
+  const d = document.querySelector(`details.sh-hist[data-key="${CSS.escape(key)}"] .sh-hist-list`);
+  if (!d) return;
+  try {
+    const rows = await shadowApi('GET', `/api/shadow/${encodeURIComponent(key)}/history`);
+    if (!rows.length) { d.innerHTML = '<p class="py-2 text-[13px] ui-faint">No changes yet.</p>'; return; }
+    d.innerHTML = rows.map(r => {
+      const diffs = Object.entries(r.changes || {}).map(([k, v]) => `<div class="ui-num">${esc(k)}: ${esc(v.old ?? 'main bot')} &rarr; ${esc(v.new ?? 'main bot')}</div>`).join('');
+      const when = r.created_at ? new Date(r.created_at + (r.created_at.endsWith('Z') ? '' : 'Z')).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+      return `<div class="sh-hist-item">
+        <div class="min-w-0">
+          <div class="ui-faint text-xs">${esc(when)} · ${esc(r.source)}</div>
+          ${diffs}
+          ${r.reason ? `<div class="ui-muted text-xs">${esc(r.reason)}</div>` : ''}
+        </div>
+        <button type="button" class="ui-btn ui-btn-sm shrink-0" data-action="undo-shadow-change" data-key="${esc(key)}" data-id="${esc(r.id)}">Undo</button>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    d.innerHTML = `<p class="py-2 text-[13px] ui-faint">${esc(e.message)}</p>`;
+  }
+}
+
+async function undoShadowChange(key, id) {
+  try {
+    await shadowApi('POST', `/api/shadow/${encodeURIComponent(key)}/history/${id}/undo`);
+    showToast('Change undone.');
+    loadShadow();
+  } catch (e) {
+    showToast(e.message, true);
+  }
+}
+
+function shadowParamField(spec, value) {
+  const n = esc(spec.name);
+  const nullToggle = spec.nullable && spec.kind !== 'bool' ? `
+      <label class="se-row set-toggle-row">
+        <span>Use main bot value</span>
+        <span class="check-wrap set-toggle"><input type="checkbox" data-se-null="${n}" ${value === null ? 'checked' : ''}><span class="ui-switch" aria-hidden="true"></span></span>
+      </label>` : '';
+  const note = spec.learnable === false ? '<p class="se-note">Only you can change this. Learning never touches it.</p>' : '';
+  let control;
+  if (spec.kind === 'bool') {
+    // nullable bool (regime_filter): a select keeps "main bot value" as a real third state
+    if (spec.nullable) {
+      const cur = value === null ? 'null' : String(value);
+      control = `<div class="se-row"><label for="se-${n}">${esc(spec.label)}</label>
+        <select id="se-${n}" class="ui-input" style="width:auto" data-se-param="${n}">
+          <option value="null" ${cur === 'null' ? 'selected' : ''}>Main bot value</option>
+          <option value="true" ${cur === 'true' ? 'selected' : ''}>On</option>
+          <option value="false" ${cur === 'false' ? 'selected' : ''}>Off</option></select></div>`;
+    } else {
+      control = `<label class="se-row"><span>${esc(spec.label)}</span>
+        <span class="check-wrap set-toggle"><input type="checkbox" data-se-param="${n}" ${value ? 'checked' : ''}><span class="ui-switch" aria-hidden="true"></span></span></label>`;
+    }
+  } else if (spec.kind === 'choice') {
+    control = `<div class="se-row"><label for="se-${n}">${esc(spec.label)}</label>
+      <select id="se-${n}" class="ui-input" style="width:auto" data-se-param="${n}">
+        ${(spec.choices || []).map(c => `<option value="${esc(c)}" ${c === value ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></div>`;
+  } else if ((spec.max - spec.min) / spec.step > 200) {
+    // Too many stops for a slider: type the number instead
+    control = `<div class="se-row"><label for="se-${n}">${esc(spec.label)}</label>
+        <input type="number" id="se-${n}" class="ui-input se-num ui-num" data-se-param="${n}" inputmode="decimal" min="${esc(spec.min)}" max="${esc(spec.max)}" step="${esc(spec.step)}" value="${value === null ? '' : esc(value)}" ${value === null ? 'disabled' : ''}></div>`;
+  } else {
+    const shown = value === null ? spec.min : value;
+    control = `<div class="se-row"><label for="se-${n}">${esc(spec.label)}</label>
+        <span class="se-val ui-num" data-se-val="${n}">${value === null ? 'main bot' : esc(value)}</span></div>
+      <input type="range" class="se-range" id="se-${n}" data-se-param="${n}" min="${esc(spec.min)}" max="${esc(spec.max)}" step="${esc(spec.step)}" value="${esc(shown)}" ${value === null ? 'disabled' : ''}>`;
+  }
+  return `<div class="se-param ${value === null && spec.kind !== 'bool' ? 'is-muted' : ''}" data-se-field="${n}">${control}${nullToggle}${note}</div>`;
+}
+
+function readShadowEditorValue(spec) {
+  const el = document.querySelector(`#seBody [data-se-param="${spec.name}"]`);
+  const nul = document.querySelector(`#seBody [data-se-null="${spec.name}"]`);
+  if (nul && nul.checked) return null;
+  if (spec.kind === 'bool') {
+    if (el.tagName === 'SELECT') return el.value === 'null' ? null : el.value === 'true';
+    return el.checked;
+  }
+  if (spec.kind === 'choice') return el.value;
+  return spec.kind === 'int' ? parseInt(el.value, 10) : parseFloat(el.value);
+}
+
+// New shadow: every param as shown (the sheet is the source of truth). Edit: only what the user touched.
+function collectShadowParams(isNew) {
+  const params = {};
+  for (const sp of shadowSchema) {
+    if (!shadowEditor.touched.has(sp.name)) {
+      if (isNew) params[sp.name] = shadowEditor.initial[sp.name];
+      continue;
+    }
+    const v = readShadowEditorValue(sp);
+    if (typeof v === 'number' && Number.isNaN(v)) throw new Error(`Enter a number for ${sp.label}.`);
+    if (isNew || v !== shadowEditor.initial[sp.name]) params[sp.name] = v;
+  }
+  return params;
+}
+
+async function openShadowEditor(key) {
+  const dlg = document.getElementById('shadowEditor');
+  if (!dlg) return;
+  try {
+    if (!shadowSchema) shadowSchema = await shadowApi('GET', '/api/shadow/schema');
+  } catch (e) { showToast(e.message, true); return; }
+  const strategies = (shadowData && shadowData.strategies) || [];
+  const src = key ? strategies.find(x => x.key === key) : (strategies.find(x => x.key === 'baseline') || strategies[0]);
+  if (key && !src) { showToast('Shadow not found. Refresh and try again.', true); return; }
+  const base = (src && src.params) || {};
+  shadowEditor.key = key;
+  shadowEditor.initial = {};
+  shadowEditor.touched = new Set();
+  shadowEditor.afterClose = null;
+  shadowSchema.forEach(sp => {
+    shadowEditor.initial[sp.name] = base[sp.name] === undefined ? (sp.nullable ? null : sp.min) : base[sp.name];
+  });
+  document.getElementById('seTitle').textContent = key ? `Edit ${src.label}` : 'New shadow';
+  document.getElementById('seError').classList.add('hidden');
+  document.getElementById('seBody').innerHTML = `
+    <div class="se-field"><label class="ui-label" for="seLabel">Name</label>
+      <input id="seLabel" class="ui-input" maxlength="60" value="${key ? esc(src.label) : ''}" autocomplete="off"></div>
+    <div class="se-field"><label class="ui-label" for="seDesc">Description</label>
+      <textarea id="seDesc" class="ui-input" maxlength="300">${key ? esc(src.description) : ''}</textarea></div>
+    ${shadowSchema.map(sp => shadowParamField(sp, shadowEditor.initial[sp.name])).join('')}`;
+  if (!dlg.open) { dlg.classList.remove('is-closing'); dlg.showModal(); }
+  document.getElementById('seLabel').focus();
+}
+
+function closeShadowEditor() {
+  const dlg = document.getElementById('shadowEditor');
+  if (!dlg || !dlg.open || dlg.classList.contains('is-closing')) return;
+  dlg.classList.add('is-closing');
+  let done = false;
+  const finish = () => { if (done) return; done = true; dlg.classList.remove('is-closing'); dlg.close(); };
+  dlg.addEventListener('animationend', e => { if (e.target === dlg) finish(); }, { once: true });
+  setTimeout(finish, 250);
+}
+
+async function saveShadowEditor() {
+  const err = document.getElementById('seError');
+  err.classList.add('hidden');
+  const label = document.getElementById('seLabel').value.trim();
+  const description = document.getElementById('seDesc').value.trim();
+  if (!label) { err.textContent = 'Enter a name.'; err.classList.remove('hidden'); return; }
+  let params;
+  try { params = collectShadowParams(!shadowEditor.key); }
+  catch (e) { err.textContent = e.message; err.classList.remove('hidden'); return; }
+  const btn = document.querySelector('#shadowEditor [data-se-save]');
+  btn.disabled = true;
+  try {
+    if (shadowEditor.key) {
+      const body = { label, description };
+      if (Object.keys(params).length) body.params = params;
+      await shadowApi('PATCH', `/api/shadow/${encodeURIComponent(shadowEditor.key)}`, body);
+      showToast('Shadow saved.');
+    } else {
+      await shadowApi('POST', '/api/shadow', { label, description, params });
+      showToast('Shadow created.');
+    }
+    const editKey = shadowEditor.key;
+    await loadShadow();
+    shadowEditor.afterClose = () => {
+      const target = editKey ? document.querySelector(`[data-action="edit-shadow"][data-key="${CSS.escape(editKey)}"]`)
+        : document.querySelector('[data-action="new-shadow"]');
+      if (target) target.focus();
+    };
+    closeShadowEditor();
+  } catch (e) {
+    err.textContent = e.message;
+    err.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+(function initShadowEditor() {
+  const dlg = document.getElementById('shadowEditor');
+  if (!dlg) return;
+  dlg.addEventListener('cancel', e => { e.preventDefault(); closeShadowEditor(); });
+  dlg.addEventListener('close', () => { const f = shadowEditor.afterClose; shadowEditor.afterClose = null; if (f) f(); });
+  dlg.addEventListener('click', e => {
+    if (e.target === dlg || e.target.closest('[data-se-close]')) return closeShadowEditor();
+    if (e.target.closest('[data-se-save]')) saveShadowEditor();
+  });
+  dlg.addEventListener('input', e => {
+    const el = e.target;
+    if (el.dataset.seParam) shadowEditor.touched.add(el.dataset.seParam);
+    if (el.type === 'range' && el.dataset.seParam) {
+      dlg.querySelector(`[data-se-val="${el.dataset.seParam}"]`).textContent = el.value;
+    }
+  });
+  dlg.addEventListener('change', e => {
+    const el = e.target;
+    if (el.dataset.seParam) shadowEditor.touched.add(el.dataset.seParam); // selects and checkboxes fire change only
+    const name = el.dataset.seNull;
+    if (!name) return;
+    shadowEditor.touched.add(name);
+    const field = dlg.querySelector(`[data-se-field="${name}"]`);
+    const input = field.querySelector('input[data-se-param], select[data-se-param]');
+    const val = field.querySelector('[data-se-val]');
+    if (input) input.disabled = el.checked;
+    field.classList.toggle('is-muted', el.checked);
+    if (val && input) val.textContent = el.checked ? 'main bot' : input.value;
+  });
+})();
+
+// ------------------------------------------------------------------
+// Promote: copy a shadow's rules onto the main bot (before/after sheet), and the banner while promoted rules are active
+// ------------------------------------------------------------------
+const PROMOTE_RISK_TEXT = {
+  ignore_risk_veto: 'Ignore risk veto: the bot will buy even when the Risk Officer rejected the trade.',
+  accept_hold: 'Act on HOLD: the bot will also buy on HOLD verdicts that clear the score threshold.',
+  entry_mode: 'Buy at market: the bot buys right away instead of waiting for a pullback or breakout.',
+  risk_per_trade_pct: 'Higher risk per trade: each trade can lose more at its stop (or the risk cap is switched off).',
+  regime_filter: 'Regime filter off: the bot also opens trades while the market index is below its average.',
+  trigger_min_score: 'Lower score threshold: the bot takes clearly more setups than now.',
+};
+const PROMOTE_CONFIRM_TEXT = 'PROMOTE LIVE';
+const promoteState = { key: null, label: '', needsText: false, blocked: false, busy: false, opening: false, shown: {} };
+
+// One main rule value as the owner reads it (fractions as %, flags On/Off, null per rule)
+function formatRuleValue(name, v) {
+  if (v === null || v === undefined) return { reward_risk: 'No fixed target', trailing_stop_pct: 'Off', max_hold_days: 'No limit', breakeven_r: 'Off' }[name] || 'Main default';
+  if (typeof v === 'boolean') return v ? 'On' : 'Off';
+  if (name === 'entry_mode') return v === 'market' ? 'Buy at market' : 'Wait for trigger';
+  const n = Number(v);
+  if (!Number.isFinite(n)) return String(v);
+  const trim = (x, d) => String(Number(x.toFixed(d)));
+  switch (name) {
+    case 'breakeven_pct': case 'trailing_stop_pct': return `${trim(n * 100, 2)}%`;
+    case 'risk_per_trade_pct': return n === 0 ? 'Off (no cap)' : `${trim(n, 2)}%`;
+    case 'trailing_atr_mult': return n === 0 ? 'Off' : `${trim(n, 2)}× ATR`;
+    case 'pullback_scale': case 'stop_scale': return `×${trim(n, 2)}`;
+    case 'reward_risk': case 'breakeven_r': return `${trim(n, 2)}R`;
+    case 'max_hold_days': return `${n} days`;
+    default: return trim(n, 2);
+  }
+}
+
+function syncPromoteConfirm() {
+  const btn = document.getElementById('prConfirm');
+  const input = document.getElementById('prConfirmText');
+  btn.disabled = promoteState.busy || (promoteState.needsText && (!input || input.value !== PROMOTE_CONFIRM_TEXT));
+  btn.textContent = promoteState.busy ? 'Applying…' : 'Confirm';
+}
+
+// Fills the sheet from a preview. Blocked and no-change previews get no Confirm (a no-change promote would
+// overwrite the Revert target with the promoted rules).
+function renderPromotePreview(p) {
+  const blocked = !!p.blocked;
+  const noChange = !blocked && p.has_changes === false;
+  Object.assign(promoteState, { label: p.label || promoteState.key, needsText: !!p.needs_confirm_text, blocked: blocked || noChange, shown: {} });
+  document.getElementById('prTitle').textContent = `Use '${promoteState.label}' for the main bot?`;
+  const mode = document.getElementById('prMode');
+  mode.textContent = p.live ? 'LIVE: real money' : 'Paper';
+  mode.className = `ui-badge mt-1 ${p.live ? 'ui-badge-loss' : ''}`;
+
+  // Changed rows first, so nothing that changes sits below the fold on a phone
+  const params = [...(p.params || [])].sort((a, b) => Number(!!b.changed) - Number(!!a.changed));
+  const raw = v => (v === null || v === undefined ? 'None' : String(v));
+  const rows = params.map(r => {
+    let now = formatRuleValue(r.name, r.current);
+    let after = formatRuleValue(r.name, r.after);
+    if (r.changed) {
+      promoteState.shown[r.name] = r.after;
+      if (now === after) { now = raw(r.current); after = raw(r.after); } // rounding must never hide a change
+    }
+    return `
+    <tr class="${r.changed ? 'is-changed' : ''}">
+      <th scope="row">${r.changed ? '<span class="sr-only">Changed: </span>' : ''}${esc(r.label)}</th>
+      <td>${esc(now)}</td>
+      <td>${esc(after)}</td>
+    </tr>`;
+  }).join('');
+  const risky = (p.risky_flags || []).map(f => `<li><i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i><span>${esc(PROMOTE_RISK_TEXT[f] || f)}</span></li>`).join('');
+  document.getElementById('prBody').innerHTML = `
+    <p class="text-sm" style="color:var(--text-2)">New trades will use these rules. Open positions and pending triggers keep their current stop and target. Their stops keep trailing with the new breakeven and ATR settings.</p>
+    ${(p.notes || []).map(n => `<p class="ui-notice pr-note">${esc(n)}</p>`).join('')}
+    ${blocked ? `<p class="ui-notice ui-notice-danger pr-blocked">${esc(p.blocked_reason || 'This promote cannot be done.')}</p>` : ''}
+    ${noChange ? '<p class="ui-notice pr-blocked pr-nochange">These rules match the main bot already.</p>' : ''}
+    ${risky ? `<ul class="pr-risks" aria-label="Riskier than now">${risky}</ul>` : ''}
+    <table class="pr-table">
+      <caption class="sr-only">Main bot rules now and after this change</caption>
+      <thead><tr><th scope="col">Parameter</th><th scope="col">Main now</th><th scope="col">After</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    ${p.needs_confirm_text && !promoteState.blocked ? `<div class="se-field">
+      <label class="ui-label" for="prConfirmText">Type PROMOTE LIVE to confirm</label>
+      <input id="prConfirmText" class="ui-input" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+    </div>` : ''}`;
+  document.getElementById('prConfirm').classList.toggle('hidden', promoteState.blocked);
+  document.getElementById('prCancel').textContent = promoteState.blocked ? 'Close' : 'Cancel';
+  syncPromoteConfirm();
+}
+
+async function openPromoteDialog(key) {
+  const dlg = document.getElementById('promoteDialog');
+  if (!dlg || !key || promoteState.opening || dlg.open) return;
+  promoteState.opening = true;
+  let p;
+  try {
+    p = await shadowApi('GET', `/api/shadow/${encodeURIComponent(key)}/promote/preview`);
+  } catch (e) {
+    showToast(e.message, true);
+    return;
+  } finally {
+    promoteState.opening = false;
+  }
+  Object.assign(promoteState, { key, busy: false });
+  renderPromotePreview(p);
+  document.getElementById('prError').classList.add('hidden');
+  dlg.classList.remove('is-closing');
+  dlg.showModal();
+  // Start at the top so the mode badge and risk lines are seen before anything can be typed
+  dlg.querySelector('[data-pr-close]').focus({ preventScroll: true });
+  dlg.querySelector('.ts-panel').scrollTop = 0;
+}
+
+function closePromoteDialog() {
+  const dlg = document.getElementById('promoteDialog');
+  if (!dlg || !dlg.open || dlg.classList.contains('is-closing') || promoteState.busy) return;
+  dlg.classList.add('is-closing');
+  let done = false;
+  const finish = () => { if (done) return; done = true; dlg.classList.remove('is-closing'); dlg.close(); };
+  dlg.addEventListener('animationend', e => { if (e.target === dlg) finish(); }, { once: true });
+  setTimeout(finish, 250);
+}
+
+async function confirmPromote() {
+  const btn = document.getElementById('prConfirm');
+  if (promoteState.busy || promoteState.blocked || btn.disabled) return;
+  const input = document.getElementById('prConfirmText');
+  const err = document.getElementById('prError');
+  err.classList.add('hidden');
+  promoteState.busy = true;
+  syncPromoteConfirm();
+  let res;
+  try {
+    res = await shadowApi('POST', `/api/shadow/${encodeURIComponent(promoteState.key)}/promote`, { confirm: true, confirm_text: input ? input.value : '' });
+  } catch (e) {
+    err.textContent = e.message;
+    err.classList.remove('hidden');
+    // The preview may be stale (e.g. the server now wants the typed text): show the current one, error kept
+    try { renderPromotePreview(await shadowApi('GET', `/api/shadow/${encodeURIComponent(promoteState.key)}/promote/preview`)); }
+    catch (e2) { console.warn('Could not refresh promote preview:', e2); }
+    promoteState.busy = false;
+    syncPromoteConfirm();
+    // The error sits last before the sticky footer: scroll to the end so it and the input above it are both in view
+    const panel = document.querySelector('#promoteDialog .ts-panel');
+    panel.scrollTop = panel.scrollHeight;
+    if (!document.activeElement || document.activeElement.offsetParent === null || document.activeElement.disabled) {
+      (document.getElementById('prConfirmText') || document.getElementById('prCancel')).focus();
+    }
+    return;
+  }
+  // Did the server write what the table showed?
+  const changes = (res && res.changes) || {};
+  const shown = promoteState.shown || {};
+  const same = Object.keys(changes).length === Object.keys(shown).length
+    && Object.entries(changes).every(([n, c]) => n in shown && JSON.stringify(c.new) === JSON.stringify(shown[n]));
+  // Re-render before closing, so focus returns to the card's new button
+  await Promise.all([loadShadow(), loadMainRulesBanner()]);
+  promoteState.busy = false;
+  showToast(same ? `Main bot now uses rules from ${promoteState.label}.`
+    : `Main bot now uses rules from ${promoteState.label}. Some values changed since the preview; check the banner and Settings.`);
+  closePromoteDialog();
+}
+
+(function initPromoteDialog() {
+  const dlg = document.getElementById('promoteDialog');
+  if (!dlg) return;
+  dlg.addEventListener('cancel', e => { e.preventDefault(); closePromoteDialog(); });
+  // The card may have been re-rendered meanwhile: find its button again by key
+  dlg.addEventListener('close', () => {
+    const btn = promoteState.key && document.querySelector(`[data-action="promote-shadow"][data-key="${CSS.escape(promoteState.key)}"]`);
+    if (btn) btn.focus();
+  });
+  dlg.addEventListener('click', e => {
+    if (e.target === dlg || e.target.closest('[data-pr-close]')) closePromoteDialog();
+  });
+  dlg.addEventListener('input', e => { if (e.target.id === 'prConfirmText') syncPromoteConfirm(); });
+  dlg.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && e.target.id === 'prConfirmText') { e.preventDefault(); confirmPromote(); }
+  });
+})();
+
+function renderMainRulesBanner(st) {
+  const html = st && st.promoted_from ? `
+    <div class="ui-card ui-card-pad mr-banner">
+      <i class="fa-solid fa-code-branch mr-banner-icon" aria-hidden="true"></i>
+      <p class="mr-banner-text">Main bot uses rules from ${esc(st.promoted_label || st.promoted_from)}. ${st.learner_paused ? 'Auto-calibration paused.' : 'Auto-calibration is running.'}</p>
+      <div class="mr-banner-actions">
+        ${st.can_revert ? '<button type="button" class="ui-btn ui-btn-sm" data-action="revert-main-rules"><i class="fa-solid fa-rotate-left" aria-hidden="true"></i> Revert</button>' : ''}
+        ${st.learner_paused ? '<button type="button" class="ui-btn ui-btn-sm" data-action="resume-main-learner"><i class="fa-solid fa-play" aria-hidden="true"></i> Resume calibration</button>' : ''}
+      </div>
+    </div>` : '';
+  document.querySelectorAll('[data-main-rules-banner]').forEach(el => {
+    el.innerHTML = html;
+    el.hidden = !html;
+  });
+}
+
+async function loadMainRulesBanner() {
+  try {
+    renderMainRulesBanner(await shadowApi('GET', '/api/main/rules'));
+  } catch (e) {
+    renderMainRulesBanner(null); // no banner and no toast on every page load
+    console.warn('Could not load main rules status:', e);
+  }
+}
+
+async function mainRulesAction(btn, btnAction, question, url, done) {
+  if (!confirm(question)) return;
+  const mount = btn && btn.closest('[data-main-rules-banner]');
+  document.querySelectorAll(`[data-action="${btnAction}"]`).forEach(b => { b.disabled = true; });
+  try {
+    await shadowApi('POST', url);
+    showToast(done);
+  } catch (e) {
+    showToast(e.message, true);
+  }
+  await Promise.all([loadMainRulesBanner(), loadShadow()]);
+  // The clicked button is gone now: put focus on the banner, or on a stable spot in the same tab
+  if (!mount) return;
+  const tab = mount.closest('.tab-content');
+  const target = !mount.hidden ? mount
+    : (tab && (tab.querySelector('[data-action="new-shadow"]') || tab.querySelector('h2')));
+  if (!target) return;
+  if (!target.matches('button')) target.setAttribute('tabindex', '-1');
+  target.focus();
+}
+
+function revertMainRules(btn) {
+  return mainRulesAction(btn, 'revert-main-rules', 'Revert the main bot to its previous rules?', '/api/main/rules/revert', 'Main bot rules reverted.');
+}
+
+function resumeMainLearner(btn) {
+  return mainRulesAction(btn, 'resume-main-learner', 'Resume auto-calibration? It may change the promoted values.', '/api/main/learner/resume', 'Auto-calibration resumed.');
+}
+
+// Strength slider commits on release; history loads the first time its panel opens
+document.addEventListener('input', e => {
+  const el = e.target.closest('[data-action="set-shadow-strength"]');
+  if (el) syncShadowStrength(el);
+});
+document.addEventListener('change', e => {
+  const el = e.target.closest('[data-action="set-shadow-strength"]');
+  if (el) setShadowStrength(el.dataset.key, Number(el.value));
+});
+document.addEventListener('toggle', e => {
+  if (e.target.matches && e.target.matches('details.sh-hist') && e.target.open) loadShadowHistory(e.target.dataset.key);
+}, true);
 
 // ------------------------------------------------------------------
 // Ticker detail sheet: price chart with trade levels for one ticker
