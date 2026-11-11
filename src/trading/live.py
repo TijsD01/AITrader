@@ -2037,10 +2037,15 @@ class LiveBroker(BaseBroker):
                                 if new_stop is not None and new_stop != p.stop_loss_native:
                                     p.stop_loss_native = new_stop
                                     logger.info(f"Live trailing stop raised for {p.ticker} to {new_stop} (+{gain_pct*100:.1f}%)")
-                                    # Re-check under the T212 lock: a flip to Mine may have landed during this refresh
-                                    async with self._t212_lock, AsyncSessionLocal() as check:
-                                        if getattr(await check.get(Position, p.id), "status", None) == "OPEN":
-                                            await self._move_broker_stop(p.ticker, p.currency, p.shares, new_stop)
+                                    if new_stop >= curr_price:
+                                        # A sell stop at or above market is rejected or fills at once: the bot's own stop
+                                        # check sells this run, and the old broker stop stays in place as the fallback
+                                        logger.info(f"Broker stop for {p.ticker} left in place: new stop {new_stop} is not below the price {curr_price}.")
+                                    else:
+                                        # Re-check under the T212 lock: a flip to Mine may have landed during this refresh
+                                        async with self._t212_lock, AsyncSessionLocal() as check:
+                                            if getattr(await check.get(Position, p.id), "status", None) == "OPEN":
+                                                await self._move_broker_stop(p.ticker, p.currency, p.shares, new_stop)
                         curr_val_eur = p.current_price_eur * p.shares
                         p.unrealized_pnl_eur = round(curr_val_eur - p.cost_basis_eur, 2)
                         p.unrealized_pnl_pct = round(((p.current_price_eur / p.entry_price_eur) - 1.0) * 100, 2)

@@ -9,7 +9,7 @@ from sqlalchemy import delete, select
 
 from config.settings import settings
 from src.data.market import market_data_provider
-from src.db.models import PortfolioSnapshot, Position, Trade
+from src.db.models import PortfolioSnapshot, Position, SystemConfig, Trade
 from src.db.session import AsyncSessionLocal
 from src.trading import live as live_module
 from src.trading import trading212
@@ -261,3 +261,63 @@ async def test_live_trigger_monitor_fill_books_rules_version_and_starting_stop(r
     async with AsyncSessionLocal() as s:
         await s.execute(delete(Trade).where(Trade.ticker == "ASML.AS"))
         await s.commit()
+
+
+# --- Fix round 1: a raised stop at or above the price never goes to the broker ---------------------
+
+def _live_only(b):
+    if b.kind != "live":
+        pytest.skip("broker stop orders exist on live only")
+
+
+async def test_live_breakeven_stop_above_price_stays_off_the_broker_and_sells(broker):
+    _live_only(broker)
+    v = await write_main_rules({"breakeven_r": 0.5}, promoted_from="test")
+    # Initial stop 98.5: trigger 0.5 x 1.5% = 0.75%, below the 1% breakeven step
+    pid = await _add_position(broker, rules_version=v, stop=98.5, initial_stop=98.5)
+    sold = await _monitor(broker, 100.8, atr=None)
+    pos = await _pos(pid)
+    assert pos.stop_loss_native == 101.0
+    broker._t212_move_stop.assert_not_awaited()
+    assert "Stop-Loss" in sold[0]["reason"] and pos.status == "CLOSED"
+
+
+async def test_live_breakeven_stop_above_price_with_failed_sell_keeps_the_old_broker_stop(broker):
+    _live_only(broker)
+    broker._dispatch_real_close.return_value = None
+    v = await write_main_rules({"breakeven_r": 0.5}, promoted_from="test")
+    pid = await _add_position(broker, rules_version=v, stop=98.5, initial_stop=98.5)
+    assert await _monitor(broker, 100.8, atr=None) == []
+    pos = await _pos(pid)
+    assert pos.status == "OPEN" and pos.stop_loss_native == 101.0
+    broker._t212_move_stop.assert_not_awaited()
+
+
+async def test_live_stop_below_price_still_moves_the_broker_stop_once(broker):
+    _live_only(broker)
+    pid = await _add_position(broker)
+    assert await _monitor(broker, 106.0, atr=None) == []
+    assert (await _pos(pid)).stop_loss_native == 101.0
+    broker._t212_move_stop.assert_awaited_once_with(TICKER, "EUR", 1.0, 101.0)
+
+
+async def test_live_default_position_with_tiny_breakeven_pct_keeps_stop_off_the_broker(broker):
+    _live_only(broker)
+    async with AsyncSessionLocal() as s:
+        previous = await s.get(SystemConfig, "BREAKEVEN_TRIGGER_PCT")
+        previous = previous.value if previous else None
+        await s.merge(SystemConfig(key="BREAKEVEN_TRIGGER_PCT", value="0.005"))
+        await s.commit()
+    try:
+        pid = await _add_position(broker)
+        sold = await _monitor(broker, 100.6, atr=None)
+        assert (await _pos(pid)).stop_loss_native == 101.0
+        broker._t212_move_stop.assert_not_awaited()
+        assert "Stop-Loss" in sold[0]["reason"]
+    finally:
+        async with AsyncSessionLocal() as s:
+            if previous is None:
+                await s.execute(delete(SystemConfig).where(SystemConfig.key == "BREAKEVEN_TRIGGER_PCT"))
+            else:
+                await s.merge(SystemConfig(key="BREAKEVEN_TRIGGER_PCT", value=previous))
+            await s.commit()

@@ -268,3 +268,24 @@ async def test_rules_version_column_exists():
         assert (await s.get(Position, pid)).rules_version == 1
         await s.execute(delete(Position).where(Position.id == pid))
         await s.commit()
+
+
+@pytest.mark.parametrize("version_row", [None, "garbage"])
+async def test_version_numbers_are_never_reused_when_the_version_row_is_lost(version_row):
+    async with db_session.AsyncSessionLocal() as s:
+        p = Position(ticker="RV.REUSE", shares=1, entry_price_native=1, current_price_native=1, highest_price_native=1,
+                     entry_price_eur=1, current_price_eur=1, cost_basis_eur=1, status="OPEN", rules_version=7)
+        s.add(p)
+        await s.commit()
+        pid = p.id
+    try:
+        if version_row is not None:
+            await _set_row("MAIN_RULES_VERSION", version_row)
+        assert await write_main_rules({"stop_scale": 1.2}, promoted_from="test") == 8
+        await _set_row("MAIN_RULES_VERSION", version_row or "")
+        assert await revert_main_rules() is True
+        assert (await get_main_rules()).version == 8  # revert also starts above position 7 and the lost row
+    finally:
+        async with db_session.AsyncSessionLocal() as s:
+            await s.execute(delete(Position).where(Position.id == pid))
+            await s.commit()

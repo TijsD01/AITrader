@@ -12,11 +12,11 @@ import math
 from dataclasses import dataclass
 from typing import Any, ClassVar, Dict, Optional
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
 from config.settings import settings
 from src.db import session as db_session  # read AsyncSessionLocal at call time (tests rebind it)
-from src.db.models import SystemConfig
+from src.db.models import Position, SystemConfig
 from src.trading.strategy_params import SPECS, validate as validate_params
 
 logger = logging.getLogger(__name__)
@@ -225,6 +225,12 @@ def validate_main_rules(values: Dict[str, Any]) -> Dict[str, Any]:
     return clean
 
 
+async def _next_version(session, stored: int) -> int:
+    """Positions are matched to rules by version number, so never reuse one, even when the version row was lost."""
+    highest_used = (await session.execute(select(func.max(Position.rules_version)))).scalar() or 0
+    return max(stored, highest_used) + 1
+
+
 async def _save(session, rules: Dict[str, Any], version: int, promoted_from: Optional[str], previous: Optional[str]):
     for name, v in rules.items():
         await session.merge(SystemConfig(key=_KEYS[name][0], value=_dump(v)))
@@ -254,7 +260,7 @@ async def write_main_rules(values: Dict[str, Any], promoted_from: Optional[str],
         current = _resolve(await _load_rows(session))
         if live and "max_positions" in clean:
             clean["max_positions"] = effective_max_positions(clean["max_positions"], True, current.max_positions)
-        version = current.version + 1
+        version = await _next_version(session, current.version)
         snapshot = {**current.rules(), "promoted_from": current.promoted_from}
         await _save(session, clean, version, promoted_from, json.dumps(snapshot))
     _apply_settings(clean)
@@ -278,7 +284,7 @@ async def revert_main_rules() -> bool:
         except (ValueError, TypeError, KeyError) as e:
             logger.warning(f"Main rules: cannot revert, {PREVIOUS_KEY} is unreadable ({e}).")
             return False
-        version = _resolve(rows).version + 1
+        version = await _next_version(session, _resolve(rows).version)
         await _save(session, previous, version, promoted_from, None)
     _apply_settings(previous)
     logger.info(f"Main rules reverted to the previous set as v{version}.")
