@@ -78,6 +78,13 @@ class TradingScheduler:
         return plan["trigger_type"], entry, stop, plan["take_profit"]
 
     @staticmethod
+    async def _buyable(candidates: list) -> list:
+        """Drops candidates the broker cannot buy before the top ones are picked, so they do not use up a slot."""
+        # No currency on the candidate: keep it, the check after the quote decides
+        return [c for c in candidates
+                if not c.get("currency") or (await broker_can_buy(c["ticker"].upper(), c["currency"]))[0]]
+
+    @staticmethod
     def _rules_kwargs(rules) -> Dict[str, Any]:
         """Tags a trigger with the rule set version only when non-default rules planned it."""
         return {} if rules is None or is_default_shape(rules) else {"rules_version": rules.version}
@@ -511,6 +518,7 @@ class TradingScheduler:
             actionable_cands = [c for c in candidates if c["ticker"].upper() not in open_tickers and c["ticker"].upper() not in pending_tickers]
             other_cands = [c for c in candidates if c["ticker"].upper() in open_tickers or c["ticker"].upper() in pending_tickers]
 
+            actionable_cands = await self._buyable(actionable_cands)
             # Always select up to 4 candidates to evaluate for the morning review
             selected_cands = actionable_cands[:4]
             if len(selected_cands) < 4:
@@ -845,7 +853,7 @@ class TradingScheduler:
                 candidates = [c for c in candidates if c["ticker"].upper() not in mine]
                 actionable = [c for c in candidates if c["ticker"].upper() not in open_tickers and c["ticker"].upper() not in pending_tickers]
                 # No pre-committee affordability filter: _fits_whole_share checks it after the verdict, and the shadow still sees it.
-                for cand in actionable[:3]:
+                for cand in (await self._buyable(actionable))[:3]:
                     tk = cand["ticker"].upper()
                     data = await asyncio.to_thread(market_data_provider.get_stock_data, tk)
                     if not data:

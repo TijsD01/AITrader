@@ -152,7 +152,9 @@ async def test_session_skips_a_ticker_the_broker_cannot_buy(t212):
 async def test_opportunity_scan_skips_a_ticker_the_broker_cannot_buy(t212):
     from src.scheduler.jobs import trading_scheduler
     await init_db()
-    cands = [{"ticker": BLOCKED}, {"ticker": "AAPL"}]
+    # Three unbuyable tickers on top must not use up the scanner's three slots
+    cands = [{"ticker": BLOCKED, "currency": "USD"}, {"ticker": "CFDY", "currency": "USD"},
+             {"ticker": "CFDZ", "currency": "USD"}, {"ticker": "AAPL", "currency": "USD"}]
     committee = AsyncMock(side_effect=lambda data, total: _report(data["ticker"]))
     follow = AsyncMock()
     status = {"eu_market": {"is_open": False}, "us_market": {"is_open": True}}
