@@ -35,6 +35,7 @@ from src.db.models import (
 from src.db.session import AsyncSessionLocal
 from src.memory.outcomes import record_outcome
 from src.trading.cash_flows import list_cash_flow_points
+from src.trading.levels import effective_breakeven_pct, max_hold_exceeded, pct_trail_stop, plan_entry
 from src.trading.strategy_params import SPECS, validate as validate_params
 from src.trading.risk import (
     apply_risk_budget,
@@ -92,13 +93,6 @@ class ShadowStrategy:
 
     def to_params(self) -> Dict[str, Any]:
         return {k: v for k, v in dataclasses.asdict(self).items() if k not in ("key", "label", "description")}
-
-
-def effective_breakeven_pct(strategy: "ShadowStrategy", eff_pct: float, entry: float, initial_stop: Optional[float]) -> float:
-    """Breakeven trigger as a gain fraction: breakeven_r x the initial stop distance when set, else eff_pct."""
-    if strategy.breakeven_r and initial_stop and entry > initial_stop:
-        return strategy.breakeven_r * (entry - initial_stop) / entry
-    return eff_pct
 
 
 PRESETS: Dict[str, ShadowStrategy] = {
@@ -362,44 +356,6 @@ async def undo_param_change(change_id: int) -> dict:
             raise LookupError(f"Unknown param change {change_id}")
         key, old = change.strategy, {k: v["old"] for k, v in (change.changes or {}).items()}
     return await apply_param_change(key, old, source="undo", reason=f"Undo change {change_id}")
-
-
-def plan_entry(
-    strategy: ShadowStrategy,
-    trigger_type: str,
-    trigger_price: float,
-    stop_loss: Optional[float],
-    take_profit: Optional[float],
-    current_price: float,
-) -> Dict[str, Any]:
-    """Maps the main bot's entry/stop/target onto a strategy's own levels (all in native currency)."""
-    if strategy.entry_mode == "market":
-        entry_type, entry = "MARKET", current_price
-    elif trigger_type == "LIMIT_PULLBACK":
-        entry_type = trigger_type
-        entry = current_price - (current_price - trigger_price) * strategy.pullback_scale
-        if entry >= current_price:  # pullback_scale 0 means "buy now"
-            entry_type, entry = "MARKET", current_price
-    else:
-        entry_type, entry = trigger_type, trigger_price
-
-    stop_distance = (trigger_price - stop_loss) if stop_loss else trigger_price * settings.DEFAULT_STOP_LOSS_PCT
-    stop_distance = max(stop_distance, entry * 0.005) * strategy.stop_scale
-    stop = entry - stop_distance
-
-    if not strategy.use_take_profit:
-        target = None
-    elif strategy.reward_risk:
-        target = entry + strategy.reward_risk * stop_distance
-    else:
-        target = take_profit if take_profit and take_profit > entry else entry * (1 + settings.DEFAULT_TAKE_PROFIT_PCT)
-
-    return {
-        "trigger_type": entry_type,
-        "target_price": round(entry, 2),
-        "stop_loss": round(stop, 2) if stop > 0 else None,
-        "take_profit": round(target, 2) if target else None,
-    }
 
 
 class ShadowPortfolios:
@@ -797,17 +753,14 @@ class ShadowPortfolios:
                     effective_breakeven_pct(s, eff["breakeven_pct"], p.entry_price_native, p.initial_stop_native),
                     atr_mult=eff["trailing_atr_mult"],
                 )
-                if s.trailing_stop_pct:
-                    trail = round(p.highest_price_native * (1.0 - s.trailing_stop_pct), 2)
-                    if p.stop_loss_native is None or trail > p.stop_loss_native:
-                        p.stop_loss_native = trail
+                p.stop_loss_native = pct_trail_stop(p.stop_loss_native, p.highest_price_native, s.trailing_stop_pct)
 
                 reason = None
                 if p.stop_loss_native and price <= p.stop_loss_native:
                     reason = f"Stop-Loss hit at {price} <= {p.stop_loss_native}"
                 elif p.take_profit_native and price >= p.take_profit_native:
                     reason = f"Take-Profit hit at {price} >= {p.take_profit_native}"
-                elif s.max_hold_days and p.opened_at and (now - p.opened_at) > datetime.timedelta(days=s.max_hold_days):
+                elif max_hold_exceeded(p.opened_at, now, s.max_hold_days):
                     reason = f"Time exit after {s.max_hold_days} days"
                 if reason:
                     closed.append(self._close_position(accounts[s.key], p, price, reason, now))
