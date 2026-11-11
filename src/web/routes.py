@@ -947,6 +947,48 @@ async def reset_shadow(strategy_key: str):
         raise HTTPException(status_code=404, detail=f"No shadow portfolio named '{strategy_key}'.")
     return {"success": True, "message": f"Shadow portfolio '{strategy_key}' was reset."}
 
+# 10. Promote: the owner copies a shadow's rules onto the main bot (rules only; positions and triggers keep their levels)
+class PromoteRequest(BaseModel):
+    confirm: Any = None       # must be exactly true; checked in promote()
+    confirm_text: Any = ""    # "PROMOTE LIVE" when a LIVE promote newly turns on a risky rule
+
+async def _promote_call(coro):
+    """Maps promote errors to HTTP: a refused promote is 400, an unknown shadow is 404."""
+    try:
+        return await coro
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+@router.get("/api/shadow/{strategy_key}/promote/preview")
+async def preview_promote(strategy_key: str):
+    from src.trading.promote import preview
+    return await _promote_call(preview(strategy_key))
+
+@router.post("/api/shadow/{strategy_key}/promote")
+async def promote_shadow(strategy_key: str, body: PromoteRequest):
+    from src.trading.promote import promote
+    return await _promote_call(promote(strategy_key, body.confirm, body.confirm_text))
+
+@router.get("/api/main/rules")
+async def get_main_rules_status():
+    from src.trading.promote import status
+    return await status()
+
+@router.post("/api/main/rules/revert")
+async def revert_main_rules_route():
+    from src.trading.promote import revert
+    if not await revert():
+        raise HTTPException(status_code=400, detail="Nothing to revert: no previous main rule set is stored.")
+    return {"success": True}
+
+@router.post("/api/main/learner/resume")
+async def resume_main_learner():
+    from src.trading.promote import set_learner_paused
+    await set_learner_paused(False)
+    return {"success": True}
+
 
 class OwnerRequest(BaseModel):
     owner: Literal["mine", "bot"]
