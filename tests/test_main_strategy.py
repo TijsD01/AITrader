@@ -88,7 +88,8 @@ async def test_write_then_revert_roundtrip():
     assert r.version == 1
     assert settings.MAX_POSITIONS == 3 and not is_default_shape(r)
     prev = json.loads(await _row("MAIN_RULES_PREVIOUS"))
-    assert set(prev) == set(MainRules.RULE_FIELDS) and prev["stop_scale"] == 1.0
+    assert set(prev) == set(MainRules.RULE_FIELDS) | {"promoted_from"} and prev["stop_scale"] == 1.0
+    assert prev["promoted_from"] is None
     assert await revert_main_rules() is True
     r = await get_main_rules()
     assert r.stop_scale == 1.0 and r.entry_mode == "trigger" and r.version == 2 and r.promoted_from is None
@@ -115,6 +116,9 @@ async def test_write_sets_in_memory_settings():
     {"trigger_min_score": 49},          # a promoted threshold below 50 would arm almost every report
     {"trigger_min_score": True},
     {"max_positions": None},            # rule that may not be empty
+    {"max_positions": 0},
+    {"max_positions": 51},              # read bound is 1..50 (the settings route range)
+    {"max_positions": True},
     {"stop_scale": 1.5, "entry_mode": "limit"},  # one bad value blocks the whole write
 ])
 async def test_invalid_values_write_nothing(values):
@@ -149,6 +153,34 @@ async def test_out_of_range_row_falls_back(key, raw, field):
 async def test_max_positions_read_allows_settings_route_range():
     await _set_row("MAX_POSITIONS", "50")  # the settings route accepts up to 50
     assert (await get_main_rules()).max_positions == 50
+
+
+async def test_write_accepts_max_positions_up_to_settings_route_range():
+    await write_main_rules({"max_positions": 30}, promoted_from=None)
+    assert (await get_main_rules()).max_positions == 30 and settings.MAX_POSITIONS == 30
+    await write_main_rules({"max_positions": 50}, promoted_from=None)
+    assert (await get_main_rules()).max_positions == 50
+
+
+async def test_revert_restores_promoted_from_of_previous_set():
+    await write_main_rules({"stop_scale": 1.5}, promoted_from="first")
+    await write_main_rules({"stop_scale": 1.8}, promoted_from="second")
+    assert json.loads(await _row("MAIN_RULES_PREVIOUS"))["promoted_from"] == "first"
+    assert await revert_main_rules() is True
+    r = await get_main_rules()
+    assert r.stop_scale == 1.5 and r.promoted_from == "first"
+    assert await _row("MAIN_RULES_PREVIOUS") is None  # one level of undo
+
+
+async def test_revert_of_snapshot_without_promoted_from_restores_none():
+    await write_main_rules({"stop_scale": 1.5}, promoted_from="first")
+    prev = json.loads(await _row("MAIN_RULES_PREVIOUS"))
+    prev.pop("promoted_from")
+    prev["stop_scale"] = 1.2
+    await _set_row("MAIN_RULES_PREVIOUS", json.dumps(prev))  # snapshot as written before promoted_from was stored
+    assert await revert_main_rules() is True
+    r = await get_main_rules()
+    assert r.stop_scale == 1.2 and r.promoted_from is None
 
 
 async def test_revert_never_restores_out_of_range_values():

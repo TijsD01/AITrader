@@ -2,20 +2,21 @@
 Manual promote: the owner copies a shadow strategy's rules onto the main bot.
 
 Shadow values are resolved against the CURRENT main rules (never the shadow's frozen start values), shown as a
-preview, and written only on an explicit confirm. In LIVE, newly enabling a risky rule also needs the typed text
+preview, and written only on an explicit confirm. In LIVE, a risky change (see RISKY_FLAGS) also needs the typed text
 "PROMOTE LIVE". A promote pauses automatic calibration so the learner does not overwrite the promoted rules.
 It changes rules only: no broker call, and open positions and pending triggers keep their stored levels.
 """
 import html
 import json
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from config.settings import settings
 from src.db import session as db_session  # read AsyncSessionLocal at call time (tests rebind it)
 from src.db.models import ShadowParamChange, SystemConfig
 from src.trading.main_strategy import (
-    PREVIOUS_KEY, MainRules, _clean, effective_max_positions, get_main_rules, revert_main_rules, write_main_rules,
+    PREVIOUS_KEY, MainRules, effective_max_positions, get_main_rules, revert_main_rules, validate_main_rules,
+    write_main_rules,
 )
 from src.trading.shadow import ShadowStrategy, get_strategies
 from src.trading.strategy_params import SPECS
@@ -24,7 +25,9 @@ logger = logging.getLogger(__name__)
 
 PAUSE_KEY = "MAIN_LEARNER_PAUSED"
 CONFIRM_TEXT = "PROMOTE LIVE"
-RISKY_FLAGS = ("ignore_risk_veto", "accept_hold", "entry_mode")
+# Changes that need the typed text in LIVE, in the order they are reported
+RISKY_FLAGS = ("ignore_risk_veto", "accept_hold", "entry_mode", "risk_per_trade_pct", "regime_filter", "trigger_min_score")
+RISKY_THRESHOLD_DROP = 5  # lowering the score threshold by this many points or more is risky
 # No main value to inherit: None is a real setting here ("no fixed R target / no R breakeven / no % trail / no time exit")
 _NONE_IS_A_SETTING = ("reward_risk", "breakeven_r", "trailing_stop_pct", "max_hold_days")
 _INHERIT_WHEN_NONE = ("breakeven_pct", "max_positions", "risk_per_trade_pct", "trailing_atr_mult", "regime_filter")
@@ -58,6 +61,11 @@ def _risky_flags(current: Dict[str, Any], after: Dict[str, Any]) -> List[str]:
         "ignore_risk_veto": not current["ignore_risk_veto"] and after["ignore_risk_veto"],
         "accept_hold": not current["accept_hold"] and after["accept_hold"],
         "entry_mode": current["entry_mode"] == "trigger" and after["entry_mode"] == "market",
+        # More risk per trade, or 0 which turns the risk cap off
+        "risk_per_trade_pct": after["risk_per_trade_pct"] > current["risk_per_trade_pct"]
+                              or (after["risk_per_trade_pct"] == 0 and current["risk_per_trade_pct"] > 0),
+        "regime_filter": current["regime_filter"] and not after["regime_filter"],
+        "trigger_min_score": current["trigger_min_score"] - after["trigger_min_score"] >= RISKY_THRESHOLD_DROP,
     }
     return [name for name in RISKY_FLAGS if newly_on[name]]
 
@@ -77,7 +85,7 @@ async def preview(key: str) -> Dict[str, Any]:
     strategy, current, after, live = await _plan(key)
     now = current.rules()
     try:
-        _clean(after)  # same checks write_main_rules runs, so a blocked promote shows here first
+        validate_main_rules(after)  # same checks write_main_rules runs, so a blocked promote shows here first
         blocked_reason = ""
     except ValueError as e:
         blocked_reason = str(e)
@@ -93,10 +101,17 @@ async def preview(key: str) -> Dict[str, Any]:
     }
 
 
-async def set_learner_paused(paused: bool) -> None:
+async def _get_pause() -> Optional[str]:
     async with db_session.AsyncSessionLocal() as session:
-        if paused:
-            await session.merge(SystemConfig(key=PAUSE_KEY, value="true"))
+        row = await session.get(SystemConfig, PAUSE_KEY)
+        return row.value if row else None
+
+
+async def _set_pause(value: Optional[str]) -> None:
+    """Store the pause row as given; None removes it."""
+    async with db_session.AsyncSessionLocal() as session:
+        if value is not None:
+            await session.merge(SystemConfig(key=PAUSE_KEY, value=value))
         else:
             row = await session.get(SystemConfig, PAUSE_KEY)
             if row:
@@ -104,10 +119,12 @@ async def set_learner_paused(paused: bool) -> None:
         await session.commit()
 
 
-async def _record_promote(key: str, changes: dict, version: int) -> None:
-    """Pause the learner and log the promote in one commit."""
+async def set_learner_paused(paused: bool) -> None:
+    await _set_pause("true" if paused else None)
+
+
+async def _record_history(key: str, changes: dict, version: int) -> None:
     async with db_session.AsyncSessionLocal() as session:
-        await session.merge(SystemConfig(key=PAUSE_KEY, value="true"))
         session.add(ShadowParamChange(strategy=key, source="promote", changes=changes,
                                       reason=f"Promoted to main bot (rules v{version})"))
         await session.commit()
@@ -148,17 +165,24 @@ async def promote(key: str, confirm: Any, confirm_text: Any = "") -> Dict[str, A
     risky = _risky_flags(now, after)
     if live and risky and confirm_text != CONFIRM_TEXT:
         raise ValueError(f"LIVE promote turns on {', '.join(risky)}: type {CONFIRM_TEXT} to confirm.")
-    version = await write_main_rules(after, promoted_from=key, live=live)  # ValueError: nothing written
+    # Pause before the write so the learner cannot retune the promoted rules in between
+    paused_before = await _get_pause()
+    await _set_pause("true")
+    try:
+        version = await write_main_rules(after, promoted_from=key, live=live)  # ValueError: nothing written
+    except Exception:
+        await _set_pause(paused_before)
+        raise
     changes = {n: {"old": now[n], "new": after[n]} for n in MainRules.RULE_FIELDS if now[n] != after[n]}
     try:
-        await _record_promote(key, changes, version)
+        await _record_history(key, changes, version)
     except Exception:
-        # Promoted rules must never stay active with the learner unpaused
-        logger.exception(f"Promote of '{key}': could not pause the learner; reverting the rules.")
+        logger.exception(f"Promote of '{key}': could not record history; reverting the rules.")
         try:
             await revert_main_rules()
+            await _set_pause(paused_before)
         except Exception:
-            logger.critical(f"Promote of '{key}': revert failed too; rules v{version} are active, learner not paused.")
+            logger.critical(f"Promote of '{key}': rollback failed; rules v{version} may still be active.")
         raise
     logger.info(f"Promoted shadow '{key}' to main rules v{version} (live={live}): {changes}")
     await _remember(key, changes, version)
@@ -167,10 +191,14 @@ async def promote(key: str, confirm: Any, confirm_text: Any = "") -> Dict[str, A
 
 
 async def revert() -> bool:
-    """Put back the rules from before the last write and resume the learner. False when nothing to revert."""
+    """Put back the rules from before the last write. False when nothing to revert.
+
+    The learner resumes only when the restored rules are the owner's own; restored promoted rules stay paused.
+    """
     if not await revert_main_rules():
         return False
-    await set_learner_paused(False)
+    if (await get_main_rules()).promoted_from is None:
+        await set_learner_paused(False)
     return True
 
 

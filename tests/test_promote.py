@@ -24,6 +24,13 @@ async def client():
 
 
 @pytest.fixture(autouse=True)
+def _no_memory_writes():
+    """Keep promote atoms out of the shared test memory DB."""
+    with patch("src.memory.store.memory_store.add_l1_atom", AsyncMock()) as add:
+        yield add
+
+
+@pytest.fixture(autouse=True)
 async def _drop_new_history():
     """Shadow history rows outlive the shadow store fixture; drop the ones this test wrote."""
     async with db_session.AsyncSessionLocal() as s:
@@ -108,6 +115,7 @@ async def test_revert_restores_and_resumes(client):
     assert rules.rules() == before and rules.promoted_from is None
     assert await _main_learner_paused() is False
     assert settings.TRIGGER_MIN_SCORE == before["trigger_min_score"]
+    assert (await client.get("/api/main/rules")).json()["can_revert"] is False
     r = await client.post("/api/main/rules/revert")
     assert r.status_code == 400 and "revert" in r.json()["detail"].lower()
 
@@ -209,17 +217,94 @@ async def test_paper_preview_raises_max_positions(client):
     assert (row["after"], row["changed"]) == (12, True)
 
 
-async def test_pause_flag_failure_rolls_rules_back(monkeypatch):
+@pytest.mark.parametrize("paused_before", [None, "true"])
+async def test_history_failure_rolls_rules_and_pause_back(monkeypatch, paused_before):
+    if paused_before:
+        await _set_row("MAIN_LEARNER_PAUSED", paused_before)
     before = (await get_main_rules()).rules()
 
     async def broken(*a, **kw):
         raise RuntimeError("db locked")
-    monkeypatch.setattr(promote_module, "_record_promote", broken)
+    monkeypatch.setattr(promote_module, "_record_history", broken)
     with pytest.raises(RuntimeError):
         await promote_module.promote("aggressive", confirm=True)
     rules = await get_main_rules()
     assert rules.rules() == before and rules.promoted_from is None
-    assert await _row("MAIN_LEARNER_PAUSED") is None
+    assert await _row("MAIN_LEARNER_PAUSED") == paused_before
+
+
+@pytest.mark.parametrize("paused_before", [None, "true"])
+async def test_write_failure_leaves_pause_as_it_was(paused_before):
+    if paused_before:
+        await _set_row("MAIN_LEARNER_PAUSED", paused_before)
+    await _set_row("TRIGGER_MIN_SCORE", "55")
+    await create_strategy("Low Bar", {"score_offset": -10})
+    with pytest.raises(ValueError):
+        await promote_module.promote("low_bar", confirm=True)
+    assert await _row("MAIN_LEARNER_PAUSED") == paused_before and (await get_main_rules()).version == 0
+
+
+async def test_pause_is_set_before_rules_are_written(monkeypatch):
+    seen = []
+    real_write = promote_module.write_main_rules
+
+    async def spy(*a, **kw):
+        seen.append(await _row("MAIN_LEARNER_PAUSED"))
+        return await real_write(*a, **kw)
+    monkeypatch.setattr(promote_module, "write_main_rules", spy)
+    await promote_module.promote("aggressive", confirm=True)
+    assert seen == ["true"] and await _row("MAIN_LEARNER_PAUSED") == "true"
+
+
+async def test_promote_with_main_max_positions_above_shadow_bound(client):
+    await _set_row("MAX_POSITIONS", "30")
+    assert (await client.get("/api/shadow/baseline/promote/preview")).json()["blocked"] is False
+    r = await client.post("/api/shadow/baseline/promote", json={"confirm": True})
+    assert r.status_code == 200, r.text
+    assert (await get_main_rules()).max_positions == 30
+
+
+async def _main_regime_on():
+    await write_main_rules({"regime_filter": True}, promoted_from=None)
+
+
+@pytest.mark.parametrize("params,flag,setup", [
+    ({"risk_per_trade_pct": 1.0}, "risk_per_trade_pct", None),   # main 0.5 -> 1.0
+    ({"risk_per_trade_pct": 0.0}, "risk_per_trade_pct", None),   # 0 turns the risk cap off
+    ({"regime_filter": False}, "regime_filter", _main_regime_on),
+    ({"score_offset": -5}, "trigger_min_score", None),
+])
+async def test_live_new_risky_flags_need_typed_text(client, live, params, flag, setup):
+    if setup:
+        await setup()
+    await create_strategy("Risky One", params)
+    preview = (await client.get("/api/shadow/risky_one/promote/preview")).json()
+    assert preview["risky_flags"] == [flag] and preview["needs_confirm_text"] is True
+    assert (await client.post("/api/shadow/risky_one/promote", json={"confirm": True})).status_code == 400
+    r = await client.post("/api/shadow/risky_one/promote", json={"confirm": True, "confirm_text": "PROMOTE LIVE"})
+    assert r.status_code == 200, r.text
+
+
+@pytest.mark.parametrize("params", [
+    {"score_offset": 5},            # stricter threshold
+    {"score_offset": -4},           # drop under 5 points
+    {"risk_per_trade_pct": 0.2},    # less risk
+    {"regime_filter": True},        # main False -> True
+])
+async def test_live_safer_changes_are_not_risky(client, live, params):
+    await create_strategy("Safe One", params)
+    preview = (await client.get("/api/shadow/safe_one/promote/preview")).json()
+    assert preview["risky_flags"] == [] and preview["has_changes"] is True
+    assert (await client.post("/api/shadow/safe_one/promote", json={"confirm": True})).status_code == 200
+
+
+async def test_paper_new_risky_flags_need_no_text(client):
+    await _main_regime_on()
+    await create_strategy("Risky All", {"risk_per_trade_pct": 0.0, "regime_filter": False, "score_offset": -10})
+    preview = (await client.get("/api/shadow/risky_all/promote/preview")).json()
+    assert preview["risky_flags"] == ["risk_per_trade_pct", "regime_filter", "trigger_min_score"]
+    assert preview["needs_confirm_text"] is False
+    assert (await client.post("/api/shadow/risky_all/promote", json={"confirm": True})).status_code == 200
 
 
 async def test_second_promote_then_revert_restores_first(client):
@@ -229,7 +314,11 @@ async def test_second_promote_then_revert_restores_first(client):
     await client.post("/api/shadow/wide_stop/promote", json={"confirm": True})
     assert (await get_main_rules()).stop_scale == 1.5
     assert (await client.post("/api/main/rules/revert")).status_code == 200
-    assert (await get_main_rules()).rules() == first
+    rules = await get_main_rules()
+    assert rules.rules() == first and rules.promoted_from == "aggressive"
+    status = (await client.get("/api/main/rules")).json()
+    assert status["learner_paused"] is True and status["can_revert"] is False  # one level of undo
+    # (a single promote then revert -> promoted_from None and pause cleared: test_revert_restores_and_resumes)
 
 
 async def test_promote_equal_rules_still_records_and_pauses(client):

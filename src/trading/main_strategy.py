@@ -203,16 +203,22 @@ async def get_main_rules() -> MainRules:
         return MainRules(**_defaults(), version=0, promoted_from=None)
 
 
-def _clean(values: Dict[str, Any]) -> Dict[str, Any]:
+def validate_main_rules(values: Dict[str, Any]) -> Dict[str, Any]:
+    """The checks write_main_rules runs: ValueError on an unknown rule or a bad value, else the cleaned values."""
     unknown = set(values) - set(_KEYS)
     if unknown:
         raise ValueError(f"{sorted(unknown)[0]}: unknown rule")
     clean = dict(values)
-    clean.update(validate_params({k: v for k, v in values.items() if k in SPECS}))
+    # max_positions uses the main range (the settings route allows up to 50), not the shadow schema's 1..20
+    clean.update(validate_params({k: v for k, v in values.items() if k in SPECS and k != "max_positions"}))
     if "trigger_min_score" in clean:
         v = clean["trigger_min_score"]
         if isinstance(v, bool) or not isinstance(v, int) or not 50 <= v <= 100:
             raise ValueError("trigger_min_score: must be an integer between 50 and 100")
+    if "max_positions" in clean:
+        v = clean["max_positions"]
+        if isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= 50:
+            raise ValueError("max_positions: must be an integer between 1 and 50")
     for name, v in clean.items():
         if v is None and not _KEYS[name][1].startswith("opt_"):
             raise ValueError(f"{name}: may not be empty")
@@ -243,20 +249,21 @@ async def write_main_rules(values: Dict[str, Any], promoted_from: Optional[str],
     Raises ValueError (nothing written) for an unknown rule or an out-of-range value. In LIVE,
     max_positions can only go down. Does not touch .env.
     """
-    clean = _clean(values)
+    clean = validate_main_rules(values)
     async with db_session.AsyncSessionLocal() as session:
         current = _resolve(await _load_rows(session))
         if live and "max_positions" in clean:
             clean["max_positions"] = effective_max_positions(clean["max_positions"], True, current.max_positions)
         version = current.version + 1
-        await _save(session, clean, version, promoted_from, json.dumps(current.rules()))
+        snapshot = {**current.rules(), "promoted_from": current.promoted_from}
+        await _save(session, clean, version, promoted_from, json.dumps(snapshot))
     _apply_settings(clean)
     logger.info(f"Main rules v{version} written (from {promoted_from or 'manual edit'}): {clean}")
     return version
 
 
 async def revert_main_rules() -> bool:
-    """Put back the rule set saved by the last write. False when nothing is stored."""
+    """Put back the rule set (and its promoted_from) saved by the last write. False when nothing is stored."""
     async with db_session.AsyncSessionLocal() as session:
         rows = await _load_rows(session)
         raw = rows.get(PREVIOUS_KEY)
@@ -266,11 +273,13 @@ async def revert_main_rules() -> bool:
             stored = json.loads(raw)
             # Same parse and range checks as a read: an out-of-range stored value reverts to its default.
             previous = _resolve({key: _dump(stored[name]) for name, (key, _) in _KEYS.items()}).rules()
+            # Snapshots written before promoted_from was stored restore as "not promoted"
+            promoted_from = str(stored.get("promoted_from") or "") or None
         except (ValueError, TypeError, KeyError) as e:
             logger.warning(f"Main rules: cannot revert, {PREVIOUS_KEY} is unreadable ({e}).")
             return False
         version = _resolve(rows).version + 1
-        await _save(session, previous, version, None, None)
+        await _save(session, previous, version, promoted_from, None)
     _apply_settings(previous)
     logger.info(f"Main rules reverted to the previous set as v{version}.")
     return True
