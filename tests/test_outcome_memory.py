@@ -153,6 +153,7 @@ async def test_paper_sell_records_main_paper_outcome():
     with _quiet_sell("paper", 105.0):
         res = await paper_broker.execute_sell("OUTP.AS", reason="Take-Profit hit")
     assert res["success"] is True
+    await _drain()
     rows = await memory_store.search_outcomes(source="main")
     assert len(rows) == 1
     o = rows[0]
@@ -175,6 +176,7 @@ async def test_paper_sell_survives_record_failure():
         before = await _paper_cash()
         with _quiet_sell("paper", 105.0), patch("src.memory.outcomes.record_outcome", boom) if failing else _noop():
             res = await paper_broker.execute_sell(ticker, reason="Take-Profit hit")
+            await _drain()
         assert res["success"] is True
         deltas.append(round(await _paper_cash() - before, 2))
         async with AsyncSessionLocal() as session:
@@ -189,6 +191,13 @@ def _noop():
     yield
 
 
+async def _drain():
+    """Waits for scheduled outcome writes."""
+    import asyncio
+    from src.memory import outcomes
+    await asyncio.gather(*list(outcomes._pending))
+
+
 async def test_live_sell_records_main_live_outcome():
     orig = (settings.TRADING_MODE, settings.LIVE_TRADING_ENABLED, settings.LIVE_BROKER)
     settings.TRADING_MODE, settings.LIVE_TRADING_ENABLED, settings.LIVE_BROKER = "LIVE", True, "trading212"
@@ -197,6 +206,7 @@ async def test_live_sell_records_main_live_outcome():
         with _quiet_sell("live", 95.0), patch.object(live_broker, "_dispatch_real_close", return_value="t212_exit_77"):
             res = await live_broker.execute_sell("OUTL.AS", reason="Stop-Loss hit")
         assert res["success"] is True
+        await _drain()
         rows = await memory_store.search_outcomes(source="main_live")
         assert len(rows) == 1 and rows[0]["ticker"] == "OUTL.AS" and rows[0]["pnl_pct"] == res["realized_pnl_pct"]
         assert rows[0]["pnl_pct"] < 0 and 1.9 < rows[0]["hold_days"] < 2.1
@@ -205,6 +215,45 @@ async def test_live_sell_records_main_live_outcome():
         async with AsyncSessionLocal() as session:
             await session.execute(delete(Position).where(Position.ticker == "OUTL.AS"))
             await session.commit()
+
+
+async def _sell_with_blocked_write(broker, module, ticker, is_live):
+    import asyncio
+    gate = asyncio.Event()
+
+    async def blocked(**kw):
+        await gate.wait()
+        return True
+
+    await _open_position(ticker, is_live=is_live)
+    try:
+        with _quiet_sell(module, 105.0), patch("src.memory.outcomes.record_outcome", blocked), \
+             patch.object(live_broker, "_dispatch_real_close", return_value="t212_exit_88"):
+            res = await asyncio.wait_for(broker.execute_sell(ticker, reason="Take-Profit hit"), timeout=10)
+            assert res["success"] is True
+            async with AsyncSessionLocal() as session:
+                pos = (await session.execute(select(Position).where(Position.ticker == ticker))).scalars().first()
+            assert pos.status == "CLOSED"
+            gate.set()
+            await _drain()
+    finally:
+        gate.set()
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(Position).where(Position.ticker == ticker))
+            await session.commit()
+
+
+async def test_paper_sell_does_not_wait_for_outcome_write():
+    await _sell_with_blocked_write(paper_broker, "paper", "OUTBP.AS", is_live=False)
+
+
+async def test_live_sell_does_not_wait_for_outcome_write():
+    orig = (settings.TRADING_MODE, settings.LIVE_TRADING_ENABLED, settings.LIVE_BROKER)
+    settings.TRADING_MODE, settings.LIVE_TRADING_ENABLED, settings.LIVE_BROKER = "LIVE", True, "trading212"
+    try:
+        await _sell_with_blocked_write(live_broker, "live", "OUTBL.AS", is_live=True)
+    finally:
+        settings.TRADING_MODE, settings.LIVE_TRADING_ENABLED, settings.LIVE_BROKER = orig
 
 
 # ---- cold start sees main outcomes only ----
