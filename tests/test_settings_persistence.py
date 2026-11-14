@@ -147,3 +147,23 @@ async def test_startup_clamps_stored_threshold_and_max_positions(monkeypatch, sc
             await session.execute(delete(SystemConfig).where(SystemConfig.key.in_(keys)))
             session.add_all([SystemConfig(key=k, value=v) for k, v in saved.items()])
             await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_resting_orders_switch_cancels_orders_when_turned_off(monkeypatch):
+    from unittest.mock import AsyncMock
+    from src.trading.broker import live_broker
+    monkeypatch.setattr(settings, "T212_RESTING_ORDERS", False)
+    monkeypatch.setattr("src.web.routes.update_env_file", lambda updates: None)
+    cancel = AsyncMock(return_value=[])
+    monkeypatch.setattr(live_broker, "cancel_resting_entries", cancel)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        assert (await ac.post("/api/settings", json={"t212_resting_orders": True})).json()["success"] is True
+        assert settings.T212_RESTING_ORDERS is True and (await ac.get("/api/settings")).json()["t212_resting_orders"] is True
+        cancel.assert_not_awaited()
+        await ac.post("/api/settings", json={"auto_buy_enabled": True})  # an unrelated save leaves the switch alone
+        assert settings.T212_RESTING_ORDERS is True
+        cancel.assert_not_awaited()
+        await ac.post("/api/settings", json={"t212_resting_orders": False})
+        assert settings.T212_RESTING_ORDERS is False
+        cancel.assert_awaited_once()

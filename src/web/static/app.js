@@ -1781,6 +1781,10 @@ async function loadSettings() {
 
     if (document.getElementById('settingMarketHours')) {
       document.getElementById('settingMarketHours').checked = data.enforce_market_hours !== false;
+      const resting = document.getElementById('settingRestingOrders');
+      resting.checked = data.t212_resting_orders === true;
+      resting.disabled = !data.t212_resting_orders_available;  // Trading 212 only
+      resting.dataset.loaded = String(resting.checked);
     }
 
     await loadMarketStatus();
@@ -1872,6 +1876,12 @@ async function saveSettings() {
       position_size_pct: posSizePct,
       enforce_market_hours: enforceHours
     };
+    // Sent only when flipped: a stale "off" would cancel the orders resting at Trading 212
+    const resting = document.getElementById('settingRestingOrders');
+    if (resting.dataset.loaded !== undefined && String(resting.checked) !== resting.dataset.loaded) {
+      payload.t212_resting_orders = resting.checked;
+      resting.dataset.loaded = String(resting.checked);
+    }
     // Send a score only if the user moved its slider: otherwise a stale value would undo a learner change
     if (minScoreEl.value !== minScoreEl.dataset.loaded && !isNaN(minScore)) {
       payload.min_consensus_score = minScore;

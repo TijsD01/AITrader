@@ -861,6 +861,17 @@
               <span class="ui-switch" aria-hidden="true"></span>
             </span>
           </div>
+
+          <div class="set-row">
+            <div class="min-w-0">
+              <label for="settingRestingOrders" class="set-label">Resting orders at Trading 212</label>
+              <span class="set-help">Each armed trigger rests as a day limit order at Trading 212, from 20 minutes after the open. Off: the bot watches the price and buys when it hits. Switching off cancels the resting orders.</span>
+            </div>
+            <span class="check-wrap set-toggle">
+              <input type="checkbox" id="settingRestingOrders" onchange="saveSettings()">
+              <span class="ui-switch" aria-hidden="true"></span>
+            </span>
+          </div>
         </div>
       </details>
 
