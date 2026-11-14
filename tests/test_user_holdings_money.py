@@ -166,3 +166,43 @@ async def test_sell_snapshot_holds_mine_and_daily_loss_stays_flat(fake, monkeypa
         assert await LiveBroker().get_daily_loss_eur() == 0.0
     finally:
         await _cleanup("ASML.AS")
+
+
+async def _cash_sync_after_own_buy(fake, monkeypatch, cash, total, invested, held):
+    """Yesterday €1,500 cash, nothing held. Today the 3-minute cash sync sees T212 after a buy in its own app."""
+    _live(monkeypatch)
+    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    async with db_session.AsyncSessionLocal() as s:
+        s.add(PortfolioSnapshot(cash_eur=1500.0, equity_eur=0.0, total_value_eur=1500.0, is_live=True,
+                                broker="trading212", timestamp=now - datetime.timedelta(days=1)))
+        await s.commit()
+
+    async def summary():
+        return {"currency": "EUR", "totalValue": total,
+                "cash": {"availableToTrade": cash, "reservedForOrders": 0.0}, "investments": {"currentValue": invested}}
+    monkeypatch.setattr(fake, "account_summary", summary)
+    monkeypatch.setattr("src.db.session.set_kill_switch", AsyncMock())
+    fake.positions_answers = [held]
+    broker = LiveBroker()
+    with patch("src.telegram.bot.telegram_bot.send_message", AsyncMock()):
+        await broker.sync_cash_balance()
+        return await broker.enforce_daily_loss_limit()
+
+
+async def test_own_buy_in_t212_app_does_not_trip_kill_switch(fake, monkeypatch, clean_money):
+    # €1,000 of SAP bought by hand: cash fell, the account did not
+    sap = dict(_held("SAPd_EQ", 10.0, avg=100.0), currentPrice=100.0)
+    try:
+        assert await _cash_sync_after_own_buy(fake, monkeypatch, 500.0, 1500.0, 1000.0, [sap]) is None
+        async with db_session.AsyncSessionLocal() as s:
+            rows = (await s.execute(select(UserHolding).where(UserHolding.ticker == "SAP.DE"))).scalars().all()
+        assert [(r.shares, r.current_price_eur) for r in rows] == [(10.0, 100.0)]
+    finally:
+        async with db_session.AsyncSessionLocal() as s:
+            await s.execute(delete(UserHolding).where(UserHolding.ticker == "SAP.DE"))
+            await s.commit()
+
+
+async def test_real_cash_loss_still_trips_kill_switch_on_cash_sync(fake, monkeypatch, clean_money):
+    # Nothing held, €600 gone: a real loss
+    assert await _cash_sync_after_own_buy(fake, monkeypatch, 900.0, 900.0, 0.0, []) is not None
