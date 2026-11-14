@@ -2076,6 +2076,11 @@ class LiveBroker(BaseBroker):
             acct_cash, acct_total, acct_equity = await self._fetch_t212_account_values()
             if acct_cash is None:
                 return
+            if await self._t212_holdings_unbooked():
+                # A buy in the T212 app moved cash into shares the bot has not booked: recorded alone,
+                # that cash drop reads as a daily loss. The full reconcile books them in the same snapshot.
+                await self._sync_t212_account()
+                return
 
             async with AsyncSessionLocal() as session:
                 snap_res = await session.execute(
@@ -2100,6 +2105,20 @@ class LiveBroker(BaseBroker):
                 logger.info(f"Live cash balance synced from {broker.upper()}: €{acct_cash:.2f}")
         except Exception as e:
             logger.warning(f"{broker.upper()} cash balance sync note: {e}")
+
+    async def _t212_holdings_unbooked(self) -> bool:
+        """True when T212 holds a share count no open bot position or My holdings row has."""
+        client = trading212.get_client()
+        if not client:
+            return False
+        held = {p["instrument"]["ticker"]: float(p.get("quantity") or 0) for p in await client.positions()}
+        async with AsyncSessionLocal() as session:
+            booked = {h.t212_ticker: h.shares for h in (await session.execute(select(UserHolding))).scalars().all()}
+            for pos in (await session.execute(select(Position).where(Position.status == "OPEN", Position.is_live == True))).scalars().all():
+                t212_ticker = await client.resolve_ticker(pos.ticker, pos.currency)
+                if t212_ticker:
+                    booked[t212_ticker] = booked.get(t212_ticker, 0.0) + pos.shares
+        return any(qty > 0 and abs(qty - booked.get(t, 0.0)) > 1e-6 for t, qty in held.items())
 
     async def _planned_levels(self, session, sym: str, pending_only: bool = False) -> Tuple[Optional[float], Optional[float]]:
         """
