@@ -103,7 +103,7 @@ class TradeLearner:
                 rep_query = rep_query.where(AnalysisReport.created_at <= entry_time)
             rep_res = await session.execute(rep_query.order_by(desc(AnalysisReport.created_at)))
             report = rep_res.scalars().first()
-            score = trade.consensus_score or (report.consensus_score if report else 75)
+            score = report.consensus_score if report else 75
             tech_bias = report.technical_summary if report else ""
             risk_summary = report.risk_summary if report else ""
 
@@ -461,8 +461,8 @@ Return valid JSON with exactly these keys:
 
                 # A. Conviction Threshold Adjustment
                 if settings.SCORE_AUTO_TUNE and (consecutive_losses >= 2 or win_rate < 0.40):
-                    new_min_score = min(82, max(78, curr_min_score + 1))
-                    new_trig_score = min(84, max(80, curr_trig_score + 1))
+                    new_min_score = max(curr_min_score, min(82, max(78, curr_min_score + 1)))  # never loosens
+                    new_trig_score = max(curr_trig_score, min(84, max(80, curr_trig_score + 1)))
                     adjustment_reasons.append(f"Losing streak ({consecutive_losses} consecutive): Raised min consensus score to {new_min_score} and trigger score to {new_trig_score} for higher selectivity.")
                 elif (settings.SCORE_AUTO_TUNE and win_rate >= 0.70 and expectancy_pct > 0
                       and consecutive_losses == 0 and total_trades >= 5):

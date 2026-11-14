@@ -50,6 +50,8 @@ class LiveBroker(BaseBroker):
         self._t212_lock = asyncio.Lock()
         # Trading 212 exit fill price per ticker, set by _t212_exit and taken by execute_sell to book the real price
         self._t212_exit_prices: Dict[str, float] = {}
+        # Trading 212 holdings the last full sync could not book: the cash sync does not retry them until they change
+        self._t212_unbookable: frozenset = frozenset()
 
     async def disconnect(self):
         """Clears the cached connection status."""
@@ -2076,10 +2078,21 @@ class LiveBroker(BaseBroker):
             acct_cash, acct_total, acct_equity = await self._fetch_t212_account_values()
             if acct_cash is None:
                 return
-            if await self._t212_holdings_unbooked():
+            try:
+                unbooked = await self._t212_unbooked()
+            except Exception as e:
+                # The cash snapshot must not depend on the positions call
+                logger.warning(f"Trading 212 unbooked-holdings check failed: {e}")
+                unbooked = self._t212_unbookable
+            if unbooked is None:
+                # A resting entry filled: sync_resting_entries books it and writes the snapshot.
+                # A cash-only snapshot now would read the fill's cost as a daily loss.
+                return
+            if unbooked != self._t212_unbookable:
                 # A buy in the T212 app moved cash into shares the bot has not booked: recorded alone,
                 # that cash drop reads as a daily loss. The full reconcile books them in the same snapshot.
                 await self._sync_t212_account()
+                self._t212_unbookable = await self._t212_unbooked() or frozenset()
                 return
 
             async with AsyncSessionLocal() as session:
@@ -2106,11 +2119,14 @@ class LiveBroker(BaseBroker):
         except Exception as e:
             logger.warning(f"{broker.upper()} cash balance sync note: {e}")
 
-    async def _t212_holdings_unbooked(self) -> bool:
-        """True when T212 holds a share count no open bot position or My holdings row has."""
+    async def _t212_unbooked(self) -> Optional[frozenset]:
+        """
+        T212 (ticker, quantity) pairs no open bot position or My holdings row accounts for.
+        None when one of them is a resting entry: its fill is booked by sync_resting_entries.
+        """
         client = trading212.get_client()
         if not client:
-            return False
+            return frozenset()
         held = {p["instrument"]["ticker"]: float(p.get("quantity") or 0) for p in await client.positions()}
         async with AsyncSessionLocal() as session:
             booked = {h.t212_ticker: h.shares for h in (await session.execute(select(UserHolding))).scalars().all()}
@@ -2118,7 +2134,13 @@ class LiveBroker(BaseBroker):
                 t212_ticker = await client.resolve_ticker(pos.ticker, pos.currency)
                 if t212_ticker:
                     booked[t212_ticker] = booked.get(t212_ticker, 0.0) + pos.shares
-        return any(qty > 0 and abs(qty - booked.get(t, 0.0)) > 1e-6 for t, qty in held.items())
+            unbooked = frozenset((t, round(qty, 6)) for t, qty in held.items() if qty > 0 and abs(qty - booked.get(t, 0.0)) > 1e-6)
+            if unbooked and self.resting_orders_on():
+                for t in (await session.execute(select(OrderTrigger).where(
+                        OrderTrigger.status == "PENDING", OrderTrigger.is_live == True, OrderTrigger.broker_order_id.isnot(None)))).scalars().all():
+                    if await client.resolve_ticker(t.ticker, t.currency) in {u[0] for u in unbooked}:
+                        return None
+        return unbooked
 
     async def _planned_levels(self, session, sym: str, pending_only: bool = False) -> Tuple[Optional[float], Optional[float]]:
         """

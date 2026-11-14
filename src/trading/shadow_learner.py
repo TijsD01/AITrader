@@ -121,10 +121,11 @@ async def _locked_reversals(key: str, closed: List[ShadowPosition]) -> dict:
             seen.add(name)
             if change.source != "learner" or not change.created_at:
                 continue
-            after = [p.realized_pnl_pct or 0.0 for p in closed if p.opened_at and p.opened_at >= change.created_at]
             before = ((change.stats or {}).get("since_last_learn") or {}).get("expectancy_pct")
-            worse = (len(after) >= settings.SHADOW_LEARN_MIN_TRADES and before is not None
-                     and sum(after) / len(after) < before)
+            if before is None:  # nothing to compare with: locking would pin the parameter for good
+                continue
+            after = [p.realized_pnl_pct or 0.0 for p in closed if p.opened_at and p.opened_at >= change.created_at]
+            worse = len(after) >= settings.SHADOW_LEARN_MIN_TRADES and sum(after) / len(after) < before
             if not worse:
                 locked[name] = diff.get("old")
     return locked

@@ -550,6 +550,17 @@ async def _arrange_window(pnls):
 
 
 @pytest.mark.asyncio
+async def test_rule_calibration_never_lowers_scores_on_a_losing_streak(monkeypatch, paused_learner):
+    await _arrange_calibration_trades(monkeypatch)
+    await _arrange_window([-1.0] * 20)
+    await _set_rows(MIN_CONSENSUS_SCORE="85", TRIGGER_MIN_SCORE="87")
+    with patch("src.agents.base.llm_client.has_active_key", return_value=False):
+        assert (await trade_learner.calibrate_internal_parameters())["success"] is True
+    rows = await _calibration_rows()
+    assert (rows["MIN_CONSENSUS_SCORE"], rows["TRIGGER_MIN_SCORE"]) == ("85", "87")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("pnls, expected", [
     ([1.0] * 20, ("73", "80")),               # positive expectancy: -1 point, never below the default (70 / 80)
     ([-5.0] * 4 + [0.5] * 16, ("74", "80")),  # 80% winners but negative expectancy: no loosening

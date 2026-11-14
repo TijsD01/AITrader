@@ -9,10 +9,10 @@ from config.settings import settings
 @pytest.mark.asyncio
 async def test_portfolio_summary_refreshes_unrealized_pnl():
     orig_enforce = settings.ENFORCE_MARKET_HOURS
-    settings.ENFORCE_MARKET_HOURS = False
     transport = ASGITransport(app=app)
     try:
         await init_db()
+        settings.ENFORCE_MARKET_HOURS = False  # after init_db, which reloads the stored value
 
         # Buy position at 100 EUR
         await paper_broker.execute_buy(
