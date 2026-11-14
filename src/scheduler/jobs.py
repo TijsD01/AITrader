@@ -32,6 +32,15 @@ from src.trading.trading212 import broker_can_buy
 logger = logging.getLogger(__name__)
 
 
+def digest_headline(market: str, session: str) -> str:
+    """Dashboard headline for an archived session review. A manual scan (market ALL from the Scan button) is not an exchange open."""
+    m, s = market.upper(), session.upper()
+    flag = {"EU": "🇪🇺", "US": "🇺🇸"}.get(m, "🌍")
+    if s == "MANUAL_SCAN":
+        return f"{flag} {m}-scan"
+    return f"{flag} {m}-beurs {'open' if s in ('OPEN', 'REVIEW') else 'dicht'}"
+
+
 async def _tickers_in_use(db_session) -> tuple:
     """Open-position and pending-trigger tickers of the active mode only, so stale paper rows never block live buys."""
     live = get_active_broker() is live_broker
@@ -665,9 +674,7 @@ class TradingScheduler:
                 )
 
             # 6. Archive Market Digest with portfolio state and generated review text
-            flag = "🇪🇺" if market.upper() == "EU" else "🇺🇸"
-            is_close = session.upper() not in ("OPEN", "MANUAL_SCAN", "REVIEW")
-            headline = f"{flag} {market.upper()}-beurs {'dicht' if is_close else 'open'}"
+            headline = digest_headline(market, session)
             armed = [t.get("ticker") for t in armed_triggers]
             content = f"{len(reports)} aandelen bekeken. " + (
                 f"Koopopdracht klaargezet voor {', '.join(armed)}." if armed else "Geen nieuwe koopopdrachten."

@@ -39,9 +39,9 @@
   --info: #0A7189;
   --violet: #495057;
   --pink: #495057;
-  --gain-soft: rgba(10, 122, 71, 0.12);
-  --loss-soft: rgba(200, 40, 63, 0.12);
-  --warn-soft: rgba(154, 88, 0, 0.12);
+  --gain-soft: rgba(10, 122, 71, 0.08); /* 0.08 keeps badge text >= 4.5:1 on --bg */
+  --loss-soft: rgba(200, 40, 63, 0.08);
+  --warn-soft: rgba(154, 88, 0, 0.08);
   --warn-line: rgba(154, 88, 0, 0.35);
   --rgb-bg: 248 249 250;
   --rgb-surface: 255 255 255;
@@ -911,6 +911,10 @@ input[type="range"].se-range:disabled { cursor: not-allowed; }
 .sh-stops span:last-child { transform: translateX(calc(-100% + 8px)); }
 .sh-stops .is-on { color: var(--accent-strong); font-weight: 600; }
 .sh-hist > summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--text-2); display: flex; align-items: center; min-height: 44px; }
+.sh-hist > summary { list-style: none; gap: 8px; }
+.sh-hist > summary::-webkit-details-marker { display: none; }
+.sh-hist .adv-chev { transition: transform .2s var(--ease-in-out); }
+.sh-hist[open] > summary .adv-chev { transform: rotate(180deg); }
 .sh-hist[open] > .sh-hist-list { animation: fadeIn var(--dur-in) var(--ease-out); }
 .sh-hist-item { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 8px 0; font-size: 13px; }
 @media (prefers-reduced-motion: reduce) { .sh-hist[open] > .sh-hist-list { animation: none; } .se-param > * { transition: none; } }

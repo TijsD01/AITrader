@@ -449,3 +449,17 @@ def test_next_session_us_times_follow_new_york_dst():
     assert s["market"] == "US" and "21:00 CET" in s["formatted"]
     s = ReviewTracker.get_next_session_info(datetime.datetime(2026, 11, 2, 10, 0, tzinfo=tz))
     assert "15:30 CET" in s["formatted"]
+
+
+def test_digest_headline_names_manual_scan_not_an_exchange_open():
+    from src.scheduler.jobs import digest_headline
+    assert digest_headline("EU", "OPEN") == "🇪🇺 EU-beurs open"
+    assert digest_headline("us", "CLOSE") == "🇺🇸 US-beurs dicht"
+    assert digest_headline("ALL", "MANUAL_SCAN") == "🌍 ALL-scan"
+
+
+def test_digest_time_converts_stored_utc_to_amsterdam():
+    from src.data.review_tracker import fmt_digest_time
+    assert fmt_digest_time(datetime.datetime(2026, 11, 14, 8, 21)) == "2026-11-14 09:21 CET"
+    assert fmt_digest_time(datetime.datetime(2026, 7, 1, 7, 0)) == "2026-07-01 09:00 CEST"
+    assert fmt_digest_time(None) == ""

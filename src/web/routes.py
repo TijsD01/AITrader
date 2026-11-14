@@ -737,7 +737,7 @@ class MarketSessionRequest(BaseModel):
 @router.get("/api/market-digest/latest")
 async def get_latest_market_digest(market: Optional[str] = None):
     """Returns the most recent market opening/closing digest."""
-    from src.data.review_tracker import review_tracker
+    from src.data.review_tracker import review_tracker, fmt_digest_time
     next_info = review_tracker.get_next_session_info()
     async with AsyncSessionLocal() as session:
         query = select(MarketDigest).order_by(desc(MarketDigest.timestamp))
@@ -762,7 +762,7 @@ async def get_latest_market_digest(market: Optional[str] = None):
             "top_picks": digest.top_picks or [],
             "portfolio_state": digest.portfolio_state or {},
             "review_text": digest.review_text or "",
-            "timestamp": digest.timestamp.strftime("%Y-%m-%d %H:%M CET") if digest.timestamp else "",
+            "timestamp": fmt_digest_time(digest.timestamp),
             "next_session": next_info,
             "trigger_min_score": await get_trigger_min_score()
         }
