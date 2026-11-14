@@ -3821,7 +3821,7 @@ function tsLineDash(key, set) {
   return solid ? [] : [6, 4];
 }
 
-// Inline Chart.js plugin: horizontal level lines with a right-edge label
+// Inline Chart.js plugin: horizontal level lines with a left-edge label
 const tsLevelPlugin = {
   id: 'tsLevels',
   beforeDatasetsDraw(chart, args, opts) { // lines under the price line, so trade markers stay visible
@@ -3853,7 +3853,7 @@ const tsLevelPlugin = {
     const bg = cssVar('--surface');
     labels.forEach(l => {
       const w = ctx.measureText(l.text).width + 10;
-      const x = a.right - w;
+      const x = a.left;
       ctx.fillStyle = bg;
       ctx.fillRect(x, l.py - 8, w, 16);
       ctx.fillStyle = l.color;
