@@ -496,3 +496,99 @@ async def test_pause_flag_read_error_means_not_paused():
     from src.trading import learner
     with patch.object(learner, "AsyncSessionLocal", side_effect=RuntimeError("db down")):
         assert await learner._main_learner_paused() is False
+
+
+async def _set_rows(**rows):
+    async with AsyncSessionLocal() as session:
+        await session.execute(delete(SystemConfig).where(SystemConfig.key.in_(list(rows))))
+        session.add_all([SystemConfig(key=k, value=v) for k, v in rows.items()])
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_llm_calibration_moves_each_value_at_most_ten_percent_of_its_range(monkeypatch, paused_learner):
+    from unittest.mock import AsyncMock
+    await _arrange_calibration_trades(monkeypatch)
+    await _set_rows(ATR_STOP_MULTIPLIER="1.75", WEIGHT_RISK="0.20")
+    llm = AsyncMock(return_value={
+        "MIN_CONSENSUS_SCORE": 85, "TRIGGER_MIN_SCORE": 88, "ATR_STOP_MULTIPLIER": 2.75, "TAKE_PROFIT_RR": 1.5,
+        "BREAKEVEN_TRIGGER_PCT": 0.05, "WEIGHT_RISK": 0.50, "adjustment_reasons": ["jump everything"]})
+    with patch("src.agents.base.llm_client.has_active_key", return_value=True), \
+         patch("src.agents.base.llm_client.generate_json", llm):
+        res = await trade_learner.calibrate_internal_parameters()
+    p = res["calibrated_parameters"]
+    assert p["MIN_CONSENSUS_SCORE"] == 75     # 74 + int(0.1 * 17)
+    assert p["TRIGGER_MIN_SCORE"] == 81       # 80 + int(0.1 * 16)
+    assert p["ATR_STOP_MULTIPLIER"] == 1.85   # 1.75 + 0.1 * 1.0, not 2.75
+    assert p["TAKE_PROFIT_RR"] == 1.95        # 2.1 - 0.1 * 1.5, not 1.5
+    assert p["BREAKEVEN_TRIGGER_PCT"] <= 0.029
+    assert p["WEIGHT_RISK"] <= 0.30           # pre-normalisation step capped to 0.24
+    assert "expectancy" in llm.await_args.args[1].lower()
+    assert res["expectancy_pct"] < 0
+
+
+@pytest.mark.asyncio
+async def test_rule_calibration_keeps_breakeven_setting(monkeypatch, paused_learner):
+    await _arrange_calibration_trades(monkeypatch)
+    await _set_rows(BREAKEVEN_TRIGGER_PCT="0.04")
+    with patch("src.agents.base.llm_client.has_active_key", return_value=False):
+        res = await trade_learner.calibrate_internal_parameters()
+    assert res["calibrated_parameters"]["BREAKEVEN_TRIGGER_PCT"] == 0.04
+    assert (await _calibration_rows())["BREAKEVEN_TRIGGER_PCT"] == "0.04"
+
+
+async def _arrange_window(pnls):
+    """20 newest paper sells (oldest first in pnls), so the calibration window holds only these."""
+    future = datetime.datetime.utcnow() + datetime.timedelta(days=3650)
+    async with AsyncSessionLocal() as session:
+        for i, pnl in enumerate(pnls):
+            session.add(Trade(
+                ticker=f"PAUSE_LOSS_W{i}", name="W", order_type="SELL", shares=1.0, currency="EUR", price_native=100.0,
+                price_eur=100.0, total_eur=100.0, realized_pnl_eur=pnl, realized_pnl_pct=pnl, rationale="Take-Profit",
+                is_live=False, executed_at=future + datetime.timedelta(minutes=i)))
+        await session.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pnls, expected", [
+    ([1.0] * 20, ("73", "80")),               # positive expectancy: -1 point, never below the default (70 / 80)
+    ([-5.0] * 4 + [0.5] * 16, ("74", "80")),  # 80% winners but negative expectancy: no loosening
+])
+async def test_rule_calibration_loosens_scores_only_on_positive_expectancy(monkeypatch, paused_learner, pnls, expected):
+    await _arrange_calibration_trades(monkeypatch)
+    await _arrange_window(pnls)
+    with patch("src.agents.base.llm_client.has_active_key", return_value=False):
+        res = await trade_learner.calibrate_internal_parameters()
+    assert res["success"] is True and res["win_rate_pct"] >= 70
+    rows = await _calibration_rows()
+    assert (rows["MIN_CONSENSUS_SCORE"], rows["TRIGGER_MIN_SCORE"]) == expected
+
+
+@pytest.mark.asyncio
+async def test_post_mortem_ignores_later_report_and_later_position():
+    await init_db()
+    now = datetime.datetime.utcnow()
+    T = "PM_LOOKAHEAD"
+    async with AsyncSessionLocal() as session:
+        session.add(AnalysisReport(ticker=T, action="BUY", consensus_score=60, created_at=now - datetime.timedelta(days=4)))
+        session.add(AnalysisReport(ticker=T, action="BUY", consensus_score=90, created_at=now + datetime.timedelta(hours=1)))
+        for opened in (now - datetime.timedelta(days=3), now + datetime.timedelta(hours=2)):  # the trade's, then a re-entry
+            session.add(Position(ticker=T, shares=1, entry_price_native=100.0, current_price_native=100.0,
+                                 highest_price_native=100.0, entry_price_eur=100.0, current_price_eur=100.0,
+                                 cost_basis_eur=100.0, status="CLOSED", opened_at=opened))
+        trade = Trade(ticker=T, name="PM", order_type="SELL", shares=1.0, currency="EUR", price_native=96.0,
+                      price_eur=96.0, total_eur=96.0, realized_pnl_eur=-4.0, realized_pnl_pct=-4.0,
+                      rationale="Stop-Loss triggered", executed_at=now)
+        session.add(trade)
+        await session.commit()
+        await session.refresh(trade)
+    try:
+        with patch("src.agents.base.llm_client.has_active_key", return_value=False):
+            res = await trade_learner.conduct_trade_post_mortem(trade.id)
+        # 72h hold and the 60-score report at entry: the low-conviction lesson, not a premature stop-out
+        assert "Raise minimum consensus score" in res["lesson"]
+    finally:
+        async with AsyncSessionLocal() as session:
+            for model in (Trade, Position, AnalysisReport, TradeLesson):
+                await session.execute(delete(model).where(model.ticker == T))
+            await session.commit()

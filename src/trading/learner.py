@@ -7,8 +7,25 @@ from config.settings import settings
 from src.db.session import AsyncSessionLocal
 from src.db.models import Trade, Position, AnalysisReport, TradeLesson, SystemConfig, OrderTrigger
 from src.agents.base import llm_client
+from src.trading.strategy_params import STRENGTH_SHARE
 
 logger = logging.getLogger(__name__)
+
+# Largest move per calibration for an LLM-proposed main-bot value: the medium shadow step (10% of the allowed range)
+MAIN_STEP_SHARE = STRENGTH_SHARE[2]
+
+
+def _step(old: float, proposed, lo: float, hi: float) -> float:
+    """Clamp proposed into [lo, hi] and move at most MAIN_STEP_SHARE of the range away from old (itself clamped first)."""
+    old = max(lo, min(hi, old))
+    cap = MAIN_STEP_SHARE * (hi - lo)
+    return max(lo, min(hi, old + max(-cap, min(cap, float(proposed) - old))))
+
+
+def _int_step(old: int, proposed, lo: int, hi: int) -> int:
+    """_step for integer scores: truncates toward old so the move never exceeds the cap."""
+    old = max(lo, min(hi, old))
+    return old + int(_step(old, proposed, lo, hi) - old)
 
 PAUSED_MESSAGE = "Auto-calibration is paused while promoted shadow rules are active."
 
@@ -59,9 +76,11 @@ class TradeLearner:
             exit_reason = trade.rationale or "Manual Exit"
 
             # 2. Fetch corresponding position and buy history
-            pos_res = await session.execute(
-                select(Position).where(Position.ticker == ticker).order_by(desc(Position.opened_at))
-            )
+            # Only the position opened before this sell: a later re-entry of the same ticker is a different trade
+            pos_query = select(Position).where(Position.ticker == ticker)
+            if trade.executed_at:
+                pos_query = pos_query.where(Position.opened_at <= trade.executed_at)
+            pos_res = await session.execute(pos_query.order_by(desc(Position.opened_at)))
             pos = pos_res.scalars().first()
 
             holding_hours = 0.0
@@ -77,11 +96,14 @@ class TradeLearner:
             max_runup_pct = round(((highest_price / entry_price) - 1.0) * 100, 2) if entry_price > 0 else 0.0
 
             # 3. Fetch original analysis report for committee conviction & context
-            rep_res = await session.execute(
-                select(AnalysisReport).where(AnalysisReport.ticker == ticker).order_by(desc(AnalysisReport.created_at))
-            )
+            # Only a report that existed at entry: a newer one would judge the trade with hindsight
+            rep_query = select(AnalysisReport).where(AnalysisReport.ticker == ticker)
+            entry_time = (pos.opened_at if pos else None) or trade.executed_at
+            if entry_time:
+                rep_query = rep_query.where(AnalysisReport.created_at <= entry_time)
+            rep_res = await session.execute(rep_query.order_by(desc(AnalysisReport.created_at)))
             report = rep_res.scalars().first()
-            score = report.consensus_score if report else 75
+            score = trade.consensus_score or (report.consensus_score if report else 75)
             tech_bias = report.technical_summary if report else ""
             risk_summary = report.risk_summary if report else ""
 
@@ -267,6 +289,11 @@ class TradeLearner:
             win_count = len(wins)
             loss_count = len(losses)
             win_rate = (win_count / total_trades) if total_trades > 0 else 0.5
+            # Win rate alone misleads: 40% winners at 2R pay, 70% winners at 0.3R may not. Net of fees (realized PnL is).
+            pnls = [t.realized_pnl_pct or 0.0 for t in closed_trades]
+            expectancy_pct = sum(pnls) / total_trades
+            gross_loss = -sum(x for x in pnls if x < 0)
+            profit_factor = round(sum(x for x in pnls if x > 0) / gross_loss, 2) if gross_loss > 0 else None
 
             # Calculate consecutive losses from latest trade
             consecutive_losses = 0
@@ -340,6 +367,8 @@ Latest Trade Post-Mortem:
 Recent Portfolio Performance:
 - Total Closed Trades: {total_trades} (Wins: {win_count}, Losses: {loss_count})
 - Win Rate: {win_rate*100:.1f}%
+- Expectancy (average net PnL per trade): {expectancy_pct:+.2f}%
+- Profit Factor: {profit_factor if profit_factor is not None else 'n/a (no losses)'}
 - Consecutive Losses: {consecutive_losses}
 
 Current Active Parameters:
@@ -355,7 +384,9 @@ Current Active Parameters:
 2. If previous trades achieved unrealized gains before reversing into stop-outs (e.g. DTE.DE / MBG.DE / SU.PA), tighten BREAKEVEN_TRIGGER_PCT (e.g. 0.02 - 0.025 / 2.0% - 2.5%) so trailing stops ratchet to breakeven earlier.
 3. If under a losing streak or low win rate, increase MIN_CONSENSUS_SCORE (e.g. 80-82) and TRIGGER_MIN_SCORE (e.g. 82-85) to enforce higher selectivity.
 4. If technical momentum failed despite high score, increase WEIGHT_RISK (e.g. 0.25 - 0.30) and reduce WEIGHT_TECHNICAL.
-5. Provide actionable, concise bullet points in "adjustment_reasons" explaining each parameter change.
+5. Judge performance by expectancy and profit factor, not win rate alone. Fewer than about 30 trades is mostly noise: prefer no change.
+6. Each value moves at most 10% of its allowed range per calibration; larger proposals are cut down.
+7. Provide actionable, concise bullet points in "adjustment_reasons" explaining each parameter change.
 
 Return valid JSON with exactly these keys:
 {{
@@ -374,17 +405,17 @@ Return valid JSON with exactly these keys:
                 try:
                     llm_res = await llm_client.generate_json(system_prompt, user_prompt)
                     if llm_res and isinstance(llm_res, dict) and "adjustment_reasons" in llm_res:
-                        new_min_score = max(68, min(85, int(llm_res.get("MIN_CONSENSUS_SCORE", curr_min_score))))
-                        new_trig_score = max(72, min(88, int(llm_res.get("TRIGGER_MIN_SCORE", curr_trig_score))))
-                        new_atr_mult = round(max(1.75, min(2.75, float(llm_res.get("ATR_STOP_MULTIPLIER", curr_atr_mult)))), 2)
-                        new_tp_rr = round(max(1.5, min(3.0, float(llm_res.get("TAKE_PROFIT_RR", curr_tp_rr)))), 2)
-                        new_be_pct = round(max(0.015, min(0.05, float(llm_res.get("BREAKEVEN_TRIGGER_PCT", curr_be_pct)))), 3)
+                        new_min_score = _int_step(curr_min_score, int(llm_res.get("MIN_CONSENSUS_SCORE", curr_min_score)), 68, 85)
+                        new_trig_score = _int_step(curr_trig_score, int(llm_res.get("TRIGGER_MIN_SCORE", curr_trig_score)), 72, 88)
+                        new_atr_mult = round(_step(curr_atr_mult, llm_res.get("ATR_STOP_MULTIPLIER", curr_atr_mult), 1.75, 2.75), 2)
+                        new_tp_rr = round(_step(curr_tp_rr, llm_res.get("TAKE_PROFIT_RR", curr_tp_rr), 1.5, 3.0), 2)
+                        new_be_pct = round(_step(curr_be_pct, llm_res.get("BREAKEVEN_TRIGGER_PCT", curr_be_pct), 0.015, 0.05), 3)
 
                         # Weights normalization
-                        w_tech = max(0.05, min(0.50, float(llm_res.get("WEIGHT_TECHNICAL", curr_w_tech))))
-                        w_fund = max(0.05, min(0.50, float(llm_res.get("WEIGHT_FUNDAMENTAL", curr_w_fund))))
-                        w_sent = max(0.05, min(0.25, float(llm_res.get("WEIGHT_SENTIMENT", curr_w_sent))))
-                        w_risk = max(0.10, min(0.50, float(llm_res.get("WEIGHT_RISK", curr_w_risk))))
+                        w_tech = _step(curr_w_tech, llm_res.get("WEIGHT_TECHNICAL", curr_w_tech), 0.05, 0.50)
+                        w_fund = _step(curr_w_fund, llm_res.get("WEIGHT_FUNDAMENTAL", curr_w_fund), 0.05, 0.50)
+                        w_sent = _step(curr_w_sent, llm_res.get("WEIGHT_SENTIMENT", curr_w_sent), 0.05, 0.25)
+                        w_risk = _step(curr_w_risk, llm_res.get("WEIGHT_RISK", curr_w_risk), 0.10, 0.50)
                         total_w = w_tech + w_fund + w_sent + w_risk
                         w_tech = round(w_tech / total_w, 2)
                         w_fund = round(w_fund / total_w, 2)
@@ -433,20 +464,21 @@ Return valid JSON with exactly these keys:
                     new_min_score = min(82, max(78, curr_min_score + 1))
                     new_trig_score = min(84, max(80, curr_trig_score + 1))
                     adjustment_reasons.append(f"Losing streak ({consecutive_losses} consecutive): Raised min consensus score to {new_min_score} and trigger score to {new_trig_score} for higher selectivity.")
-                elif settings.SCORE_AUTO_TUNE and win_rate >= 0.70 and consecutive_losses == 0 and total_trades >= 5:
-                    new_min_score = max(70, min(74, curr_min_score - 2))
-                    new_trig_score = max(76, min(80, curr_trig_score - 2))
-                    adjustment_reasons.append(f"High win rate ({win_rate*100:.1f}%): Normalized min consensus score to {new_min_score}.")
+                elif (settings.SCORE_AUTO_TUNE and win_rate >= 0.70 and expectancy_pct > 0
+                      and consecutive_losses == 0 and total_trades >= 5):
+                    # Loosen one point at a time and never below the code default: loosening adds real-money entries
+                    fields = type(settings).model_fields
+                    new_min_score = max(min(curr_min_score, fields["MIN_CONSENSUS_SCORE"].default), curr_min_score - 1)
+                    new_trig_score = max(min(curr_trig_score, fields["TRIGGER_MIN_SCORE"].default), curr_trig_score - 1)
+                    adjustment_reasons.append(
+                        f"High win rate ({win_rate*100:.1f}%) with positive expectancy ({expectancy_pct:+.2f}%/trade): "
+                        f"min consensus score {curr_min_score} -> {new_min_score}, trigger score {curr_trig_score} -> {new_trig_score}.")
 
                 # C. Stop Loss ATR Multiplier & Slippage Adjustment
                 recent_stop_outs = [t for t in losses[:5] if "stop" in (t.rationale or "").lower()]
                 if len(recent_stop_outs) >= 2:
                     new_atr_mult = round(min(2.50, max(curr_atr_mult, curr_atr_mult + 0.15)), 2)
                     adjustment_reasons.append(f"Multiple stop-outs detected: Widened ATR stop multiplier to {new_atr_mult}x for volatility buffer.")
-
-                # D. Profit Preservation / Breakeven Threshold
-                new_be_pct = 0.025
-                adjustment_reasons.append("Profit preservation priority: Calibrated trailing breakeven trigger to +2.5% gain.")
 
                 # E. Committee Weights Tuning (Emphasize Risk on Drawdowns)
                 if consecutive_losses >= 3:
@@ -495,6 +527,7 @@ Return valid JSON with exactly these keys:
                 "WEIGHT_RISK": str(calibrated_params["WEIGHT_RISK"]),
                 "LAST_CALIBRATION_TIMESTAMP": datetime.datetime.utcnow().isoformat(),
                 "LEARNER_WIN_RATE": f"{win_rate*100:.1f}",
+                "LEARNER_EXPECTANCY_PCT": f"{expectancy_pct:.2f}",
                 "LEARNER_TOTAL_TRADES": str(total_trades)
             }
 
@@ -525,6 +558,8 @@ Return valid JSON with exactly these keys:
                 "win_count": win_count,
                 "loss_count": loss_count,
                 "win_rate_pct": round(win_rate * 100, 1),
+                "expectancy_pct": round(expectancy_pct, 2),
+                "profit_factor": profit_factor,
                 "consecutive_losses": consecutive_losses,
                 "calibrated_parameters": calibrated_params,
                 "adjustments": adjustment_reasons
