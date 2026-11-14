@@ -28,8 +28,12 @@ async def _learner(_fresh_store, monkeypatch):
     return mock
 
 
+# Relative to now, so day 400 stays after a change made during the test and day 20 before it
+_POS_BASE = datetime.datetime.utcnow() - datetime.timedelta(days=300)
+
+
 def _pos(pnl_pct, i=0, key=KEY):
-    t = datetime.datetime(2026, 1, 1) + datetime.timedelta(days=i)
+    t = _POS_BASE + datetime.timedelta(days=i)
     return ShadowPosition(
         strategy=key, ticker=f"T{i}.AS", shares=1, entry_price_native=100.0, current_price_native=100.0,
         highest_price_native=100.0, initial_stop_native=95.0, entry_price_eur=100.0, current_price_eur=100.0,
@@ -451,3 +455,65 @@ async def test_learner_can_flip_an_inherited_regime_filter(_learner):
     res = await shadow_learner.learn(KEY)
     assert res["changes"] == {"regime_filter": {"old": None, "new": True}}
     assert _params()["regime_filter"] is True
+
+
+async def _add_pnls(pnls, start):
+    async with AsyncSessionLocal() as session:
+        session.add_all([_pos(pnl, start + i) for i, pnl in enumerate(pnls)])
+        await session.commit()
+
+
+async def _learner_raised_stop_scale(_learner):
+    """10 trades (expectancy +0.5%), then the learner moves stop_scale 1.0 -> 1.15."""
+    await _add_closed(10)
+    _learner.return_value = {"changes": {"stop_scale": 2.0}}
+    assert (await shadow_learner.learn(KEY))["changes"] == {"stop_scale": {"old": 1.0, "new": 1.15}}
+
+
+# _pos dates start 300 days ago + start days: 400 lands after the change was made, 20 before it
+@pytest.mark.parametrize("pnls, start, back_allowed", [
+    ([2.0, -1.0] * 5, 400, False),  # as good as before the change: no flip-flop back
+    ([-1.0] * 9, 400, False),       # worse, but fewer than SHADOW_LEARN_MIN_TRADES under the new value
+    ([-1.0] * 10, 20, False),       # worse, but opened before the change, so under the old value
+    ([-1.0] * 10, 400, True),       # worse under the new value: rollback allowed
+])
+async def test_learner_undoes_its_change_only_on_worse_evidence(_learner, pnls, start, back_allowed):
+    await _learner_raised_stop_scale(_learner)
+    await _add_pnls(pnls, start)
+    if len(pnls) < 10:  # reach the trade gate with trades opened before the change
+        await _add_pnls([-1.0] * (10 - len(pnls)), 30)
+    _learner.return_value = {"changes": {"stop_scale": 0.5, "pullback_scale": 1.5}}
+    res = await shadow_learner.learn(KEY)
+    assert res["success"] is True
+    assert _params()["stop_scale"] == (1.0 if back_allowed else 1.15)
+    assert _params()["pullback_scale"] != PRESETS["baseline"].to_params()["pullback_scale"]  # other params still move
+
+
+async def test_learner_may_keep_going_the_same_way(_learner):
+    await _learner_raised_stop_scale(_learner)
+    await _add_closed(10, start=400)
+    _learner.return_value = {"changes": {"stop_scale": 2.0}}
+    await shadow_learner.learn(KEY)
+    assert _params()["stop_scale"] == 1.3
+
+
+async def test_human_change_after_learner_is_not_locked(_learner):
+    from src.trading.shadow import apply_param_change
+    await _learner_raised_stop_scale(_learner)
+    await apply_param_change(KEY, {"stop_scale": 1.2}, source="user")
+    await _add_closed(10, start=400)
+    _learner.return_value = {"changes": {"stop_scale": 0.5}}
+    await shadow_learner.learn(KEY)
+    assert _params()["stop_scale"] == 1.05
+
+
+async def test_change_made_without_new_trades_is_not_locked(_learner):
+    # A manual learn can run with no trades since the last one: no baseline, so no lock
+    await _learner_raised_stop_scale(_learner)
+    _learner.return_value = {"changes": {"stop_scale": 2.0}}
+    await shadow_learner.learn(KEY, manual=True)  # 0 new trades: since_last_learn expectancy is None
+    assert _params()["stop_scale"] == 1.3
+    await _add_closed(10, start=400)
+    _learner.return_value = {"changes": {"stop_scale": 0.5}}
+    await shadow_learner.learn(KEY)
+    assert _params()["stop_scale"] == 1.15

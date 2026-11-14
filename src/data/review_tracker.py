@@ -39,6 +39,13 @@ def fmt_pct(value: Any, digits: int = 1) -> str:
     return f"{'+' if v > 0 else ''}{fmt_num(v, digits)}%"
 
 
+def fmt_digest_time(ts: Optional[datetime.datetime]) -> str:
+    """Digest timestamps are stored as naive UTC; show them in Amsterdam time with its CET/CEST label."""
+    if not ts:
+        return ""
+    return ts.replace(tzinfo=datetime.timezone.utc).astimezone(ZoneInfo("Europe/Amsterdam")).strftime("%Y-%m-%d %H:%M %Z")
+
+
 def fmt_date_nl(dt: datetime.datetime, with_time: bool = True) -> str:
     """Short Dutch date like 'ma 9 nov 09:00'."""
     out = f"{NL_DAYS[dt.weekday()]} {dt.day} {NL_MONTHS[dt.month - 1]}"
@@ -197,7 +204,7 @@ class ReviewTracker:
                     "top_picks": d.top_picks or [],
                     "portfolio_state": d.portfolio_state or {},
                     "review_text": d.review_text or "",
-                    "timestamp": d.timestamp.strftime("%Y-%m-%d %H:%M CET") if d.timestamp else ""
+                    "timestamp": fmt_digest_time(d.timestamp)
                 }
                 for d in digests
             ]

@@ -70,6 +70,7 @@ class SettingsUpdateRequest(BaseModel):
     position_size_pct: Optional[float] = None
     max_positions: Optional[int] = None
     enforce_market_hours: Optional[bool] = None
+    t212_resting_orders: Optional[bool] = None
     gemini_api_key: Optional[str] = None
     telegram_bot_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
@@ -522,6 +523,8 @@ async def get_settings():
             "take_profit_rr": float(configs.get("TAKE_PROFIT_RR", 2.1)),
             "breakeven_trigger_pct": float(configs.get("BREAKEVEN_TRIGGER_PCT", 0.025)),
             "enforce_market_hours": configs.get("ENFORCE_MARKET_HOURS", str(settings.ENFORCE_MARKET_HOURS)).lower() == "true",
+            "t212_resting_orders": settings.T212_RESTING_ORDERS,
+            "t212_resting_orders_available": settings.LIVE_BROKER.lower() == "trading212",
             "base_currency": settings.BASE_CURRENCY,
             "max_positions": int(configs.get("MAX_POSITIONS", settings.MAX_POSITIONS)),
             "llm_provider": settings.LLM_PROVIDER,
@@ -537,6 +540,7 @@ async def get_settings():
 async def update_settings(req: SettingsUpdateRequest):
     env_updates: Dict[str, Any] = {}
     was_live = get_active_broker() is live_broker
+    was_resting = settings.T212_RESTING_ORDERS
     async with AsyncSessionLocal() as session:
         if req.auto_buy_enabled is not None:
             res = await session.execute(select(SystemConfig).where(SystemConfig.key == "AUTO_BUY_ENABLED"))
@@ -651,6 +655,11 @@ async def update_settings(req: SettingsUpdateRequest):
             settings.ENFORCE_MARKET_HOURS = bool(req.enforce_market_hours)
             env_updates["ENFORCE_MARKET_HOURS"] = bool(req.enforce_market_hours)
 
+        if req.t212_resting_orders is not None:
+            # Kept in .env only: settings read it at startup and no SystemConfig row overrides it
+            settings.T212_RESTING_ORDERS = bool(req.t212_resting_orders)
+            env_updates["T212_RESTING_ORDERS"] = bool(req.t212_resting_orders)
+
         if req.trading_mode is not None:
             mode_val = req.trading_mode.strip().upper()
             if mode_val in ("PAPER", "LIVE"):
@@ -716,6 +725,9 @@ async def update_settings(req: SettingsUpdateRequest):
     if was_live and get_active_broker() is not live_broker:
         # Nothing syncs resting T212 entry orders once live is disarmed: cancel them now
         await live_broker.cancel_resting_entries("live trading disarmed")
+    elif was_resting and not settings.T212_RESTING_ORDERS:
+        # Same once the switch is off: an order left at T212 could fill with nothing to book it
+        await live_broker.cancel_resting_entries("resting orders switched off")
 
     return {"success": True, "message": "Settings updated and saved successfully."}
 
@@ -737,7 +749,7 @@ class MarketSessionRequest(BaseModel):
 @router.get("/api/market-digest/latest")
 async def get_latest_market_digest(market: Optional[str] = None):
     """Returns the most recent market opening/closing digest."""
-    from src.data.review_tracker import review_tracker
+    from src.data.review_tracker import review_tracker, fmt_digest_time
     next_info = review_tracker.get_next_session_info()
     async with AsyncSessionLocal() as session:
         query = select(MarketDigest).order_by(desc(MarketDigest.timestamp))
@@ -762,7 +774,7 @@ async def get_latest_market_digest(market: Optional[str] = None):
             "top_picks": digest.top_picks or [],
             "portfolio_state": digest.portfolio_state or {},
             "review_text": digest.review_text or "",
-            "timestamp": digest.timestamp.strftime("%Y-%m-%d %H:%M CET") if digest.timestamp else "",
+            "timestamp": fmt_digest_time(digest.timestamp),
             "next_session": next_info,
             "trigger_min_score": await get_trigger_min_score()
         }

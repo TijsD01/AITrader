@@ -194,7 +194,7 @@
           <section class="hero space-y-5" aria-label="Portfolio value">
             <div class="space-y-1.5">
               <div class="hero-label">Portfolio value</div>
-              <div id="metricTotalVal" class="hero-value truncate">&euro;0.00</div>
+              <div id="metricTotalVal" class="hero-value truncate">&mdash;</div>
               <div id="metricReturnBadge" class="flex items-center gap-2 text-sm font-semibold text-slate-400">Loading return...</div>
             </div>
             <figure class="hero-chart" aria-label="Portfolio value, last 30 days">
@@ -204,9 +204,9 @@
             <div class="space-y-2">
               <div id="allocationBar" class="alloc-bar" role="img" aria-label="Capital allocation"><span style="flex:1;background:var(--line-strong)"></span></div>
               <div class="flex justify-between gap-3 text-[13px] text-slate-400">
-                <span>Bot <strong id="metricEquity" class="ui-num text-slate-50 font-semibold">&euro;0.00</strong></span>
+                <span>Bot <strong id="metricEquity" class="ui-num text-slate-50 font-semibold">&mdash;</strong></span>
                 <span id="metricMineWrap" hidden>Yours <strong id="metricMine" class="ui-num text-slate-50 font-semibold">&euro;0.00</strong></span>
-                <span>Cash <strong id="metricTotalCash" class="ui-num text-slate-50 font-semibold">&euro;0.00</strong></span>
+                <span>Cash <strong id="metricTotalCash" class="ui-num text-slate-50 font-semibold">&mdash;</strong></span>
               </div>
               <div id="allocationLegend" class="alloc-legend"></div>
             </div>
@@ -216,18 +216,18 @@
           <section class="home-kpis grid grid-cols-3" aria-label="Key figures">
             <div class="kpi">
               <span class="ui-label">Deployable cash</span>
-              <span id="metricCash" class="kpi-value">&euro;0.00</span>
+              <span id="metricCash" class="kpi-value">&mdash;</span>
               <span id="metricCashSub" class="kpi-sub">Buffer capital</span>
             </div>
             <div class="kpi">
               <span class="ui-label">Open P&amp;L</span>
-              <span id="metricUnrealizedPnl" class="kpi-value">&euro;0.00</span>
-              <span class="kpi-sub"><span id="metricPosCount">0 open positions</span><span id="metricUnrealizedPnlSub" class="sr-only">Open paper positions</span></span>
+              <span id="metricUnrealizedPnl" class="kpi-value">&mdash;</span>
+              <span class="kpi-sub"><span id="metricPosCount">&nbsp;</span><span id="metricUnrealizedPnlSub" class="sr-only">Open paper positions</span></span>
             </div>
             <!-- Pending triggers (opens the Triggers tab) -->
             <button type="button" onclick="switchTab('triggers')" id="pendingTriggersSummary" class="trigger-link">
               <span class="ui-label"><i class="fa-solid fa-crosshairs" aria-hidden="true"></i> Triggers</span>
-              <span id="pendingTriggersSummaryText" class="trigger-text">0 pending triggers</span>
+              <span id="pendingTriggersSummaryText" class="trigger-text">Pending triggers</span>
               <span id="pendingTriggersSummarySub" class="kpi-sub max-md:sr-only">Limit orders waiting for their price</span>
             </button>
           </section>
@@ -458,7 +458,7 @@
       <div class="ui-card ui-card-pad space-y-2.5">
         <label for="analyzeInput" class="ui-label block">Ticker</label>
         <div class="flex flex-col sm:flex-row gap-2 sm:max-w-lg">
-          <input type="text" id="analyzeInput" inputmode="text" autocapitalize="characters" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="go" placeholder="NVDA or ASML.AS" class="ui-input ui-num uppercase tracking-wider flex-1">
+          <input type="text" id="analyzeInput" inputmode="text" autocapitalize="characters" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="go" placeholder="NVDA or ASML.AS" class="ui-input ui-num uppercase placeholder:normal-case tracking-wider flex-1">
           <button type="button" onclick="runOnDemandAnalysis()" id="analyzeBtn" class="ui-btn ui-btn-primary min-h-[48px]">
             <i class="fa-solid fa-users-viewfinder"></i> Convene debate
           </button>
@@ -546,7 +546,7 @@
       <details class="ui-list adv-details fold" data-fold="triggers-pending" open>
         <summary class="px-4 py-3">
           <span class="min-w-0">
-            <h3 class="ui-section-title">Pending <span id="pendingTriggersCount" class="ui-count ui-num">0</span></h3>
+            <h3 class="ui-section-title">Pending <span id="pendingTriggersCount" class="ui-count ui-num"></span></h3>
             <span id="pendingTriggersReserved" class="set-help ui-num empty:hidden"></span>
           </span>
           <i class="fa-solid fa-chevron-down text-[12px] ui-faint adv-chev" aria-hidden="true"></i>
@@ -617,21 +617,21 @@
             <div class="kpi">
               <span class="ui-label">Win rate</span>
               <span id="learningWinRate" class="kpi-value">--%</span>
-              <span id="learningTradeCounts" class="kpi-sub ui-num">0 trades</span>
+              <span id="learningTradeCounts" class="kpi-sub ui-num">&nbsp;</span>
             </div>
             <div class="kpi">
               <span class="ui-label">Min. score</span>
-              <span id="learningMinScore" class="kpi-value">70/100</span>
+              <span id="learningMinScore" class="kpi-value">--</span>
               <span class="kpi-sub">To open a position</span>
             </div>
             <div class="kpi">
               <span class="ui-label">Position size</span>
-              <span id="learningPositionSize" class="kpi-value">8.0%</span>
+              <span id="learningPositionSize" class="kpi-value">--</span>
               <span class="kpi-sub">Scaled by drawdown</span>
             </div>
             <div class="kpi">
               <span class="ui-label">Reward : risk</span>
-              <span id="learningRiskParams" class="kpi-value">1:2.1 (1.75x)</span>
+              <span id="learningRiskParams" class="kpi-value">--</span>
               <span class="kpi-sub">Take profit R:R (ATR stop)</span>
             </div>
           </div>
@@ -640,7 +640,7 @@
             <p class="ui-eyebrow px-1">Recent lessons</p>
             <div id="learningLessonsContainer" class="space-y-2.5">
               <div class="ui-card ui-card-pad text-[13px] ui-muted">
-                No post-mortems yet. Lessons appear here when positions are closed.
+                Loading lessons...
               </div>
             </div>
           </div>
@@ -858,6 +858,17 @@
             </div>
             <span class="check-wrap set-toggle">
               <input type="checkbox" id="settingMarketHours" onchange="saveSettings()">
+              <span class="ui-switch" aria-hidden="true"></span>
+            </span>
+          </div>
+
+          <div class="set-row">
+            <div class="min-w-0">
+              <label for="settingRestingOrders" class="set-label">Resting orders at Trading 212</label>
+              <span class="set-help">Each armed trigger rests as a day limit order at Trading 212, from 20 minutes after the open. Off: the bot watches the price and buys when it hits. Switching off cancels the resting orders.</span>
+            </div>
+            <span class="check-wrap set-toggle">
+              <input type="checkbox" id="settingRestingOrders" onchange="saveSettings()">
               <span class="ui-switch" aria-hidden="true"></span>
             </span>
           </div>

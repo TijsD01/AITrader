@@ -30,6 +30,36 @@ function safeRichText(value) {
   return esc(value).replace(/&lt;(\/?)(b|strong|i|em|u|s|code|pre)&gt;/gi, '<$1$2>');
 }
 
+// Escapes, then shows the committee's **bold** markdown as bold instead of raw asterisks
+function mdBold(value) {
+  return esc(value).replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+}
+
+// GET + JSON that throws on an HTTP error, so a failed load never renders as zeros or "nothing yet"
+async function getJson(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
+  return res.json();
+}
+
+// Fills a list that never loaded with a failure note; a list that loaded before keeps its last data
+function showLoadFailed(el, what, colspan = 0) {
+  if (!el || el.dataset.loaded) return;
+  const msg = `Could not load ${esc(what)}. Tap refresh to try again.`;
+  el.innerHTML = colspan
+    ? `<tr><td colspan="${colspan}" class="text-center py-8 ui-muted">${msg}</td></tr>`
+    : `<p class="col-span-full py-6 text-center text-[13px] ui-muted">${msg}</p>`;
+}
+
+// Server times are naive UTC ("2026-11-13 01:00" or ISO); show them in the viewer's time zone, same shape
+function localTime(value) {
+  const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/.exec(String(value || ''));
+  if (!m) return value || '';
+  const d = new Date(`${m[1]}T${m[2]}:00Z`);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 // Number formatting that tolerates null/undefined/strings from the API
 function num(value, digits = 2) {
   const n = Number(value);
@@ -775,13 +805,11 @@ async function loadPortfolio() {
   const holdingsReq = fetch('/api/holdings').then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
   holdingsReq.catch(() => {});
   try {
-    const [summaryRes, posRes] = await Promise.all([
-      fetch('/api/portfolio'),
-      fetch('/api/positions')
+    const [summary, positions] = await Promise.all([
+      getJson('/api/portfolio'),
+      getJson('/api/positions')
     ]);
-
-    const summary = await summaryRes.json();
-    const positions = await posRes.json();
+    document.getElementById('positionsContainer').dataset.loaded = '1';
 
     // Update KPI cards
     const pnlVal = positions.reduce((s, p) => s + (p.unrealized_pnl_eur || 0), 0);
@@ -966,14 +994,18 @@ async function loadPortfolio() {
     staggerChildren(container);
   } catch (e) {
     console.error('Failed to load portfolio:', e);
+    // Say so instead of leaving the placeholders (or the last values) looking current
+    const returnElem = document.getElementById('metricReturnBadge');
+    if (returnElem) returnElem.textContent = 'Could not load the portfolio. Retrying every 30 seconds.';
+    showLoadFailed(document.getElementById('positionsContainer'), 'positions');
   }
 }
 
 // 3. Load Recommendations (Daily Stock Advice)
 async function loadRecommendations() {
   try {
-    const res = await fetch('/api/recommendations');
-    const reports = await res.json();
+    const reports = await getJson('/api/recommendations');
+    document.getElementById('adviceContainer').dataset.loaded = '1';
     adviceReportsCache = Array.isArray(reports) ? reports : [];
     // Highest conviction first; cards read reports back by index, so sort the cache itself.
     adviceReportsCache.sort((a, b) => (Number(b.consensus_score) || 0) - (Number(a.consensus_score) || 0));
@@ -991,7 +1023,7 @@ async function loadRecommendations() {
 
     container.innerHTML = adviceReportsCache.map((r, idx) => {
       const source = scoreSourceBadge(r.score_source || (r.raw_signals && r.raw_signals.score_source));
-      const sub = r.name || r.created_at || '';
+      const sub = r.name || localTime(r.created_at);
 
       return `
         <article class="stock-card ui-card ui-card-pad flex flex-col gap-3">
@@ -1006,7 +1038,7 @@ async function loadRecommendations() {
             ${adviceScoreBlock(r.consensus_score, 'Conviction', source)}
           </div>
 
-          ${r.summary ? `<p class="adv-prose adv-clamp">${esc(r.summary)}</p>` : ''}
+          ${r.summary ? `<p class="adv-prose adv-clamp">${mdBold(r.summary)}</p>` : ''}
 
           <div class="ui-inset px-3.5 py-2.5 space-y-1.5">
             <div class="kv"><span>Target</span><span class="${r.target_price ? 'ui-gain' : ''}">${r.target_price ? `▲ ${esc(r.target_price)}` : '—'}</span></div>
@@ -1031,6 +1063,7 @@ async function loadRecommendations() {
     staggerChildren(container);
   } catch (e) {
     console.error('Failed to load recommendations:', e);
+    showLoadFailed(document.getElementById('adviceContainer'), 'advice');
   }
 }
 
@@ -1218,7 +1251,7 @@ function renderDebateReport(report) {
       ${adviceScoreBlock(report.consensus_score, 'Consensus', scoreSourceBadge(report.score_source))}
     </div>
 
-    ${report.summary ? `<p class="adv-prose">${esc(report.summary)}</p>` : ''}
+    ${report.summary ? `<p class="adv-prose">${mdBold(report.summary)}</p>` : ''}
 
     <div class="ui-inset px-3.5 py-2.5 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1.5">
       <div class="kv"><span>Price</span><span>${advicePrice(report.price, report.currency)}</span></div>
@@ -1314,7 +1347,7 @@ async function loadCashFlows() {
         <div class="ui-card ui-card-pad flex items-center justify-between gap-3">
           <div class="min-w-0">
             <div class="ui-num font-semibold ${isIn ? 'ui-gain' : 'ui-loss'}">${isIn ? 'Deposit' : 'Withdrawal'} ${esc(signedEur(f.amount_eur))}</div>
-            <div class="text-xs ui-faint ui-num">${esc(f.timestamp)} · ${f.source === 'manual' ? 'added by you' : f.source === 'broker' ? 'from broker' : 'detected'}</div>
+            <div class="text-xs ui-faint ui-num">${esc(localTime(f.timestamp))} · ${f.source === 'manual' ? 'added by you' : f.source === 'broker' ? 'from broker' : 'detected'}</div>
           </div>
           <button type="button" onclick="removeCashFlow(${Number(f.id)})" class="ui-btn ui-btn-quiet ui-icon-btn shrink-0" aria-label="Remove" title="Remove"><i class="fa-solid fa-trash-can"></i></button>
         </div>`;
@@ -1359,9 +1392,9 @@ async function removeCashFlow(id) {
 
 async function loadTrades() {
   try {
-    const res = await fetch('/api/trades');
-    const trades = await res.json();
+    const trades = await getJson('/api/trades');
     const tbody = document.getElementById('tradeHistoryTableBody');
+    tbody.dataset.loaded = '1';
     const countEl = document.getElementById('tradeHistoryCount');
     if (countEl) countEl.textContent = trades.length ? String(trades.length) : '';
 
@@ -1380,12 +1413,12 @@ async function loadTrades() {
       if (t.realized_pnl_eur !== null && t.realized_pnl_eur !== undefined) {
         const pnl = Number(t.realized_pnl_eur) || 0;
         const up = pnl >= 0;
-        pnlText = `<span class="ui-num font-semibold ${up ? 'ui-gain' : 'ui-loss'}">${up ? '▲ +' : '▼ -'}${esc(eur(Math.abs(pnl)))} (${esc(t.realized_pnl_pct)}%)</span>`;
+        pnlText = `<span class="ui-num font-semibold ${up ? 'ui-gain' : 'ui-loss'}">${up ? '▲ +' : '▼ -'}${esc(eur(Math.abs(pnl)))} (${esc(signedPct(t.realized_pnl_pct))})</span>`;
       }
 
       return `
         <tr>
-          <td data-label="Date" class="py-3 px-4 ui-num ui-faint whitespace-nowrap">${esc(t.executed_at)}</td>
+          <td data-label="Date" class="py-3 px-4 ui-num ui-faint whitespace-nowrap">${esc(localTime(t.executed_at))}</td>
           <td data-label="Type" class="py-3 px-4">${typeBadge}</td>
           <td data-label="Asset" class="py-3 px-4 font-bold" style="color:var(--text)">${tickerLink(t.ticker)}</td>
           <td data-label="Shares" class="py-3 px-4 ui-num">${esc(t.shares)}</td>
@@ -1400,6 +1433,7 @@ async function loadTrades() {
 
   } catch (e) {
     console.error('Failed to load trades:', e);
+    showLoadFailed(document.getElementById('tradeHistoryTableBody'), 'trades', 9);
   }
 }
 
@@ -1747,6 +1781,10 @@ async function loadSettings() {
 
     if (document.getElementById('settingMarketHours')) {
       document.getElementById('settingMarketHours').checked = data.enforce_market_hours !== false;
+      const resting = document.getElementById('settingRestingOrders');
+      resting.checked = data.t212_resting_orders === true;
+      resting.disabled = !data.t212_resting_orders_available;  // Trading 212 only
+      resting.dataset.loaded = String(resting.checked);
     }
 
     await loadMarketStatus();
@@ -1838,6 +1876,12 @@ async function saveSettings() {
       position_size_pct: posSizePct,
       enforce_market_hours: enforceHours
     };
+    // Sent only when flipped: a stale "off" would cancel the orders resting at Trading 212
+    const resting = document.getElementById('settingRestingOrders');
+    if (resting.dataset.loaded !== undefined && String(resting.checked) !== resting.dataset.loaded) {
+      payload.t212_resting_orders = resting.checked;
+      resting.dataset.loaded = String(resting.checked);
+    }
     // Send a score only if the user moved its slider: otherwise a stale value would undo a learner change
     if (minScoreEl.value !== minScoreEl.dataset.loaded && !isNaN(minScore)) {
       payload.min_consensus_score = minScore;
@@ -2089,8 +2133,8 @@ function triggerStatusBadge(status) {
 
 async function loadTriggers() {
   try {
-    const res = await fetch('/api/triggers');
-    const triggers = await res.json();
+    const triggers = await getJson('/api/triggers');
+    ['pendingTriggersContainer', 'triggerHistoryTableBody'].forEach(id => { const el = document.getElementById(id); if (el) el.dataset.loaded = '1'; });
 
     const pending = triggers.filter(t => t.status === 'PENDING');
     const history = triggers.filter(t => t.status !== 'PENDING');
@@ -2182,7 +2226,7 @@ async function loadTriggers() {
                   ${allocEur > 0
                     ? `<div class="ui-num font-semibold" style="color:var(--text)">${esc(eur(allocEur))}</div>${plannedLine}`
                     : `<span class="ui-badge ui-badge-warn" title="Higher-scored triggers hold the available cash or position slots. This trigger is funded automatically when cash or a slot frees up."><i class="fa-solid fa-hourglass-half"></i> Unfunded</span>`}
-                  <div class="ui-faint text-xs truncate">Armed <span class="ui-num">${esc(t.created_at)}</span></div>
+                  <div class="ui-faint text-xs truncate">Armed <span class="ui-num">${esc(localTime(t.created_at))}</span></div>
                 </div>
                 <button type="button" data-action="cancel-trigger" data-id="${esc(t.id)}" data-ticker="${esc(t.ticker)}" class="ui-btn ui-btn-sm ui-btn-danger shrink-0" style="min-height:44px" aria-label="Cancel trigger for ${esc(t.ticker)}">
                   Cancel
@@ -2208,7 +2252,7 @@ async function loadTriggers() {
               <td data-label="Type" class="py-3 px-4">${esc(triggerTypeLabel(t.trigger_type))}</td>
               <td data-label="Target" class="py-3 px-4 ui-num" style="color:var(--text)"><span>${esc(num(t.target_price))} <span class="ui-faint text-xs">${esc(t.currency)}</span></span></td>
               <td data-label="Status" class="py-3 px-4">${triggerStatusBadge(t.status)}</td>
-              <td data-label="When" class="py-3 px-4 ui-num ui-faint whitespace-nowrap">${esc(t.triggered_at || t.created_at)}</td>
+              <td data-label="When" class="py-3 px-4 ui-num ui-faint whitespace-nowrap">${esc(localTime(t.triggered_at || t.created_at))}</td>
               <td data-label="Rationale" class="cell-wide py-3 px-4 max-w-xs truncate" title="${esc(t.ai_rationale)}">${esc(t.ai_rationale)}</td>
             </tr>
           `).join('');
@@ -2217,6 +2261,10 @@ async function loadTriggers() {
 
   } catch (e) {
     console.error('Failed to load triggers:', e);
+    const badge = document.getElementById('pendingTriggersCount');
+    if (badge && !document.getElementById('pendingTriggersContainer').dataset.loaded) badge.textContent = ''; // not "0"
+    showLoadFailed(document.getElementById('pendingTriggersContainer'), 'triggers');
+    showLoadFailed(document.getElementById('triggerHistoryTableBody'), 'trigger history', 6);
   }
 }
 
@@ -2252,7 +2300,7 @@ function showTriggerFeedback(info) {
     <div class="ui-notice ui-notice-${tone}">
       <div class="flex flex-wrap items-center gap-2">${badges.join('')}</div>
       <p class="mt-1.5" style="color:var(--text)">${esc(info.message)}</p>
-      ${summary ? `<p class="mt-1.5 text-xs ui-faint">Committee: ${esc(summary)}</p>` : ''}
+      ${summary ? `<p class="mt-1.5 text-xs ui-faint">Committee: ${mdBold(summary)}</p>` : ''}
     </div>`;
 }
 
@@ -2432,8 +2480,8 @@ async function cancelTrigger(triggerId, ticker = '') {
 // 12. AI Trader Learning & Self-Reflection Handling
 async function loadLearningInsights() {
   try {
-    const res = await fetch('/api/learning/insights');
-    const data = await res.json();
+    const data = await getJson('/api/learning/insights');
+    document.getElementById('learningLessonsContainer').dataset.loaded = '1';
 
     const winRateEl = document.getElementById('learningWinRate');
     const countsEl = document.getElementById('learningTradeCounts');
@@ -2443,8 +2491,10 @@ async function loadLearningInsights() {
     const container = document.getElementById('learningLessonsContainer');
 
     if (winRateEl) {
-      winRateEl.innerText = `${data.win_rate_pct}%`;
-      winRateEl.className = data.win_rate_pct >= 50 ? 'kpi-value ui-gain' : 'kpi-value ui-loss';
+      // No closed trades: no win rate yet, not a red 0%
+      const none = !data.total_closed_trades;
+      winRateEl.innerText = none ? '--%' : `${data.win_rate_pct}%`;
+      winRateEl.className = none ? 'kpi-value' : (data.win_rate_pct >= 50 ? 'kpi-value ui-gain' : 'kpi-value ui-loss');
     }
     if (countsEl) countsEl.innerText = `${data.total_closed_trades} trades · ${data.wins}W / ${data.losses}L`;
 
@@ -2477,7 +2527,7 @@ async function loadLearningInsights() {
                     <span class="text-base font-bold" style="color:var(--text)">${tickerLink(l.ticker)}</span>
                     <span class="ui-badge ${badgeCls}">${arrow} ${esc(l.outcome)}</span>
                   </div>
-                  <div class="text-xs ui-faint ui-num mt-0.5">${esc(l.created_at)}</div>
+                  <div class="text-xs ui-faint ui-num mt-0.5">${esc(localTime(l.created_at))}</div>
                 </div>
                 <div class="text-right shrink-0">
                   <div class="ui-num font-semibold ${pnlCls}">${pnlSign}${esc(eur(Math.abs(pnl)))}</div>
@@ -2496,6 +2546,9 @@ async function loadLearningInsights() {
     }
   } catch (e) {
     console.debug('Error loading learning insights:', e);
+    const countsEl = document.getElementById('learningTradeCounts');
+    if (countsEl) countsEl.innerText = 'Could not load';
+    showLoadFailed(document.getElementById('learningLessonsContainer'), 'lessons');
   }
 }
 
@@ -3081,7 +3134,7 @@ function renderShadowStrategy(s, mainLabel) {
       <div class="min-w-0">
         <span class="font-semibold" style="color:var(--text)">${tickerLink(c.ticker, `shadow_position:${c.id}`)}</span>
         ${c.followed_main ? '' : '<span class="ui-badge ui-badge-accent ml-1">Shadow only</span>'}
-        <div class="ui-faint text-xs">${esc(c.closed_at)} · ${esc(c.exit_reason || '')}</div>
+        <div class="ui-faint text-xs">${esc(localTime(c.closed_at))} · ${esc(c.exit_reason || '')}</div>
       </div>
       <div class="text-right shrink-0 ui-num ${gainCls(c.realized_pnl_eur)}">${esc(signedEur(c.realized_pnl_eur))}<div class="text-xs">${esc(signedPct(c.realized_pnl_pct, 1))}</div></div>
     </div>`).join('');
@@ -3097,7 +3150,7 @@ function renderShadowStrategy(s, mainLabel) {
         <div class="min-w-0">
           <h3 class="ui-section-title">${esc(s.label)}<span class="ui-badge ui-badge-accent ${s.learning_strength > 0 ? '' : 'hidden'}" data-sh-badge>Learning</span></h3>
           <p class="text-[13px] ui-muted mt-1">${esc(s.description)}</p>
-          <p class="text-xs ui-faint mt-1 ui-num">Since ${esc(s.started_at || '--')} · start ${esc(eur(s.initial_capital_eur))}</p>
+          <p class="text-xs ui-faint mt-1 ui-num">Since ${esc(localTime(s.started_at) || '--')} · start ${esc(eur(s.initial_capital_eur))}</p>
           ${shadowFrozenNote(s.params || {})}
         </div>
       </div>
@@ -3112,7 +3165,7 @@ function renderShadowStrategy(s, mainLabel) {
       <div class="flex flex-wrap gap-1.5">${shadowParamChips(s.params || {})}</div>
       ${shadowStrengthControl(s)}
       <details class="sh-hist" data-key="${esc(s.key)}">
-        <summary>Change history</summary>
+        <summary>Change history <i class="fa-solid fa-chevron-down text-[12px] ui-faint adv-chev" aria-hidden="true"></i></summary>
         <div class="sh-hist-list divide-y divide-borderCol"></div>
       </details>
 
@@ -3129,7 +3182,7 @@ function renderShadowStrategy(s, mainLabel) {
 
       <div class="grid grid-cols-2 lg:grid-cols-4 gap-2.5">
         <div class="ui-card kpi"><span class="ui-label">Value</span><span class="kpi-value">${esc(eur(s.total_value_eur))}</span><span class="kpi-sub ui-num">Cash ${esc(eur(s.cash_eur))}</span></div>
-        <div class="ui-card kpi"><span class="ui-label">Open P&amp;L</span><span class="kpi-value ${gainCls(s.unrealized_pnl_eur)}">${esc(signedEur(s.unrealized_pnl_eur))}</span><span class="kpi-sub">${esc((s.open_positions || []).length)} positions</span></div>
+        <div class="ui-card kpi"><span class="ui-label">Open P&amp;L</span><span class="kpi-value ${gainCls(s.unrealized_pnl_eur)}">${esc(signedEur(s.unrealized_pnl_eur))}</span><span class="kpi-sub">${esc((s.open_positions || []).length)} position${(s.open_positions || []).length === 1 ? '' : 's'}</span></div>
         <div class="ui-card kpi"><span class="ui-label">Fees</span><span class="kpi-value">${esc(eur(s.fees_eur))}</span><span class="kpi-sub">Simulated commissions</span></div>
         <div class="ui-card kpi"><span class="ui-label">Shadow-only trades</span><span class="kpi-value">${esc(s.shadow_only_trades)}</span><span class="kpi-sub">The main bot skipped these</span></div>
       </div>
@@ -3821,7 +3874,7 @@ function tsLineDash(key, set) {
   return solid ? [] : [6, 4];
 }
 
-// Inline Chart.js plugin: horizontal level lines with a right-edge label
+// Inline Chart.js plugin: horizontal level lines with a left-edge label
 const tsLevelPlugin = {
   id: 'tsLevels',
   beforeDatasetsDraw(chart, args, opts) { // lines under the price line, so trade markers stay visible
@@ -3853,7 +3906,7 @@ const tsLevelPlugin = {
     const bg = cssVar('--surface');
     labels.forEach(l => {
       const w = ctx.measureText(l.text).width + 10;
-      const x = a.right - w;
+      const x = a.left;
       ctx.fillStyle = bg;
       ctx.fillRect(x, l.py - 8, w, 16);
       ctx.fillStyle = l.color;
@@ -4080,8 +4133,8 @@ function renderTickerInfo(set) {
   if (hasNum(info.score)) rows.push(row('Score', esc(info.score)));
   if (hasNum(info.pnl_pct)) rows.push(row('P&amp;L', `<span class="${gainCls(info.pnl_pct)}">${signedPct(info.pnl_pct)}</span>`));
   if (info.exit_reason) rows.push(row('Exit reason', esc(info.exit_reason)));
-  if (info.created_at) rows.push(row('Created', esc(String(info.created_at).replace('T', ' ').slice(0, 16))));
-  if (info.closed_at) rows.push(row('Closed', esc(String(info.closed_at).replace('T', ' ').slice(0, 16))));
+  if (info.created_at) rows.push(row('Created', esc(localTime(info.created_at))));
+  if (info.closed_at) rows.push(row('Closed', esc(localTime(info.closed_at))));
   el.innerHTML = `
     <div class="flex flex-wrap items-center gap-2 mb-2">
       <h3 class="ts-info-title">${esc(set.label)}</h3>

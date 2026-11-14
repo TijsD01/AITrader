@@ -7,7 +7,7 @@ from sqlalchemy import delete, select
 
 from config.settings import settings
 from src.db import session as db_session
-from src.db.models import CashFlow, PortfolioSnapshot, Position, UserHolding
+from src.db.models import CashFlow, OrderTrigger, PortfolioSnapshot, Position, UserHolding
 from src.trading.live import LiveBroker
 from tests.test_trading212_broker import _cleanup, _held, _live, _with_stop, clean_snapshots, fake  # noqa: F401
 
@@ -166,3 +166,85 @@ async def test_sell_snapshot_holds_mine_and_daily_loss_stays_flat(fake, monkeypa
         assert await LiveBroker().get_daily_loss_eur() == 0.0
     finally:
         await _cleanup("ASML.AS")
+
+
+async def _cash_sync_after_own_buy(fake, monkeypatch, cash, total, invested, held):
+    """Yesterday €1,500 cash, nothing held. Today the 3-minute cash sync sees T212 after a buy in its own app."""
+    _live(monkeypatch)
+    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    async with db_session.AsyncSessionLocal() as s:
+        s.add(PortfolioSnapshot(cash_eur=1500.0, equity_eur=0.0, total_value_eur=1500.0, is_live=True,
+                                broker="trading212", timestamp=now - datetime.timedelta(days=1)))
+        await s.commit()
+
+    async def summary():
+        return {"currency": "EUR", "totalValue": total,
+                "cash": {"availableToTrade": cash, "reservedForOrders": 0.0}, "investments": {"currentValue": invested}}
+    monkeypatch.setattr(fake, "account_summary", summary)
+    monkeypatch.setattr("src.db.session.set_kill_switch", AsyncMock())
+    fake.positions_answers = [held]
+    broker = LiveBroker()
+    with patch("src.telegram.bot.telegram_bot.send_message", AsyncMock()):
+        await broker.sync_cash_balance()
+        return await broker.enforce_daily_loss_limit()
+
+
+async def test_own_buy_in_t212_app_does_not_trip_kill_switch(fake, monkeypatch, clean_money):
+    # €1,000 of SAP bought by hand: cash fell, the account did not
+    sap = dict(_held("SAPd_EQ", 10.0, avg=100.0), currentPrice=100.0)
+    try:
+        assert await _cash_sync_after_own_buy(fake, monkeypatch, 500.0, 1500.0, 1000.0, [sap]) is None
+        async with db_session.AsyncSessionLocal() as s:
+            rows = (await s.execute(select(UserHolding).where(UserHolding.ticker == "SAP.DE"))).scalars().all()
+        assert [(r.shares, r.current_price_eur) for r in rows] == [(10.0, 100.0)]
+    finally:
+        async with db_session.AsyncSessionLocal() as s:
+            await s.execute(delete(UserHolding).where(UserHolding.ticker == "SAP.DE"))
+            await s.commit()
+
+
+async def test_real_cash_loss_still_trips_kill_switch_on_cash_sync(fake, monkeypatch, clean_money):
+    # Nothing held, €600 gone: a real loss
+    assert await _cash_sync_after_own_buy(fake, monkeypatch, 900.0, 900.0, 0.0, []) is not None
+
+
+async def _live_snapshot_count():
+    async with db_session.AsyncSessionLocal() as s:
+        return len((await s.execute(select(PortfolioSnapshot).where(PortfolioSnapshot.is_live == True))).scalars().all())
+
+
+async def test_resting_entry_fill_writes_no_cash_only_snapshot(fake, monkeypatch, clean_money):
+    # The bot's own resting buy filled: sync_resting_entries books it, so the cash sync must not record the cash drop alone
+    monkeypatch.setattr(settings, "T212_RESTING_ORDERS", True)
+    async with db_session.AsyncSessionLocal() as s:
+        s.add(OrderTrigger(ticker="SAP.DE", target_price=100.0, current_price_at_creation=101.0, stop_loss=95.0,
+                           take_profit=110.0, allocation_eur=1000.0, currency="EUR", trigger_type="PULLBACK_BUY",
+                           status="PENDING", is_live=True, broker_order_id="t212_1"))
+        await s.commit()
+    sap = dict(_held("SAPd_EQ", 10.0, avg=100.0), currentPrice=100.0)
+    try:
+        assert await _cash_sync_after_own_buy(fake, monkeypatch, 500.0, 1500.0, 1000.0, [sap]) is None
+        assert await _live_snapshot_count() == 1  # only yesterday's
+    finally:
+        async with db_session.AsyncSessionLocal() as s:
+            await s.execute(delete(OrderTrigger).where(OrderTrigger.ticker == "SAP.DE"))
+            await s.commit()
+
+
+async def test_unbookable_holding_gets_one_full_sync_then_cash_syncs(fake, monkeypatch, clean_money):
+    _live(monkeypatch)
+    fake.positions_answers = [[_held("SAPd_EQ", 10.0, avg=100.0)]]
+    broker = LiveBroker()
+    full_sync = AsyncMock()  # books nothing, like a holding the reconcile skips by design
+    monkeypatch.setattr(broker, "_sync_t212_account", full_sync)
+    await broker.sync_cash_balance()
+    await broker.sync_cash_balance()
+    assert full_sync.await_count == 1
+    assert await _live_snapshot_count() == 1  # the second run took the cash-only path
+
+
+async def test_cash_sync_survives_failing_positions_call(fake, monkeypatch, clean_money):
+    _live(monkeypatch)
+    monkeypatch.setattr(fake, "positions", AsyncMock(side_effect=RuntimeError("429")))
+    await LiveBroker().sync_cash_balance()
+    assert await _live_snapshot_count() == 1
