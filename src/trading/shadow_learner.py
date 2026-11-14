@@ -14,11 +14,11 @@ from sqlalchemy import select
 from config.settings import settings
 from src.agents.base import LLMClient
 from src.db import session as db_session
-from src.db.models import ShadowAccount, ShadowPosition, ShadowStrategyRow
+from src.db.models import ShadowAccount, ShadowParamChange, ShadowPosition, ShadowStrategyRow
 from src.memory.models import L1Atom
 from src.memory.store import memory_store
 from src.trading.shadow import ShadowPortfolios, apply_param_change, get_strategies, learning_strengths
-from src.trading.strategy_params import SPECS, clamp_step
+from src.trading.strategy_params import SPECS, _is_num, clamp_step
 
 logger = logging.getLogger(__name__)
 
@@ -101,11 +101,48 @@ async def _inherited(strategy) -> dict:
     return {k: eff[k] for k in INHERITED if getattr(strategy, k) is None}
 
 
-def _guard(reply: dict, params: dict, strength: int, inherited: dict = None) -> dict:
+async def _locked_reversals(key: str, closed: List[ShadowPosition]) -> dict:
+    """{param: value before the learner's last change} for params the learner may not move back yet.
+
+    Hysteresis against flip-flopping on noise: a learner change is only undone once at least
+    SHADOW_LEARN_MIN_TRADES trades opened after it have closed with a lower expectancy than the trades
+    that motivated it. Positions opened before the change ran under the old value, so they do not count.
+    A change a human made last is the human's call and is never locked."""
+    async with db_session.AsyncSessionLocal() as session:
+        history = (await session.execute(
+            select(ShadowParamChange).where(ShadowParamChange.strategy == key)
+            .order_by(ShadowParamChange.created_at.desc(), ShadowParamChange.id.desc())
+        )).scalars().all()
+    seen, locked = set(), {}
+    for change in history:
+        for name, diff in (change.changes or {}).items():
+            if name in seen or not isinstance(diff, dict):
+                continue
+            seen.add(name)
+            if change.source != "learner" or not change.created_at:
+                continue
+            after = [p.realized_pnl_pct or 0.0 for p in closed if p.opened_at and p.opened_at >= change.created_at]
+            before = ((change.stats or {}).get("since_last_learn") or {}).get("expectancy_pct")
+            worse = (len(after) >= settings.SHADOW_LEARN_MIN_TRADES and before is not None
+                     and sum(after) / len(after) < before)
+            if not worse:
+                locked[name] = diff.get("old")
+    return locked
+
+
+def _is_reversal(old, new, before) -> bool:
+    """True when old -> new moves back toward before (the value ahead of the learner's last change)."""
+    if not (_is_num(old) and _is_num(new) and _is_num(before)):
+        return new == before
+    return (new - old) * (before - old) > 0
+
+
+def _guard(reply: dict, params: dict, strength: int, inherited: dict = None, locked: dict = None) -> dict:
     """Clamped proposals that differ from the current value. Takes the first MAX_CHANGES entries before filtering,
     so junk entries cannot make room for a 4th real change. inherited: working values clamped from where a
-    param is None."""
+    param is None. locked: from _locked_reversals; a move back toward the locked value is dropped."""
     inherited = inherited or {}
+    locked = locked or {}
     kept = {}
     for name, value in list(reply["changes"].items())[:MAX_CHANGES]:
         if name not in SPECS or not SPECS[name].learnable:
@@ -114,6 +151,9 @@ def _guard(reply: dict, params: dict, strength: int, inherited: dict = None) -> 
         if old is None:
             old = inherited.get(name)
         new = clamp_step(name, old, value, strength)
+        if name in locked and _is_reversal(old, new, locked[name]):
+            logger.info(f"Shadow learner: {name} {old} -> {new} undoes its last change without evidence; kept {old}")
+            continue
         if new != old:
             kept[name] = new
     return kept
@@ -171,7 +211,8 @@ class ShadowLearner:
         strength = learning_strengths().get(key, 0)
         if strategy is None or strength <= 0:
             return _result(False, True, "Strategy was deleted, disabled or set to strength 0 during the LLM call")
-        kept = _guard(reply, strategy.to_params(), strength, await _inherited(strategy))
+        kept = _guard(reply, strategy.to_params(), strength, await _inherited(strategy),
+                      await _locked_reversals(key, closed))
         reason = reply.get("reason")
         reason = reason[:500] if isinstance(reason, str) else ""
         changes = {}
