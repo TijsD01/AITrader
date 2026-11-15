@@ -3,6 +3,7 @@ import logging
 import datetime
 from typing import Dict, Any, Optional
 from sqlalchemy import select, desc, func
+from config.settings import settings
 
 from src.memory.models import ColdStartLoadout
 from src.memory.store import memory_store
@@ -39,6 +40,8 @@ class ColdStartEngine:
         # A single-word query is a ticker: show its main outcomes; otherwise the most recent overall
         q_word = (query or "").strip()
         outcome_ticker = q_word.upper() if q_word and " " not in q_word else None
+        # Only the active mode's outcomes: paper results are not the live bot's record, and the reverse
+        live = settings.TRADING_MODE.upper() == "LIVE" and settings.LIVE_TRADING_ENABLED
         portfolio_state, l3, scenarios, l1_atoms, skills, wiki_pages, main_outcomes = await asyncio.gather(
             ColdStartEngine._fetch_portfolio_status(),
             memory_store.get_core_profile(team_id=team_id, agent_id=agent_id),
@@ -46,7 +49,7 @@ class ColdStartEngine:
             memory_store.search_l1_atoms(query=query or None, team_id=team_id, limit=6, exclude_outcomes=True),
             memory_store.search_skills(query=query or None, team_id=team_id, top_k=3),
             memory_store.list_wiki_pages(team_id=team_id),
-            memory_store.search_outcomes(source="main", ticker=outcome_ticker, limit=5),
+            memory_store.search_outcomes(source="main_live" if live else "main_paper", ticker=outcome_ticker, limit=5),
         )
 
         # Fall back to core skills when query is a ticker symbol that matches no skill name
