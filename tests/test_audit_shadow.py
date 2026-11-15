@@ -147,3 +147,16 @@ def test_trailing_presets_do_not_lock_breakeven_before_their_trail():
     # 5% initial stop: the +1% lock waits for +7.5%, where the 6% trail is already above entry
     trigger = effective_breakeven_pct(aggressive, 0.025, 100.0, 95.0)
     assert trigger == pytest.approx(0.075) and (1 + trigger) * (1 - aggressive.trailing_stop_pct) > 1.0
+
+
+async def test_deleting_a_strategy_deletes_its_outcome_atoms():
+    # A new strategy that reuses the key must not learn from the deleted one's trades
+    from src.memory.outcomes import record_outcome
+    from src.memory.store import memory_store
+    from src.trading.shadow import create_strategy, delete_strategy, get_strategies
+    key = next((s.key for s in get_strategies() if s.label == "Audit delete"), None) or await create_strategy("Audit delete", {})
+    await record_outcome(source="shadow", strategy=key, ref_id="x1", ticker="A", pnl_pct=1.0, r_multiple=None,
+                         hold_days=1.0, exit_reason="x", score=None, entry_type="MARKET", params={})
+    assert len(await memory_store.search_outcomes(strategy=key)) == 1
+    assert await delete_strategy(key) is True
+    assert await memory_store.search_outcomes(strategy=key) == []

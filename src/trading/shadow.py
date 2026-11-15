@@ -33,7 +33,7 @@ from src.db.models import (
     ShadowTrigger, SystemConfig, Trade,
 )
 from src.db.session import AsyncSessionLocal
-from src.memory.outcomes import record_outcome
+from src.memory.outcomes import delete_shadow_outcomes, record_outcome
 from src.trading.cash_flows import list_cash_flow_points
 from src.trading.levels import effective_breakeven_pct, max_hold_exceeded, pct_trail_stop, plan_entry
 from src.trading.strategy_params import SPECS, validate as validate_params
@@ -349,6 +349,7 @@ async def delete_strategy(key: str) -> bool:
             await session.execute(delete(ShadowAccount).where(ShadowAccount.strategy == key))
             await session.delete(row)
             await session.commit()
+        await delete_shadow_outcomes(key)  # a new strategy with this key must not learn from the old one's trades
         # Reload before releasing the lock, so a waiting job never sees the deleted strategy
         await load_strategies()
     return True
