@@ -135,7 +135,7 @@ class RiskManagerAgent:
             currency=curr_code,
             stop_loss_native=stop_loss,
             take_profit_native=take_profit,
-            broker=settings.LIVE_BROKER if settings.TRADING_MODE == "LIVE" else "paper",
+            broker=settings.LIVE_BROKER,  # paper execution charges these fees too
             max_fee_drag_pct=max_drag,
             max_profit_erosion_pct=getattr(settings, "MAX_PROFIT_EROSION_PCT", 48.0)
         )

@@ -93,3 +93,11 @@ def _reset_shadow_strategy_cache():
     """Shadow strategies come from the env settings until a test loads them from the DB."""
     from src.trading.shadow import reset_strategy_cache
     reset_strategy_cache()
+
+
+@pytest.fixture(autouse=True)
+async def _finish_live_learner_tasks():
+    """A live sell runs the learner as its own task; let it finish so no half-done task outlives the test's loop."""
+    yield
+    from src.trading.live import LiveBroker
+    await asyncio.gather(*list(LiveBroker._learner_tasks), return_exceptions=True)
