@@ -46,6 +46,7 @@ from src.trading.risk import (
     get_effective_deployable_cash,
     is_trigger_expired,
     regime_index_for_ticker,
+    risk_capped_allocation,
     whole_share_count,
 )
 
@@ -101,6 +102,7 @@ PRESETS: Dict[str, ShadowStrategy] = {
         label="Aggressive",
         description="Takes setups 10 points below the main threshold, enters at half the pullback depth, "
                     "uses a 25% wider stop, aims for 3R and trails the stop 6% under the high. "
+                    "The stop moves to entry +1% only after a gain of 1.5x the initial stop distance. "
                     "Risks 1% of the portfolio per trade, in at most 5 positions.",
         score_offset=-10,
         risk_per_trade_pct=1.0,
@@ -108,14 +110,17 @@ PRESETS: Dict[str, ShadowStrategy] = {
         stop_scale=1.25,
         reward_risk=3.0,
         trailing_stop_pct=0.06,
+        breakeven_r=1.5,
         max_positions=5,
     ),
     "momentum": ShadowStrategy(
         key="momentum",
         label="Momentum",
         description="Buys at market as soon as the committee says buy (no waiting for a pullback), "
-                    "has no fixed target, trails the stop 8% under the high and exits after 20 days.",
+                    "has no fixed target, trails the stop 8% under the high and exits after 20 days. "
+                    "The breakeven ratchet is off (it needs a 1000% gain), so only the 8% trail moves the stop.",
         entry_mode="market",
+        breakeven_pct=10.0,
         use_take_profit=False,
         trailing_stop_pct=0.08,
         max_hold_days=20,
@@ -636,7 +641,12 @@ class ShadowPortfolios:
         )
         # Same risk budget as the main bot's automated buys: a wide stop gets a smaller position
         portfolio_value = account.cash_eur + sum(p.current_price_eur * p.shares for p in open_positions)
-        alloc = apply_risk_budget(alloc, price, t.stop_loss, portfolio_value, risk_pct=eff["risk_per_trade_pct"])
+        if s.risk_per_trade_pct is None and eff["risk_per_trade_pct"] \
+                and (settings.RISK_BUDGET_BASE or "slot").strip().lower() == "slot":
+            # No own risk setting: the main bot's slot-based cap, so fewer slots risk more per trade as they do there
+            alloc = risk_capped_allocation(alloc, price, t.stop_loss, portfolio_value, usable_cash)
+        else:
+            alloc = apply_risk_budget(alloc, price, t.stop_loss, portfolio_value, risk_pct=eff["risk_per_trade_pct"])
         price_eur = currency_service.to_eur(price, t.currency)
         if alloc < 20.0 or price_eur <= 0:
             return None

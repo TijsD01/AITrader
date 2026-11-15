@@ -449,6 +449,7 @@ async def test_learner_leaves_feature_off_params_alone_when_none(_learner):
 
 async def test_learner_can_flip_an_inherited_regime_filter(_learner):
     await _freeze(breakeven_pct=0.025)
+    await update_strategy(KEY, learning_strength=3)  # a boolean flips only at the highest strength
     await _add_closed(10)
     assert _params()["regime_filter"] is None  # inherits the main bot's value (off in tests)
     _learner.return_value = {"changes": {"regime_filter": True}}
@@ -507,12 +508,12 @@ async def test_human_change_after_learner_is_not_locked(_learner):
     assert _params()["stop_scale"] == 1.05
 
 
-async def test_change_made_without_new_trades_is_not_locked(_learner):
-    # A manual learn can run with no trades since the last one: no baseline, so no lock
+async def test_manual_learn_without_new_trades_changes_nothing_and_keeps_the_lock(_learner):
+    # A manual learn needs new trades too, so no change is ever stored without a baseline to lock against
     await _learner_raised_stop_scale(_learner)
     _learner.return_value = {"changes": {"stop_scale": 2.0}}
-    await shadow_learner.learn(KEY, manual=True)  # 0 new trades: since_last_learn expectancy is None
-    assert _params()["stop_scale"] == 1.3
+    res = await shadow_learner.learn(KEY, manual=True)  # 0 new trades
+    assert res["skipped"] is True and _params()["stop_scale"] == 1.15 and len(await _history()) == 1
     await _add_closed(10, start=400)
     _learner.return_value = {"changes": {"stop_scale": 0.5}}
     await shadow_learner.learn(KEY)
