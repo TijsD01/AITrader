@@ -222,3 +222,12 @@ def test_forwarded_loopback_request_is_not_trusted_to_arm_live(monkeypatch):
         "/api/settings", json={"trading_mode": "LIVE"}, headers={"X-Forwarded-For": "203.0.113.9"})
     assert r.status_code == 403
     assert settings.TRADING_MODE == "PAPER"
+
+
+def test_blocked_write_explains_itself_in_the_json_detail_the_dashboard_shows(monkeypatch):
+    # The dashboard toasts data.detail; a plain-text block showed only "Analysis failed"
+    monkeypatch.setattr(settings, "WEB_PASSWORD", None)
+    monkeypatch.setattr(settings, "TRADING_MODE", "LIVE")
+    monkeypatch.setattr(settings, "LIVE_TRADING_ENABLED", True)
+    r = TestClient(_app(), client=LAN).post("/api/analyze", json={"ticker": "ASML.AS"})
+    assert r.status_code == 403 and "WEB_PASSWORD" in r.json()["detail"]

@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import PlainTextResponse, Response
+from starlette.responses import JSONResponse, PlainTextResponse, Response
 
 from config.settings import settings
 
@@ -134,6 +134,11 @@ def _same_origin(request: Request) -> bool:
     return parts.netloc.lower() == host.lower()
 
 
+def _deny(message: str, status_code: int) -> Response:
+    """JSON with a detail field: the dashboard shows it, so a blocked action says why."""
+    return JSONResponse({"detail": message}, status_code=status_code)
+
+
 class WebSecurityMiddleware(BaseHTTPMiddleware):
     """Host header check, network restriction or HTTP Basic auth, an Origin check on state-changing
     requests, and no unauthenticated remote control of an armed live bot."""
@@ -144,7 +149,7 @@ class WebSecurityMiddleware(BaseHTTPMiddleware):
         # With a password the browser never sends credentials to a rebound domain, so any host name may be served
         if not settings.WEB_PASSWORD and not _host_allowed(request.headers.get("host")):
             logger.warning(f"Blocked request with unexpected Host header {request.headers.get('host')!r}")
-            return PlainTextResponse(
+            return _deny(
                 "Bad request: unknown Host header. Add this host name to WEB_ALLOWED_HOSTS to use it.", status_code=400)
 
         if settings.WEB_PASSWORD:
@@ -156,16 +161,16 @@ class WebSecurityMiddleware(BaseHTTPMiddleware):
                 )
         elif settings.WEB_ALLOW_PRIVATE_NETWORK_ONLY and not _is_private_client(client_host):
             logger.warning(f"Blocked request from non-local client {client_host} (set WEB_PASSWORD to allow remote access).")
-            return PlainTextResponse("Forbidden: only local network clients are allowed.", status_code=403)
+            return _deny("Forbidden: only local network clients are allowed.", status_code=403)
 
         if request.method.upper() not in SAFE_METHODS and not _same_origin(request):
             logger.warning(f"Blocked cross-origin {request.method} {request.url.path} from {request.headers.get('origin') or request.headers.get('referer')}")
-            return PlainTextResponse("Forbidden: cross-origin request.", status_code=403)
+            return _deny("Forbidden: cross-origin request.", status_code=403)
 
         if (request.method.upper() not in SAFE_METHODS and _live_armed() and needs_password(request)
                 and not _is_kill_switch_on(request)):
             logger.warning(f"Blocked unauthenticated {request.method} {request.url.path} from {client_host} while live trading is armed")
-            return PlainTextResponse(
+            return _deny(
                 "Forbidden: live trading is armed; set WEB_PASSWORD to control the bot remotely in LIVE mode. "
                 "Without it, other devices can only turn the kill switch on.", status_code=403)
 
