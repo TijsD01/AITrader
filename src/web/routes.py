@@ -4,7 +4,7 @@ import logging
 import time
 import uuid
 from typing import Dict, Any, List, Literal, Optional, Tuple
-from fastapi import APIRouter, HTTPException, Path
+from fastapi import APIRouter, HTTPException, Path, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select, desc, func
@@ -26,6 +26,7 @@ from src.agents.committee import investment_committee
 from src.agents.base import llm_client
 from src.scheduler.jobs import trading_scheduler
 from src.data.market_hours import get_market_statuses, check_market_hours
+from src.web.security import needs_password
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -65,8 +66,9 @@ class CreateTriggerFromAIRequest(BaseModel):
 class SettingsUpdateRequest(BaseModel):
     auto_buy_enabled: Optional[bool] = None
     score_auto_tune: Optional[bool] = None
-    min_consensus_score: Optional[int] = None
-    trigger_min_score: Optional[int] = None
+    # Same 50-100 range as validate_main_rules: a lower threshold would let weak verdicts buy
+    min_consensus_score: Optional[int] = Field(default=None, ge=50, le=100)
+    trigger_min_score: Optional[int] = Field(default=None, ge=50, le=100)
     position_size_pct: Optional[float] = None
     max_positions: Optional[int] = None
     enforce_market_hours: Optional[bool] = None
@@ -537,7 +539,17 @@ async def get_settings():
         }
 
 @router.post("/api/settings")
-async def update_settings(req: SettingsUpdateRequest):
+async def update_settings(req: SettingsUpdateRequest, request: Request = None):
+    # request is None only for in-process calls, which no network client can make
+    arms_live = (req.trading_mode or "").strip().upper() == "LIVE" or bool(req.live_trading_enabled)
+    # The Telegram chat can trade and the keys are credentials: changing them is as sensitive as arming
+    sets_credentials = any(v is not None for v in (req.telegram_bot_token, req.telegram_chat_id, req.gemini_api_key))
+    if (arms_live or sets_credentials) and request is not None and needs_password(request):
+        raise HTTPException(
+            status_code=403,
+            detail="Set WEB_PASSWORD to arm live trading or change keys and the Telegram chat from another device; "
+                   "without it only this machine itself can.",
+        )
     env_updates: Dict[str, Any] = {}
     was_live = get_active_broker() is live_broker
     was_resting = settings.T212_RESTING_ORDERS

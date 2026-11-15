@@ -1,6 +1,10 @@
 import pytest
 from src.agents.base import llm_client
 
+@pytest.mark.skipif(
+    not llm_client._resolve_agy_path(),
+    reason="needs the agy CLI (AGY_CLI_PATH, ANTIGRAVITY_AGENTAPI_EXE or agy on PATH): this test calls the real LLM",
+)
 @pytest.mark.asyncio
 async def test_antigravity_llm_client():
     assert llm_client.has_active_key() is True

@@ -26,7 +26,11 @@ class Settings(BaseSettings):
     WEB_ALLOW_PRIVATE_NETWORK_ONLY: bool = True
     # Extra networks treated as local (comma-separated CIDRs). Default: Tailscale (IPv4 CGNAT range + IPv6 ULA).
     WEB_TRUSTED_NETWORKS: str = "100.64.0.0/10,fd7a:115c:a1e0::/48"
-    CORS_ALLOW_ORIGINS: str = ""            # Comma-separated extra origins allowed cross-site (empty = same-origin only)
+    # Extra host names the dashboard may be reached on (comma-separated). IP addresses, localhost, single-label
+    # names and *.local, *.lan, *.home.arpa, *.ts.net are always accepted; any other Host header is refused,
+    # which stops a web page that rebinds its own domain to this machine's address (DNS rebinding).
+    WEB_ALLOWED_HOSTS: str = ""
+    CORS_ALLOW_ORIGINS: str = ""          # Comma-separated extra origins allowed cross-site (empty = same-origin only)
     DATA_DIR: Path = BASE_DIR / "data"
 
     # Database

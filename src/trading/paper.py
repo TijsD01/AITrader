@@ -274,6 +274,7 @@ class PaperBroker(BaseBroker):
                 status="OPEN",
                 trigger_id=trigger_id,
                 rules_version=rules_version,
+                is_manual=is_manual,
                 initial_stop_native=stop_loss_native,
                 opened_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
             )
@@ -292,6 +293,7 @@ class PaperBroker(BaseBroker):
                 fee_eur=fee_eur,
                 rationale=f"{rationale} (Fee: €{fee_eur:.2f})",
                 consensus_score=consensus_score,
+                is_manual=is_manual,
                 executed_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
             )
             session.add(trade)
@@ -385,6 +387,9 @@ class PaperBroker(BaseBroker):
             pos.fees_eur = total_fees_eur
 
             # Record Trade
+            # A trigger the owner forced past the committee's verdict is the owner's decision, like a manual buy
+            owner_trade = bool(pos.is_manual) or bool(
+                pos.trigger_id and getattr(await session.get(OrderTrigger, pos.trigger_id), "forced", False))
             trade = Trade(
                 ticker=ticker.upper(),
                 name=pos.name,
@@ -399,6 +404,7 @@ class PaperBroker(BaseBroker):
                 realized_pnl_pct=realized_pnl_pct,
                 rationale=f"{reason} (Total Fees: €{total_fees_eur:.2f})",
                 is_live=False,
+                is_manual=owner_trade,
                 executed_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
             )
             session.add(trade)
@@ -454,11 +460,13 @@ class PaperBroker(BaseBroker):
             lesson_text = None
             adjustments = []
             try:
-                from src.trading.learner import trade_learner
-                post_mortem = await trade_learner.conduct_trade_post_mortem(trade.id)
-                lesson_text = post_mortem.get("lesson") if post_mortem else None
-                calib = await trade_learner.calibrate_internal_parameters(trade.id, automatic=True)
-                adjustments = calib.get("adjustments", []) if calib else []
+                # Manual positions are not the bot's decisions, so they teach it nothing
+                if not owner_trade:
+                    from src.trading.learner import trade_learner
+                    post_mortem = await trade_learner.conduct_trade_post_mortem(trade.id)
+                    lesson_text = post_mortem.get("lesson") if post_mortem else None
+                    calib = await trade_learner.calibrate_internal_parameters(trade.id, automatic=True)
+                    adjustments = calib.get("adjustments", []) if calib else []
             except Exception as learn_err:
                 logger.error(f"Error in trade learning post-mortem/calibration for trade #{trade.id}: {learn_err}")
             try:
@@ -528,23 +536,27 @@ class PaperBroker(BaseBroker):
                         p.current_price_native = curr_price
                         p.current_price_eur = currency_service.to_eur(curr_price, p.currency)
                         # Trail on regular-session prices only, same as live
-                        if is_open and curr_price > p.highest_price_native:
+                        new_high = is_open and curr_price > p.highest_price_native
+                        if new_high:
                             p.highest_price_native = curr_price
+                        # Opened under the active promoted rules: their breakeven trigger and % trail
+                        shaped = p.rules_version is not None and p.rules_version == rules.version
+                        new_stop = p.stop_loss_native
+                        if new_high:
                             # Trailing stop: past breakeven_trigger_pct the stop moves to breakeven + 1%, then trails by N x ATR
                             be_pct = breakeven_trigger_pct
-                            shaped = p.rules_version is not None and p.rules_version == rules.version
-                            if shaped:  # opened under the active promoted rules: their breakeven trigger and % trail
+                            if shaped:
                                 strategy = strategy or rules.as_strategy()
                                 be_pct = effective_breakeven_pct(strategy, rules.breakeven_pct, p.entry_price_native, p.initial_stop_native)
                             new_stop = compute_trailing_stop(
                                 p.entry_price_native, p.stop_loss_native, p.highest_price_native,
                                 data.get("technicals", {}).get("atr14"), be_pct
                             )
-                            if shaped:
-                                new_stop = pct_trail_stop(new_stop, p.highest_price_native, rules.trailing_stop_pct)
-                            if new_stop is not None and new_stop != p.stop_loss_native:
-                                p.stop_loss_native = new_stop
-                                logger.info(f"Trailing stop raised for {p.ticker} to {new_stop} (high {p.highest_price_native})")
+                        if is_open and shaped:  # the % trail runs on every check, like the shadow
+                            new_stop = pct_trail_stop(new_stop, p.highest_price_native, rules.trailing_stop_pct)
+                        if new_stop is not None and new_stop != p.stop_loss_native:
+                            p.stop_loss_native = new_stop
+                            logger.info(f"Trailing stop raised for {p.ticker} to {new_stop} (high {p.highest_price_native})")
                         
                         # Calculate unrealized PnL
                         curr_val_eur = p.current_price_eur * p.shares
@@ -676,7 +688,7 @@ class PaperBroker(BaseBroker):
                 currency=currency,
                 stop_loss_native=sl,
                 take_profit_native=tp,
-                broker="paper",
+                broker=settings.LIVE_BROKER,  # the fees paper execution charges
                 max_fee_drag_pct=getattr(settings, "MAX_FEE_DRAG_PCT", 3.8),
                 max_profit_erosion_pct=getattr(settings, "MAX_PROFIT_EROSION_PCT", 48.0)
             )

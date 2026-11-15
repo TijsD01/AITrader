@@ -45,6 +45,8 @@ def _run_migrations(connection):
         ("positions", "rules_version", "INTEGER"),
         ("order_triggers", "rules_version", "INTEGER"),
         ("positions", "initial_stop_native", "FLOAT"),
+        ("positions", "is_manual", "BOOLEAN DEFAULT 0"),
+        ("trades", "is_manual", "BOOLEAN DEFAULT 0"),
     ]
     for table, col, col_type in migrations:
         try:

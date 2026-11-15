@@ -34,6 +34,8 @@ class LiveBroker(BaseBroker):
     track real equity, sync balances, and enforce institutional risk controls.
     """
 
+    _learner_tasks: set = set()  # running post-mortems; held here so they are not garbage-collected
+
     def __init__(self):
         self._last_pnl_refresh: float = 0.0
         self._pnl_refresh_ttl: float = 10.0
@@ -732,7 +734,7 @@ class LiveBroker(BaseBroker):
                 ticker=ticker, name=name, currency=currency, shares=filled, price_native=fill_price,
                 stop_loss_native=stop_loss_native, take_profit_native=take_profit_native,
                 rationale=rationale, consensus_score=consensus_score, broker_order_id=broker_order_id,
-                trigger_id=trigger_id, rules_version=rules_version
+                trigger_id=trigger_id, rules_version=rules_version, is_manual=is_manual
             )
         await self.adjust_triggers_dynamically()
 
@@ -919,7 +921,8 @@ class LiveBroker(BaseBroker):
         consensus_score: int,
         broker_order_id: str,
         trigger_id: Optional[int] = None,
-        rules_version: Optional[int] = None
+        rules_version: Optional[int] = None,
+        is_manual: bool = False
     ) -> Dict[str, Any]:
         """Record a filled live BUY: position, trade and snapshot. Callers hold _t212_lock (Trading 212)."""
         from src.trading.fees import calculate_broker_fee
@@ -969,6 +972,7 @@ class LiveBroker(BaseBroker):
                 broker_order_id=broker_order_id,
                 trigger_id=trigger_id,
                 rules_version=rules_version,
+                is_manual=is_manual,
                 initial_stop_native=stop_loss_native,
                 opened_at=utc_now
             )
@@ -988,6 +992,7 @@ class LiveBroker(BaseBroker):
                 rationale=f"[LIVE {settings.LIVE_BROKER.upper()}] {rationale} (Fee: €{fee_eur:.2f})",
                 consensus_score=consensus_score,
                 is_live=True,
+                is_manual=is_manual,
                 broker_order_id=broker_order_id,
                 executed_at=utc_now
             )
@@ -1026,6 +1031,15 @@ class LiveBroker(BaseBroker):
             "take_profit": take_profit_native,
             "message": f"Real money order submitted to {settings.LIVE_BROKER.upper()}: {shares} shares of {ticker} for €{actual_cost_eur:.2f} (Fee: €{fee_eur:.2f})."
         }
+
+    async def _learn_from_close(self, trade_id: int) -> None:
+        """Post-mortem and calibration for a closed live trade, same as paper. A failure never reaches the sell."""
+        try:
+            from src.trading.learner import trade_learner
+            await trade_learner.conduct_trade_post_mortem(trade_id)
+            await trade_learner.calibrate_internal_parameters(trade_id, automatic=True)
+        except Exception as learn_err:
+            logger.error(f"Error in trade learning post-mortem/calibration for trade #{trade_id}: {learn_err}")
 
     async def execute_sell(
         self, ticker: str, reason: str = "Manual Close", broker_flat: bool = False, exit_price_native: Optional[float] = None,
@@ -1099,6 +1113,9 @@ class LiveBroker(BaseBroker):
             pos.current_price_eur = exit_price_eur
             pos.fees_eur = total_fees_eur
 
+            # A trigger the owner forced past the committee's verdict is the owner's decision, like a manual buy
+            owner_trade = bool(pos.is_manual) or bool(
+                pos.trigger_id and getattr(await session.get(OrderTrigger, pos.trigger_id), "forced", False))
             trade = Trade(
                 ticker=ticker.upper(),
                 name=pos.name,
@@ -1113,6 +1130,7 @@ class LiveBroker(BaseBroker):
                 realized_pnl_pct=realized_pnl_pct,
                 rationale=f"[LIVE {settings.LIVE_BROKER.upper()}] {reason} (Total Fees: €{total_fees_eur:.2f})",
                 is_live=True,
+                is_manual=owner_trade,
                 broker_order_id=broker_order_id,
                 executed_at=utc_now
             )
@@ -1165,6 +1183,12 @@ class LiveBroker(BaseBroker):
                 ))
             except Exception:
                 pass
+            # Own task: the learner calls an LLM and must not hold _t212_lock (the sync books exits under it).
+            # Manual and adopted positions are not the bot's decisions, so they teach it nothing.
+            if not owner_trade:
+                learn = asyncio.create_task(self._learn_from_close(trade.id))
+                self._learner_tasks.add(learn)
+                learn.add_done_callback(self._learner_tasks.discard)
             try:
                 from src.memory.outcomes import record_main_outcome
                 record_main_outcome(pos, trade, reason)
@@ -1536,7 +1560,7 @@ class LiveBroker(BaseBroker):
                 stops_to_place: List[tuple] = []
                 await self._adopt_holding(session, row.ticker, row.name, row.currency, float(bp["quantity"]),
                                           float(bp["averagePricePaid"]), 0.0, adopted, stops_to_place,
-                                          levels=(sl, tp), current_native=current)
+                                          levels=(sl, tp), current_native=current, manual=True)
                 await session.commit()
             await self._finish_sync("Trading 212", [], stops_to_place, adopted)
         dp = 2 if current >= 1 else 4
@@ -2013,19 +2037,23 @@ class LiveBroker(BaseBroker):
                         p.current_price_native = curr_price
                         p.current_price_eur = currency_service.to_eur(curr_price, p.currency)
                         # Trail on regular-session prices only: a thin after-hours spike must not move the broker stop
-                        if is_open and curr_price > (p.highest_price_native or 0.0):
+                        new_high = is_open and curr_price > (p.highest_price_native or 0.0)
+                        if new_high:
                             p.highest_price_native = curr_price
-                            # Trailing stop (same as paper): past breakeven_trigger_pct the stop moves to breakeven + 1%,
-                            # then trails by N x ATR. The broker's stop order follows, see _move_broker_stop.
-                            # Positions without a stop are left alone: those are holdings synced from the broker, not bot trades.
-                            if p.stop_loss_native and p.entry_price_native:
-                                gain_pct = (curr_price / p.entry_price_native) - 1.0
+                        # Opened under the active promoted rules: their breakeven trigger and % trail
+                        shaped = p.rules_version is not None and p.rules_version == rules.version
+                        # Trailing stop (same as paper): on a new high past breakeven_trigger_pct the stop moves to
+                        # breakeven + 1%, then trails by N x ATR. The promoted % trail runs on every check, like the shadow.
+                        # The broker's stop order follows, see _move_broker_stop.
+                        # Positions without a stop are left alone: those are holdings synced from the broker, not bot trades.
+                        if is_open and (new_high or shaped) and p.stop_loss_native and p.entry_price_native:
+                            gain_pct = (curr_price / p.entry_price_native) - 1.0
+                            new_stop = p.stop_loss_native
+                            if new_high:
                                 be_pct = breakeven_trigger_pct
-                                shaped = p.rules_version is not None and p.rules_version == rules.version
-                                if shaped:  # opened under the active promoted rules: their breakeven trigger and % trail
+                                if shaped:
                                     strategy = strategy or rules.as_strategy()
                                     be_pct = effective_breakeven_pct(strategy, rules.breakeven_pct, p.entry_price_native, p.initial_stop_native)
-                                new_stop = p.stop_loss_native
                                 if gain_pct >= be_pct:
                                     atr = None
                                     if settings.TRAILING_STOP_ATR_MULT > 0:
@@ -2034,20 +2062,20 @@ class LiveBroker(BaseBroker):
                                     new_stop = compute_trailing_stop(
                                         p.entry_price_native, p.stop_loss_native, p.highest_price_native, atr, be_pct
                                     )
-                                if shaped:
-                                    new_stop = pct_trail_stop(new_stop, p.highest_price_native, rules.trailing_stop_pct)
-                                if new_stop is not None and new_stop != p.stop_loss_native:
-                                    p.stop_loss_native = new_stop
-                                    logger.info(f"Live trailing stop raised for {p.ticker} to {new_stop} (+{gain_pct*100:.1f}%)")
-                                    if new_stop >= curr_price:
-                                        # A sell stop at or above market is rejected or fills at once: the bot's own stop
-                                        # check sells this run, and the old broker stop stays in place as the fallback
-                                        logger.info(f"Broker stop for {p.ticker} left in place: new stop {new_stop} is not below the price {curr_price}.")
-                                    else:
-                                        # Re-check under the T212 lock: a flip to Mine may have landed during this refresh
-                                        async with self._t212_lock, AsyncSessionLocal() as check:
-                                            if getattr(await check.get(Position, p.id), "status", None) == "OPEN":
-                                                await self._move_broker_stop(p.ticker, p.currency, p.shares, new_stop)
+                            if shaped:
+                                new_stop = pct_trail_stop(new_stop, p.highest_price_native, rules.trailing_stop_pct)
+                            if new_stop is not None and new_stop != p.stop_loss_native:
+                                p.stop_loss_native = new_stop
+                                logger.info(f"Live trailing stop raised for {p.ticker} to {new_stop} (+{gain_pct*100:.1f}%)")
+                                if new_stop >= curr_price:
+                                    # A sell stop at or above market is rejected or fills at once: the bot's own stop
+                                    # check sells this run, and the old broker stop stays in place as the fallback
+                                    logger.info(f"Broker stop for {p.ticker} left in place: new stop {new_stop} is not below the price {curr_price}.")
+                                else:
+                                    # Re-check under the T212 lock: a flip to Mine may have landed during this refresh
+                                    async with self._t212_lock, AsyncSessionLocal() as check:
+                                        if getattr(await check.get(Position, p.id), "status", None) == "OPEN":
+                                            await self._move_broker_stop(p.ticker, p.currency, p.shares, new_stop)
                         curr_val_eur = p.current_price_eur * p.shares
                         p.unrealized_pnl_eur = round(curr_val_eur - p.cost_basis_eur, 2)
                         p.unrealized_pnl_pct = round(((p.current_price_eur / p.entry_price_eur) - 1.0) * 100, 2)
@@ -2180,6 +2208,7 @@ class LiveBroker(BaseBroker):
         self, session, ticker: str, name: str, curr_code: str, shares: float, cost_native: float, fees_eur: float,
         adopted: List[str], stops_to_place: List[tuple], pending_only: bool = False,
         levels: Optional[Tuple[float, float]] = None, current_native: Optional[float] = None,
+        manual: bool = False,
     ) -> None:
         """
         Books a broker holding the bot never recorded. Stop/target: levels when given, else the bot buy plan's;
@@ -2204,7 +2233,9 @@ class LiveBroker(BaseBroker):
             cost_basis_eur=price_eur * shares,
             fees_eur=round(fees_eur, 2),
             status="OPEN",
-            is_live=True
+            is_live=True,
+            # The owner's shares stay out of learner stats; with a bot buy plan it is the bot's own buy, booked late
+            is_manual=manual or not sl
         ))
         if sl:
             adopted.append(f"{shares:g} {ticker} @ {cost_native:.2f} {curr_code} | SL {sl} | TP {tp}")

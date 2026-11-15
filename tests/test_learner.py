@@ -99,6 +99,8 @@ async def test_autonomous_parameter_calibration(monkeypatch):
     # Calibrate parameters
     before_size = settings.POSITION_SIZE_PCT
     async with AsyncSessionLocal() as session:
+        score_row = (await session.execute(select(SystemConfig).where(SystemConfig.key == "MIN_CONSENSUS_SCORE"))).scalars().first()
+        before_min_score = int(score_row.value) if score_row else settings.MIN_CONSENSUS_SCORE
         before_row = (await session.execute(select(SystemConfig).where(SystemConfig.key == "POSITION_SIZE_PCT"))).scalars().first()
         before_db = before_row.value if before_row else None
     cal_res = await trade_learner.calibrate_internal_parameters()
@@ -106,10 +108,10 @@ async def test_autonomous_parameter_calibration(monkeypatch):
     assert cal_res["consecutive_losses"] >= 3
     
     # Check that parameters became more defensive:
-    # min_consensus_score raised to >= 75
+    # min_consensus_score raised by one point per calibration, not in a jump
     # position size is manual and untouched by calibration
     p = cal_res["calibrated_parameters"]
-    assert p["min_consensus_score"] >= 75
+    assert p["min_consensus_score"] == min(82, before_min_score + 1)
     assert "position_size_pct" not in p and "POSITION_SIZE_PCT" not in p
     async with AsyncSessionLocal() as session:
         row = (await session.execute(select(SystemConfig).where(SystemConfig.key == "POSITION_SIZE_PCT"))).scalars().first()
@@ -418,11 +420,14 @@ async def _arrange_calibration_trades(monkeypatch):
             SystemConfig(key="LAST_CALIBRATION_TIMESTAMP", value=(now - datetime.timedelta(days=30)).isoformat()),
         ])
         for i in range(3):
-            session.add(Trade(
+            trade = Trade(
                 ticker=f"PAUSE_LOSS_{i}", name="Loss", order_type="SELL", shares=5.0, currency="EUR",
                 price_native=95.0, price_eur=95.0, total_eur=475.0, realized_pnl_eur=-25.0, realized_pnl_pct=-5.0,
-                rationale="Stop-Loss triggered", is_live=False, executed_at=now + datetime.timedelta(minutes=i)))
-        session.add(TradeLesson(trade_id=-2, ticker="PAUSE_LOSS_0", outcome="LOSS", lesson="Pause test lesson"))
+                rationale="Stop-Loss triggered", is_live=False, executed_at=now + datetime.timedelta(minutes=i))
+            session.add(trade)
+        await session.flush()
+        # The fallback lesson lookup only takes lessons of a trade in the active mode, so it needs a real paper trade
+        session.add(TradeLesson(trade_id=trade.id, ticker="PAUSE_LOSS_0", outcome="LOSS", lesson="Pause test lesson"))
         await session.commit()
 
 

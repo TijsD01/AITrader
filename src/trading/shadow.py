@@ -33,7 +33,7 @@ from src.db.models import (
     ShadowTrigger, SystemConfig, Trade,
 )
 from src.db.session import AsyncSessionLocal
-from src.memory.outcomes import record_outcome
+from src.memory.outcomes import delete_shadow_outcomes, record_outcome
 from src.trading.cash_flows import list_cash_flow_points
 from src.trading.levels import effective_breakeven_pct, max_hold_exceeded, pct_trail_stop, plan_entry
 from src.trading.strategy_params import SPECS, validate as validate_params
@@ -101,6 +101,7 @@ PRESETS: Dict[str, ShadowStrategy] = {
         label="Aggressive",
         description="Takes setups 10 points below the main threshold, enters at half the pullback depth, "
                     "uses a 25% wider stop, aims for 3R and trails the stop 6% under the high. "
+                    "The stop moves to entry +1% only after a gain of 1.5x the initial stop distance. "
                     "Risks 1% of the portfolio per trade, in at most 5 positions.",
         score_offset=-10,
         risk_per_trade_pct=1.0,
@@ -108,14 +109,17 @@ PRESETS: Dict[str, ShadowStrategy] = {
         stop_scale=1.25,
         reward_risk=3.0,
         trailing_stop_pct=0.06,
+        breakeven_r=1.5,
         max_positions=5,
     ),
     "momentum": ShadowStrategy(
         key="momentum",
         label="Momentum",
         description="Buys at market as soon as the committee says buy (no waiting for a pullback), "
-                    "has no fixed target, trails the stop 8% under the high and exits after 20 days.",
+                    "has no fixed target, trails the stop 8% under the high and exits after 20 days. "
+                    "The breakeven ratchet is off (it needs a 1000% gain), so only the 8% trail moves the stop.",
         entry_mode="market",
+        breakeven_pct=10.0,
         use_take_profit=False,
         trailing_stop_pct=0.08,
         max_hold_days=20,
@@ -344,6 +348,7 @@ async def delete_strategy(key: str) -> bool:
             await session.execute(delete(ShadowAccount).where(ShadowAccount.strategy == key))
             await session.delete(row)
             await session.commit()
+        await delete_shadow_outcomes(key)  # a new strategy with this key must not learn from the old one's trades
         # Reload before releasing the lock, so a waiting job never sees the deleted strategy
         await load_strategies()
     return True

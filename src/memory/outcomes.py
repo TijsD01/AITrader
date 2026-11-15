@@ -4,6 +4,10 @@ import json
 import logging
 from typing import Optional
 
+from sqlalchemy import select
+
+from src.db import session as db_session
+from src.db.models import OrderTrigger
 from src.memory.models import L1Atom
 from src.memory.store import memory_store
 
@@ -35,23 +39,57 @@ async def record_outcome(*, source: str, strategy: str, ref_id: int | str, ticke
         return False
 
 
+async def delete_shadow_outcomes(strategy_key: str) -> int:
+    """Deletes one shadow strategy's outcome atoms and their monthly summaries. Returns the number deleted;
+    0 on any error; never raises."""
+    try:
+        await memory_store.init_db()
+        async with memory_store._get_conn() as db:
+            cur = await db.execute(
+                "DELETE FROM memory_l1_atoms WHERE agent_id = 'outcomes' AND object = ?", (f"shadow:{strategy_key}",))
+            await db.commit()
+            return cur.rowcount
+    except Exception as e:
+        logger.warning("delete_shadow_outcomes failed for %s: %s", strategy_key, e)
+        return 0
+
+
 # Strong references to in-flight outcome writes (the event loop only keeps weak ones).
 _pending: set = set()
 
 
 def record_main_outcome(pos, trade, reason: str) -> asyncio.Task:
     """Schedules the outcome write for a main-bot sell so it never holds the sell's lock or DB session.
-    Reads the committed Position and SELL Trade rows now; the task gets plain values only and never raises."""
+    Reads the committed Position and SELL Trade rows now; the task gets plain values only and never raises.
+    A manual trade writes nothing: its task returns False."""
     hold_days = 0.0
     if pos.opened_at and trade.executed_at:
         hold_days = round((trade.executed_at - pos.opened_at).total_seconds() / 86400.0, 2)
-    # r_multiple stays None: stop_loss_native is trailed after entry, so the entry stop is not on the row.
-    kw = dict(source="main_live" if trade.is_live else "main_paper", strategy="main", ref_id=trade.id,
-              ticker=trade.ticker, pnl_pct=trade.realized_pnl_pct or 0.0, r_multiple=None, hold_days=hold_days,
+    # Same R as shadow outcomes: measured against the stop the position opened with, not the trailed one.
+    entry, stop = pos.entry_price_native, pos.initial_stop_native
+    r_multiple = round((trade.price_native - entry) / (entry - stop), 2) if stop and stop < entry else None
+    # Trade ids restart after a trading-DB reset; the execution time keeps the atom id unique.
+    ref_id = f"{trade.id}:{trade.executed_at.isoformat() if trade.executed_at else ''}"
+    kw = dict(source="main_live" if trade.is_live else "main_paper", strategy="main", ref_id=ref_id,
+              ticker=trade.ticker, pnl_pct=trade.realized_pnl_pct or 0.0, r_multiple=r_multiple, hold_days=hold_days,
               exit_reason=reason, score=trade.consensus_score, entry_type="UNKNOWN", params={})
+    manual, trigger_id = bool(trade.is_manual), pos.trigger_id
 
     async def write() -> bool:
+        if manual:
+            return False
         try:
+            if trigger_id is not None:
+                try:  # score and entry type are labels; never lose the outcome over them
+                    async with db_session.AsyncSessionLocal() as session:
+                        row = (await session.execute(
+                            select(OrderTrigger.consensus_score, OrderTrigger.trigger_type)
+                            .where(OrderTrigger.id == trigger_id))).first()
+                    if row:
+                        kw["score"] = row[0] if row[0] is not None else kw["score"]
+                        kw["entry_type"] = row[1] or "UNKNOWN"
+                except Exception as e:
+                    logger.warning("Outcome trigger lookup failed for %s: %s", kw["ref_id"], e)
             return await record_outcome(**kw)
         except Exception as e:
             logger.warning("Outcome write failed for %s:%s: %s", kw["source"], kw["ref_id"], e)

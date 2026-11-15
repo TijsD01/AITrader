@@ -38,8 +38,9 @@ def test_clamp_step_uses_learn_range():
 
 def test_clamp_step_none_bool_and_int():
     assert clamp_step("reward_risk", None, 2.0, 3) is None
-    assert clamp_step("use_take_profit", True, False, 1) is False
-    assert clamp_step("use_take_profit", True, "x", 1) is True
+    assert clamp_step("use_take_profit", True, False, 1) is True  # a boolean flips only at strength 3
+    assert clamp_step("use_take_profit", True, False, 3) is False
+    assert clamp_step("use_take_profit", True, "x", 3) is True
     assert clamp_step("max_positions", 5, 20, 3) == 8 and isinstance(clamp_step("max_positions", 5, 20, 3), int)
 
 def test_json_schema_shape():

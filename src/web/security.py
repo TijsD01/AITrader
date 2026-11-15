@@ -32,6 +32,61 @@ def _is_private_client(host: Optional[str]) -> bool:
     return any(ip in net for net in _trusted_networks())
 
 
+def _is_loopback_client(host: Optional[str]) -> bool:
+    if host in ("localhost", "testclient"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host or "")
+    except ValueError:
+        return False
+    return (getattr(ip, "ipv4_mapped", None) or ip).is_loopback
+
+
+def needs_password(request: Request) -> bool:
+    """True for a client that has not proven who it is: no WEB_PASSWORD is set and it is not this machine."""
+    # A proxy on this machine makes every remote client look like loopback, so a forwarded request is never trusted
+    forwarded = "x-forwarded-for" in request.headers or "forwarded" in request.headers
+    local = not forwarded and _is_loopback_client(request.client.host if request.client else None)
+    return not settings.WEB_PASSWORD and not local
+
+
+def _live_armed() -> bool:
+    return settings.TRADING_MODE.upper() == "LIVE" and settings.LIVE_TRADING_ENABLED
+
+
+def _is_kill_switch_on(request: Request) -> bool:
+    """The one write an unauthenticated client may send to an armed live bot: it only blocks new buys."""
+    return (request.method.upper() == "POST" and request.url.path == "/api/killswitch"
+            and request.query_params.getlist("active") == ["true"])
+
+
+_LOCAL_HOST_SUFFIXES = (".local", ".lan", ".home.arpa", ".ts.net")
+
+
+def _host_allowed(header: Optional[str]) -> bool:
+    """
+    A web page can point its own domain at this machine's private address (DNS rebinding) and then
+    passes both the client-IP and the same-origin check. Its requests still carry that domain in the
+    Host header, so only names that cannot be a public domain, or that the owner listed, are served.
+    """
+    try:
+        host = (urlsplit(f"//{header or ''}").hostname or "").rstrip(".")
+    except ValueError:
+        return False
+    if not host:
+        return False
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    if "." not in host or host.endswith(_LOCAL_HOST_SUFFIXES):
+        return True
+    extra = {urlsplit(f"//{h.strip()}").hostname for h in (settings.WEB_ALLOWED_HOSTS or "").split(",") if h.strip()}
+    extra |= {urlsplit(o).hostname for o in _allowed_origins()}
+    return host in extra
+
+
 def _trusted_networks():
     nets = []
     for cidr in (settings.WEB_TRUSTED_NETWORKS or "").split(","):
@@ -80,10 +135,17 @@ def _same_origin(request: Request) -> bool:
 
 
 class WebSecurityMiddleware(BaseHTTPMiddleware):
-    """Network restriction or HTTP Basic auth, plus an Origin check on state-changing requests."""
+    """Host header check, network restriction or HTTP Basic auth, an Origin check on state-changing
+    requests, and no unauthenticated remote control of an armed live bot."""
 
     async def dispatch(self, request: Request, call_next) -> Response:
         client_host = request.client.host if request.client else None
+
+        # With a password the browser never sends credentials to a rebound domain, so any host name may be served
+        if not settings.WEB_PASSWORD and not _host_allowed(request.headers.get("host")):
+            logger.warning(f"Blocked request with unexpected Host header {request.headers.get('host')!r}")
+            return PlainTextResponse(
+                "Bad request: unknown Host header. Add this host name to WEB_ALLOWED_HOSTS to use it.", status_code=400)
 
         if settings.WEB_PASSWORD:
             if not _check_basic_auth(request.headers.get("authorization")):
@@ -99,6 +161,13 @@ class WebSecurityMiddleware(BaseHTTPMiddleware):
         if request.method.upper() not in SAFE_METHODS and not _same_origin(request):
             logger.warning(f"Blocked cross-origin {request.method} {request.url.path} from {request.headers.get('origin') or request.headers.get('referer')}")
             return PlainTextResponse("Forbidden: cross-origin request.", status_code=403)
+
+        if (request.method.upper() not in SAFE_METHODS and _live_armed() and needs_password(request)
+                and not _is_kill_switch_on(request)):
+            logger.warning(f"Blocked unauthenticated {request.method} {request.url.path} from {client_host} while live trading is armed")
+            return PlainTextResponse(
+                "Forbidden: live trading is armed; set WEB_PASSWORD to control the bot remotely in LIVE mode. "
+                "Without it, other devices can only turn the kill switch on.", status_code=403)
 
         response = await call_next(request)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
