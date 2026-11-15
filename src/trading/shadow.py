@@ -46,7 +46,6 @@ from src.trading.risk import (
     get_effective_deployable_cash,
     is_trigger_expired,
     regime_index_for_ticker,
-    risk_capped_allocation,
     whole_share_count,
 )
 
@@ -642,12 +641,7 @@ class ShadowPortfolios:
         )
         # Same risk budget as the main bot's automated buys: a wide stop gets a smaller position
         portfolio_value = account.cash_eur + sum(p.current_price_eur * p.shares for p in open_positions)
-        if s.risk_per_trade_pct is None and eff["risk_per_trade_pct"] \
-                and (settings.RISK_BUDGET_BASE or "slot").strip().lower() == "slot":
-            # No own risk setting: the main bot's slot-based cap, so fewer slots risk more per trade as they do there
-            alloc = risk_capped_allocation(alloc, price, t.stop_loss, portfolio_value, usable_cash)
-        else:
-            alloc = apply_risk_budget(alloc, price, t.stop_loss, portfolio_value, risk_pct=eff["risk_per_trade_pct"])
+        alloc = apply_risk_budget(alloc, price, t.stop_loss, portfolio_value, risk_pct=eff["risk_per_trade_pct"])
         price_eur = currency_service.to_eur(price, t.currency)
         if alloc < 20.0 or price_eur <= 0:
             return None

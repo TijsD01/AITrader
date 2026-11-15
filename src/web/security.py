@@ -82,7 +82,7 @@ def _host_allowed(header: Optional[str]) -> bool:
         pass
     if "." not in host or host.endswith(_LOCAL_HOST_SUFFIXES):
         return True
-    extra = {h.strip().lower().rstrip(".") for h in (settings.WEB_ALLOWED_HOSTS or "").split(",")}
+    extra = {urlsplit(f"//{h.strip()}").hostname for h in (settings.WEB_ALLOWED_HOSTS or "").split(",") if h.strip()}
     extra |= {urlsplit(o).hostname for o in _allowed_origins()}
     return host in extra
 
@@ -141,7 +141,8 @@ class WebSecurityMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
         client_host = request.client.host if request.client else None
 
-        if not _host_allowed(request.headers.get("host")):
+        # With a password the browser never sends credentials to a rebound domain, so any host name may be served
+        if not settings.WEB_PASSWORD and not _host_allowed(request.headers.get("host")):
             logger.warning(f"Blocked request with unexpected Host header {request.headers.get('host')!r}")
             return PlainTextResponse(
                 "Bad request: unknown Host header. Add this host name to WEB_ALLOWED_HOSTS to use it.", status_code=400)

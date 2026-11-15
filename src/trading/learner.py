@@ -432,11 +432,11 @@ Return valid JSON with exactly these keys:
                         new_tp_rr = round(_step(curr_tp_rr, llm_res.get("TAKE_PROFIT_RR", curr_tp_rr), 1.5, 3.0), 2)
                         new_be_pct = round(_step(curr_be_pct, llm_res.get("BREAKEVEN_TRIGGER_PCT", curr_be_pct), 0.015, 0.05), 3)
 
-                        # Weights normalization
-                        w_tech = _step(curr_w_tech, llm_res.get("WEIGHT_TECHNICAL", curr_w_tech), 0.05, 0.50)
-                        w_fund = _step(curr_w_fund, llm_res.get("WEIGHT_FUNDAMENTAL", curr_w_fund), 0.05, 0.50)
-                        w_sent = _step(curr_w_sent, llm_res.get("WEIGHT_SENTIMENT", curr_w_sent), 0.05, 0.25)
-                        w_risk = _step(curr_w_risk, llm_res.get("WEIGHT_RISK", curr_w_risk), 0.10, 0.50)
+                        # Normalising can leave a weight just past its range; clamp it so the next step still moves it
+                        w_tech = _step(max(0.05, min(0.50, curr_w_tech)), llm_res.get("WEIGHT_TECHNICAL", curr_w_tech), 0.05, 0.50)
+                        w_fund = _step(max(0.05, min(0.50, curr_w_fund)), llm_res.get("WEIGHT_FUNDAMENTAL", curr_w_fund), 0.05, 0.50)
+                        w_sent = _step(max(0.05, min(0.25, curr_w_sent)), llm_res.get("WEIGHT_SENTIMENT", curr_w_sent), 0.05, 0.25)
+                        w_risk = _step(max(0.10, min(0.50, curr_w_risk)), llm_res.get("WEIGHT_RISK", curr_w_risk), 0.10, 0.50)
                         w_tech, w_fund, w_sent, w_risk = _normalise_weights(w_tech, w_fund, w_sent, w_risk)
 
                         calibrated_params = {
@@ -498,13 +498,13 @@ Return valid JSON with exactly these keys:
                 recent_stop_outs = [t for t in losses[:5] if "stop" in (t.rationale or "").lower()]
                 # Losers nearly always exit by a stop, so stop-outs alone say nothing: widen only when the window loses money
                 if len(recent_stop_outs) >= 2 and expectancy_pct < 0:
-                    new_atr_mult = round(min(2.50, max(curr_atr_mult, curr_atr_mult + 0.15)), 2)
+                    new_atr_mult = round(max(curr_atr_mult, min(2.50, curr_atr_mult + 0.15)), 2)  # never narrows
                     adjustment_reasons.append(f"Multiple stop-outs detected: Widened ATR stop multiplier to {new_atr_mult}x for volatility buffer.")
 
                 # E. Committee Weights Tuning (Emphasize Risk on Drawdowns)
                 if consecutive_losses >= 3 and expectancy_pct < 0:
-                    w_risk = min(0.30, w_risk + 0.05)
-                    w_tech = max(0.25, w_tech - 0.05)
+                    w_risk = max(w_risk, min(0.30, w_risk + 0.05))  # never lowers risk or raises technical
+                    w_tech = min(w_tech, max(0.25, w_tech - 0.05))
                     w_tech, w_fund, w_sent, w_risk = _normalise_weights(w_tech, w_fund, w_sent, w_risk)
                     adjustment_reasons.append(f"Defensive regime: Increased Risk Manager weighting to {int(w_risk*100)}% (Technical {int(w_tech*100)}%).")
 

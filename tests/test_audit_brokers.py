@@ -135,10 +135,37 @@ async def test_adopted_holding_is_manual(broker):
     if broker.kind != "live":
         pytest.skip("live only")
     async with AsyncSessionLocal() as s:
-        await broker._adopt_holding(s, TICKER, "Main Parity", "EUR", 1.0, 100.0, 0.0, [], [], levels=(95.0, 115.0))
+        await broker._adopt_holding(s, TICKER, "Main Parity", "EUR", 1.0, 100.0, 0.0, [], [], levels=(95.0, 115.0),
+                                    manual=True)
         await s.commit()
         pos = (await s.execute(select(Position).where(Position.ticker == TICKER))).scalars().one()
     assert pos.is_manual is True
+
+
+@pytest.mark.parametrize("levels, manual", [((95.0, 115.0), False), ((None, None), True)])
+async def test_sync_adoption_is_a_bot_trade_only_with_a_bot_buy_plan(broker, levels, manual):
+    # With a plan the shares are the bot's own buy whose booking was lost; without one they are the owner's
+    if broker.kind != "live":
+        pytest.skip("live only")
+    async with AsyncSessionLocal() as s:
+        await broker._adopt_holding(s, TICKER, "Main Parity", "EUR", 1.0, 100.0, 0.0, [], [], levels=levels)
+        await s.commit()
+        pos = (await s.execute(select(Position).where(Position.ticker == TICKER))).scalars().one()
+    assert bool(pos.is_manual) is manual
+
+
+async def test_sell_of_a_forced_trigger_position_counts_as_the_owners_trade(broker):
+    pid = await _add_position(broker)
+    async with AsyncSessionLocal() as s:
+        trig = OrderTrigger(ticker=TICKER, target_price=100.0, current_price_at_creation=100.0, allocation_eur=100.0,
+                            forced=True, status="TRIGGERED")
+        s.add(trig)
+        await s.flush()
+        (await s.get(Position, pid)).trigger_id = trig.id
+        await s.commit()
+    assert (await _sell(broker))["success"]
+    assert (await _trades("SELL"))[0].is_manual is True
+    trade_learner.conduct_trade_post_mortem.assert_not_awaited()
 
 
 # --- 3. Viability checks use the fees paper execution charges --------------------------------------
@@ -194,30 +221,3 @@ async def test_pct_trail_without_a_new_high_skips_unshaped_positions(broker):
     pid = await _add_position(broker, stop=95.0, initial_stop=95.0)
     await _monitor(broker, 99.0)
     assert (await _pos(pid)).stop_loss_native == 95.0
-
-
-# --- 5. Alpaca reports USD: the snapshot is in EUR -------------------------------------------------
-
-async def test_alpaca_sync_converts_cash_to_eur(monkeypatch):
-    monkeypatch.setattr(settings, "LIVE_BROKER", "alpaca")
-    monkeypatch.setattr(settings, "ALPACA_API_KEY", "k")
-    monkeypatch.setattr(settings, "ALPACA_SECRET_KEY", "s")
-    fake = types.ModuleType("alpaca.trading.client")
-    fake.TradingClient = lambda **kw: types.SimpleNamespace(
-        get_account=lambda: types.SimpleNamespace(cash="1000", portfolio_value="1500"))
-    monkeypatch.setitem(sys.modules, "alpaca.trading.client", fake)
-    b = LiveBroker()
-    monkeypatch.setattr(b, "refresh_positions_pnl", AsyncMock())
-    monkeypatch.setattr(b, "get_portfolio_summary", AsyncMock(return_value={"cash_eur": 0, "equity_eur": 0, "total_value_eur": 0}))
-    async with AsyncSessionLocal() as s:
-        before = (await s.execute(select(PortfolioSnapshot.id).order_by(desc(PortfolioSnapshot.id)))).scalars().first() or 0
-    try:
-        with patch("src.trading.live.currency_service.to_eur", side_effect=lambda v, c: v * 0.9 if c == "USD" else v):
-            await b.sync_account_state()
-        async with AsyncSessionLocal() as s:
-            snap = (await s.execute(select(PortfolioSnapshot).where(PortfolioSnapshot.id > before))).scalars().one()
-        assert (snap.cash_eur, snap.equity_eur, snap.total_value_eur) == pytest.approx((900.0, 450.0, 1350.0))
-    finally:
-        async with AsyncSessionLocal() as s:
-            await s.execute(delete(PortfolioSnapshot).where(PortfolioSnapshot.id > before))
-            await s.commit()

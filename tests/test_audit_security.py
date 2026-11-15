@@ -173,12 +173,18 @@ def test_configured_and_cors_hosts_allowed(monkeypatch):
     assert c.get("/api/ping", headers={"Host": "dash.example.org"}).status_code == 200
 
 
-def test_host_check_also_applies_with_password(monkeypatch):
+def test_password_setup_serves_any_host_name(monkeypatch):
+    # A remote setup behind its own domain must keep working; a rebound page has no credentials to send
     monkeypatch.setattr(settings, "WEB_PASSWORD", "s3cret")
     good = base64.b64encode(b"admin:s3cret").decode()
-    r = TestClient(_app(), client=LAN).get(
-        "/api/ping", headers={"Host": "evil.example", "Authorization": f"Basic {good}"})
-    assert r.status_code == 400
+    c = TestClient(_app(), client=LAN)
+    assert c.get("/api/ping", headers={"Host": "bot.example.com", "Authorization": f"Basic {good}"}).status_code == 200
+    assert c.get("/api/ping", headers={"Host": "bot.example.com"}).status_code == 401
+
+
+def test_allowed_host_entry_may_carry_a_port(monkeypatch):
+    monkeypatch.setattr(settings, "WEB_ALLOWED_HOSTS", "bot.example.com:8000")
+    assert TestClient(_app(), client=LAN).get("/api/ping", headers={"Host": "bot.example.com:8000"}).status_code == 200
 
 
 # --- 3: score thresholds are bounded ---

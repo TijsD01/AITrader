@@ -189,3 +189,17 @@ async def test_manual_trades_stay_out_of_calibration(audit_db):
     res = await _calibrate_by_rules()
     assert res["success"] is True
     assert (res["win_count"], res["loss_count"], res["consecutive_losses"]) == (20, 0, 0)
+
+
+async def test_rule_calibration_never_lowers_risk_weight_or_narrows_the_stop(audit_db):
+    await _add_sells([-1.0] * 20)
+    await _set_rows(WEIGHT_TECHNICAL="0.20", WEIGHT_FUNDAMENTAL="0.25", WEIGHT_SENTIMENT="0.15", WEIGHT_RISK="0.40",
+                    ATR_STOP_MULTIPLIER="2.70")
+    p = (await _calibrate_by_rules())["calibrated_parameters"]
+    assert p["ATR_STOP_MULTIPLIER"] == 2.7
+    assert p["WEIGHT_RISK"] >= 0.40 and p["WEIGHT_TECHNICAL"] <= 0.20
+
+
+def test_weight_pushed_past_its_range_by_normalising_still_moves():
+    from src.trading.learner import _step
+    assert _step(max(0.05, min(0.25, 0.27)), 0.10, 0.05, 0.25) < 0.25

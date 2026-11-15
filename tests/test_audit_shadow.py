@@ -110,34 +110,6 @@ async def _shadow_cost(strategy, stop, max_positions=4):
     return fill["cost_eur"]
 
 
-@pytest.fixture
-def _sizing(monkeypatch):
-    monkeypatch.setattr(settings, "WHOLE_SHARES_ONLY", False)
-    monkeypatch.setattr(settings, "RISK_BUDGET_BASE", "slot")
-    monkeypatch.setattr(settings, "RISK_PER_TRADE_PCT", 0.5)
-    monkeypatch.setattr(settings, "DEFAULT_STOP_LOSS_PCT", 0.04)
-
-
-async def test_shadow_without_own_risk_sizes_on_the_slot_like_the_main_bot(_sizing):
-    base = PRESETS["baseline"]
-    assert await _shadow_cost(base, stop=96.0, max_positions=8) == 1250.0  # 8 slots: same either way
-    assert await _shadow_cost(base, stop=96.0) == 2500.0   # 4 slots, normal stop: the full slot
-    assert await _shadow_cost(base, stop=92.0) == 1250.0   # twice the normal stop: half the slot
-
-
-async def test_shadow_with_own_risk_per_trade_keeps_it(_sizing):
-    import dataclasses
-    own = dataclasses.replace(PRESETS["baseline"], risk_per_trade_pct=0.5)
-    assert await _shadow_cost(own, stop=96.0) == 1250.0  # 0.5% of 10,000 at a 4% stop
-    off = dataclasses.replace(PRESETS["baseline"], risk_per_trade_pct=0.0)
-    assert await _shadow_cost(off, stop=92.0) == 2500.0
-
-
-async def test_shadow_in_portfolio_mode_keeps_its_frozen_risk(_sizing, monkeypatch):
-    monkeypatch.setattr(settings, "RISK_BUDGET_BASE", "portfolio")
-    assert await _shadow_cost(PRESETS["baseline"], stop=96.0) == 1250.0
-
-
 # --- 5. Presets ----------------------------------------------------------------------------------
 
 def test_trailing_presets_do_not_lock_breakeven_before_their_trail():

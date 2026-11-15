@@ -387,6 +387,9 @@ class PaperBroker(BaseBroker):
             pos.fees_eur = total_fees_eur
 
             # Record Trade
+            # A trigger the owner forced past the committee's verdict is the owner's decision, like a manual buy
+            owner_trade = bool(pos.is_manual) or bool(
+                pos.trigger_id and getattr(await session.get(OrderTrigger, pos.trigger_id), "forced", False))
             trade = Trade(
                 ticker=ticker.upper(),
                 name=pos.name,
@@ -401,7 +404,7 @@ class PaperBroker(BaseBroker):
                 realized_pnl_pct=realized_pnl_pct,
                 rationale=f"{reason} (Total Fees: €{total_fees_eur:.2f})",
                 is_live=False,
-                is_manual=bool(pos.is_manual),
+                is_manual=owner_trade,
                 executed_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
             )
             session.add(trade)
@@ -458,7 +461,7 @@ class PaperBroker(BaseBroker):
             adjustments = []
             try:
                 # Manual positions are not the bot's decisions, so they teach it nothing
-                if not pos.is_manual:
+                if not owner_trade:
                     from src.trading.learner import trade_learner
                     post_mortem = await trade_learner.conduct_trade_post_mortem(trade.id)
                     lesson_text = post_mortem.get("lesson") if post_mortem else None

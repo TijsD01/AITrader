@@ -1113,6 +1113,9 @@ class LiveBroker(BaseBroker):
             pos.current_price_eur = exit_price_eur
             pos.fees_eur = total_fees_eur
 
+            # A trigger the owner forced past the committee's verdict is the owner's decision, like a manual buy
+            owner_trade = bool(pos.is_manual) or bool(
+                pos.trigger_id and getattr(await session.get(OrderTrigger, pos.trigger_id), "forced", False))
             trade = Trade(
                 ticker=ticker.upper(),
                 name=pos.name,
@@ -1127,7 +1130,7 @@ class LiveBroker(BaseBroker):
                 realized_pnl_pct=realized_pnl_pct,
                 rationale=f"[LIVE {settings.LIVE_BROKER.upper()}] {reason} (Total Fees: €{total_fees_eur:.2f})",
                 is_live=True,
-                is_manual=bool(pos.is_manual),
+                is_manual=owner_trade,
                 broker_order_id=broker_order_id,
                 executed_at=utc_now
             )
@@ -1182,7 +1185,7 @@ class LiveBroker(BaseBroker):
                 pass
             # Own task: the learner calls an LLM and must not hold _t212_lock (the sync books exits under it).
             # Manual and adopted positions are not the bot's decisions, so they teach it nothing.
-            if not pos.is_manual:
+            if not owner_trade:
                 learn = asyncio.create_task(self._learn_from_close(trade.id))
                 self._learner_tasks.add(learn)
                 learn.add_done_callback(self._learner_tasks.discard)
@@ -1557,7 +1560,7 @@ class LiveBroker(BaseBroker):
                 stops_to_place: List[tuple] = []
                 await self._adopt_holding(session, row.ticker, row.name, row.currency, float(bp["quantity"]),
                                           float(bp["averagePricePaid"]), 0.0, adopted, stops_to_place,
-                                          levels=(sl, tp), current_native=current)
+                                          levels=(sl, tp), current_native=current, manual=True)
                 await session.commit()
             await self._finish_sync("Trading 212", [], stops_to_place, adopted)
         dp = 2 if current >= 1 else 4
@@ -2205,6 +2208,7 @@ class LiveBroker(BaseBroker):
         self, session, ticker: str, name: str, curr_code: str, shares: float, cost_native: float, fees_eur: float,
         adopted: List[str], stops_to_place: List[tuple], pending_only: bool = False,
         levels: Optional[Tuple[float, float]] = None, current_native: Optional[float] = None,
+        manual: bool = False,
     ) -> None:
         """
         Books a broker holding the bot never recorded. Stop/target: levels when given, else the bot buy plan's;
@@ -2230,7 +2234,8 @@ class LiveBroker(BaseBroker):
             fees_eur=round(fees_eur, 2),
             status="OPEN",
             is_live=True,
-            is_manual=True  # shares the bot did not buy: kept out of learner stats
+            # The owner's shares stay out of learner stats; with a bot buy plan it is the bot's own buy, booked late
+            is_manual=manual or not sl
         ))
         if sl:
             adopted.append(f"{shares:g} {ticker} @ {cost_native:.2f} {curr_code} | SL {sl} | TP {tp}")
@@ -2412,9 +2417,8 @@ class LiveBroker(BaseBroker):
                         paper=not settings.LIVE_TRADING_ENABLED
                     )
                     acct = client.get_account()
-                    # Alpaca accounts are in USD; snapshots are in EUR
-                    alpaca_cash = currency_service.to_eur(float(acct.cash), "USD")
-                    alpaca_portfolio = currency_service.to_eur(float(acct.portfolio_value), "USD")
+                    alpaca_cash = float(acct.cash)
+                    alpaca_portfolio = float(acct.portfolio_value)
                     async with AsyncSessionLocal() as session:
                         snapshot = PortfolioSnapshot(
                             cash_eur=alpaca_cash,
