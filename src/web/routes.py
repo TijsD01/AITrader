@@ -542,10 +542,13 @@ async def get_settings():
 async def update_settings(req: SettingsUpdateRequest, request: Request = None):
     # request is None only for in-process calls, which no network client can make
     arms_live = (req.trading_mode or "").strip().upper() == "LIVE" or bool(req.live_trading_enabled)
-    if arms_live and request is not None and needs_password(request):
+    # The Telegram chat can trade and the keys are credentials: changing them is as sensitive as arming
+    sets_credentials = any(v is not None for v in (req.telegram_bot_token, req.telegram_chat_id, req.gemini_api_key))
+    if (arms_live or sets_credentials) and request is not None and needs_password(request):
         raise HTTPException(
             status_code=403,
-            detail="Set WEB_PASSWORD to arm live trading from another device; without it only this machine itself can.",
+            detail="Set WEB_PASSWORD to arm live trading or change keys and the Telegram chat from another device; "
+                   "without it only this machine itself can.",
         )
     env_updates: Dict[str, Any] = {}
     was_live = get_active_broker() is live_broker

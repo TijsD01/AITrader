@@ -199,3 +199,20 @@ def test_score_settings_out_of_range_rejected(field, value, monkeypatch):
 def test_score_settings_bounds_accepted(value):
     for field in ("min_consensus_score", "trigger_min_score"):
         assert routes.SettingsUpdateRequest(**{field: value})
+
+
+@pytest.mark.parametrize("payload", [{"telegram_chat_id": "666"}, {"telegram_bot_token": "x"}, {"gemini_api_key": "x"}])
+def test_lan_client_without_password_cannot_change_credentials_or_telegram_chat(payload, monkeypatch):
+    monkeypatch.setattr(settings, "WEB_PASSWORD", None)
+    before = settings.TELEGRAM_CHAT_ID
+    r = TestClient(_settings_app(), client=LAN).post("/api/settings", json=payload)
+    assert r.status_code == 403 and "WEB_PASSWORD" in r.text
+    assert settings.TELEGRAM_CHAT_ID == before
+
+
+def test_forwarded_loopback_request_is_not_trusted_to_arm_live(monkeypatch):
+    monkeypatch.setattr(settings, "WEB_PASSWORD", None)
+    r = TestClient(_settings_app(), client=LOOPBACK).post(
+        "/api/settings", json={"trading_mode": "LIVE"}, headers={"X-Forwarded-For": "203.0.113.9"})
+    assert r.status_code == 403
+    assert settings.TRADING_MODE == "PAPER"

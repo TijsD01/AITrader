@@ -44,7 +44,10 @@ def _is_loopback_client(host: Optional[str]) -> bool:
 
 def needs_password(request: Request) -> bool:
     """True for a client that has not proven who it is: no WEB_PASSWORD is set and it is not this machine."""
-    return not settings.WEB_PASSWORD and not _is_loopback_client(request.client.host if request.client else None)
+    # A proxy on this machine makes every remote client look like loopback, so a forwarded request is never trusted
+    forwarded = "x-forwarded-for" in request.headers or "forwarded" in request.headers
+    local = not forwarded and _is_loopback_client(request.client.host if request.client else None)
+    return not settings.WEB_PASSWORD and not local
 
 
 def _live_armed() -> bool:
