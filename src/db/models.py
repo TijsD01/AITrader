@@ -52,6 +52,7 @@ class Position(Base):
     trigger_id = Column(Integer, nullable=True)  # OrderTrigger that opened this position (NULL = manual/direct buy)
     rules_version = Column(Integer, nullable=True)  # MAIN_RULES_VERSION in force when the position opened
     initial_stop_native = Column(Float, nullable=True)  # Stop the position opened with, before any ratchet (NULL = older rows)
+    is_manual = Column(Boolean, default=False)  # Bought by hand or adopted from the owner: kept out of learner stats
     opened_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
@@ -94,6 +95,7 @@ class Trade(Base):
     consensus_score = Column(Integer, nullable=True)
     is_live = Column(Boolean, default=False)
     broker_order_id = Column(String(100), nullable=True)
+    is_manual = Column(Boolean, default=False)  # Copied from the position: manual and adopted trades stay out of learner stats
     executed_at = Column(DateTime, default=datetime.datetime.utcnow)
 
 class PortfolioSnapshot(Base):
