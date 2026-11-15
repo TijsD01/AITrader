@@ -1,5 +1,6 @@
 import logging
 import datetime
+import math
 from typing import Dict, Any, Optional
 from sqlalchemy import select, desc, func
 
@@ -16,15 +17,26 @@ MAIN_STEP_SHARE = STRENGTH_SHARE[2]
 
 
 def _step(old: float, proposed, lo: float, hi: float) -> float:
-    """Clamp proposed into [lo, hi] and move at most MAIN_STEP_SHARE of the range away from old (itself clamped first)."""
-    old = max(lo, min(hi, old))
+    """Clamp proposed into [lo, hi] and move at most MAIN_STEP_SHARE of the range away from old."""
+    proposed = float(proposed)
+    # An old value outside the range was set by a human or a promote: leave it. NaN/inf is a broken LLM answer.
+    if not lo <= old <= hi or not math.isfinite(proposed):
+        return old
     cap = MAIN_STEP_SHARE * (hi - lo)
-    return max(lo, min(hi, old + max(-cap, min(cap, float(proposed) - old))))
+    return max(lo, min(hi, old + max(-cap, min(cap, proposed - old))))
+
+
+def _normalise_weights(w_tech: float, w_fund: float, w_sent: float, w_risk: float):
+    """Scale the four committee weights to sum to 1; risk takes the rounding remainder."""
+    total_w = w_tech + w_fund + w_sent + w_risk
+    w_tech = round(w_tech / total_w, 2)
+    w_fund = round(w_fund / total_w, 2)
+    w_sent = round(w_sent / total_w, 2)
+    return w_tech, w_fund, w_sent, round(1.0 - (w_tech + w_fund + w_sent), 2)
 
 
 def _int_step(old: int, proposed, lo: int, hi: int) -> int:
     """_step for integer scores: truncates toward old so the move never exceeds the cap."""
-    old = max(lo, min(hi, old))
     return old + int(_step(old, proposed, lo, hi) - old)
 
 PAUSED_MESSAGE = "Auto-calibration is paused while promoted shadow rules are active."
@@ -77,7 +89,7 @@ class TradeLearner:
 
             # 2. Fetch corresponding position and buy history
             # Only the position opened before this sell: a later re-entry of the same ticker is a different trade
-            pos_query = select(Position).where(Position.ticker == ticker)
+            pos_query = select(Position).where(Position.ticker == ticker, Position.is_live == trade.is_live)
             if trade.executed_at:
                 pos_query = pos_query.where(Position.opened_at <= trade.executed_at)
             pos_res = await session.execute(pos_query.order_by(desc(Position.opened_at)))
@@ -251,6 +263,8 @@ class TradeLearner:
         """
         # Calibrate on the active mode's trades only: paper fills would tune the live bot on simulated prices
         live = settings.TRADING_MODE.upper() == "LIVE" and settings.LIVE_TRADING_ENABLED
+        # Manual buys and adopted holdings were not the bot's decisions (is_manual is NULL on old rows)
+        calibration_trades = (Trade.order_type == "SELL", Trade.is_live == live, Trade.is_manual.isnot(True))
         if automatic and await _main_learner_paused():
             logger.info(PAUSED_MESSAGE)
             return {"success": False, "skipped": True, "message": PAUSED_MESSAGE, "adjustments": []}
@@ -258,7 +272,7 @@ class TradeLearner:
             if automatic and settings.LEARNER_MIN_TRADES > 1:
                 last_res = await session.execute(select(SystemConfig).where(SystemConfig.key == "LAST_CALIBRATION_TIMESTAMP"))
                 last_row = last_res.scalars().first()
-                since_query = select(func.count(Trade.id)).where(Trade.order_type == "SELL", Trade.is_live == live)
+                since_query = select(func.count(Trade.id)).where(*calibration_trades)
                 if last_row and last_row.value:
                     try:
                         since_query = since_query.where(Trade.executed_at > datetime.datetime.fromisoformat(last_row.value))
@@ -272,7 +286,7 @@ class TradeLearner:
 
             # 1. Fetch recent closed trades and lessons (last 20)
             res = await session.execute(
-                select(Trade).where(Trade.order_type == "SELL", Trade.is_live == live).order_by(desc(Trade.executed_at)).limit(20)
+                select(Trade).where(*calibration_trades).order_by(desc(Trade.executed_at)).limit(20)
             )
             closed_trades = res.scalars().all()
             if not closed_trades:
@@ -306,7 +320,7 @@ class TradeLearner:
             # Fetch target trade or latest trade
             target_trade = None
             if trade_id:
-                t_res = await session.execute(select(Trade).where(Trade.id == trade_id))
+                t_res = await session.execute(select(Trade).where(Trade.id == trade_id, *calibration_trades))
                 target_trade = t_res.scalars().first()
             if not target_trade:
                 target_trade = closed_trades[0]
@@ -318,7 +332,8 @@ class TradeLearner:
             latest_lesson = lesson_res.scalars().first()
             if not latest_lesson:
                 fallback_lesson_res = await session.execute(
-                    select(TradeLesson).order_by(desc(TradeLesson.created_at)).limit(1)
+                    select(TradeLesson).join(Trade, Trade.id == TradeLesson.trade_id).where(*calibration_trades)
+                    .order_by(desc(TradeLesson.created_at)).limit(1)
                 )
                 latest_lesson = fallback_lesson_res.scalars().first()
 
@@ -335,6 +350,11 @@ class TradeLearner:
             curr_w_fund = float(configs.get("WEIGHT_FUNDAMENTAL", "0.30"))
             curr_w_sent = float(configs.get("WEIGHT_SENTIMENT", "0.15"))
             curr_w_risk = float(configs.get("WEIGHT_RISK", "0.20"))
+
+            # No automatic path moves a score below its code default: loosening adds real-money entries
+            fields = type(settings).model_fields
+            min_score_floor = min(curr_min_score, fields["MIN_CONSENSUS_SCORE"].default)
+            trig_score_floor = min(curr_trig_score, fields["TRIGGER_MIN_SCORE"].default)
 
             adjustment_reasons = []
             calibrated_params = {}
@@ -372,8 +392,8 @@ Recent Portfolio Performance:
 - Consecutive Losses: {consecutive_losses}
 
 Current Active Parameters:
-- MIN_CONSENSUS_SCORE: {curr_min_score} (Allowed range: 68 - 85)
-- TRIGGER_MIN_SCORE: {curr_trig_score} (Allowed range: 72 - 88)
+- MIN_CONSENSUS_SCORE: {curr_min_score} (Allowed range: {max(68, min_score_floor)} - 85)
+- TRIGGER_MIN_SCORE: {curr_trig_score} (Allowed range: {max(72, trig_score_floor)} - 88)
 - ATR_STOP_MULTIPLIER: {curr_atr_mult} (Allowed range: 1.75 - 2.75)
 - TAKE_PROFIT_RR: {curr_tp_rr} (Allowed range: 1.5 - 3.0)
 - BREAKEVEN_TRIGGER_PCT: {curr_be_pct} (Allowed range: 0.015 - 0.05)
@@ -405,8 +425,9 @@ Return valid JSON with exactly these keys:
                 try:
                     llm_res = await llm_client.generate_json(system_prompt, user_prompt)
                     if llm_res and isinstance(llm_res, dict) and "adjustment_reasons" in llm_res:
-                        new_min_score = _int_step(curr_min_score, int(llm_res.get("MIN_CONSENSUS_SCORE", curr_min_score)), 68, 85)
-                        new_trig_score = _int_step(curr_trig_score, int(llm_res.get("TRIGGER_MIN_SCORE", curr_trig_score)), 72, 88)
+                        # Floored after the step, not by a narrower range: 10% of 80-88 truncates to no move at all
+                        new_min_score = max(min_score_floor, _int_step(curr_min_score, llm_res.get("MIN_CONSENSUS_SCORE", curr_min_score), 68, 85))
+                        new_trig_score = max(trig_score_floor, _int_step(curr_trig_score, llm_res.get("TRIGGER_MIN_SCORE", curr_trig_score), 72, 88))
                         new_atr_mult = round(_step(curr_atr_mult, llm_res.get("ATR_STOP_MULTIPLIER", curr_atr_mult), 1.75, 2.75), 2)
                         new_tp_rr = round(_step(curr_tp_rr, llm_res.get("TAKE_PROFIT_RR", curr_tp_rr), 1.5, 3.0), 2)
                         new_be_pct = round(_step(curr_be_pct, llm_res.get("BREAKEVEN_TRIGGER_PCT", curr_be_pct), 0.015, 0.05), 3)
@@ -416,11 +437,7 @@ Return valid JSON with exactly these keys:
                         w_fund = _step(curr_w_fund, llm_res.get("WEIGHT_FUNDAMENTAL", curr_w_fund), 0.05, 0.50)
                         w_sent = _step(curr_w_sent, llm_res.get("WEIGHT_SENTIMENT", curr_w_sent), 0.05, 0.25)
                         w_risk = _step(curr_w_risk, llm_res.get("WEIGHT_RISK", curr_w_risk), 0.10, 0.50)
-                        total_w = w_tech + w_fund + w_sent + w_risk
-                        w_tech = round(w_tech / total_w, 2)
-                        w_fund = round(w_fund / total_w, 2)
-                        w_sent = round(w_sent / total_w, 2)
-                        w_risk = round(1.0 - (w_tech + w_fund + w_sent), 2)
+                        w_tech, w_fund, w_sent, w_risk = _normalise_weights(w_tech, w_fund, w_sent, w_risk)
 
                         calibrated_params = {
                             "min_consensus_score": new_min_score,
@@ -460,30 +477,35 @@ Return valid JSON with exactly these keys:
                 w_tech, w_fund, w_sent, w_risk = curr_w_tech, curr_w_fund, curr_w_sent, curr_w_risk
 
                 # A. Conviction Threshold Adjustment
-                if settings.SCORE_AUTO_TUNE and (consecutive_losses >= 2 or win_rate < 0.40):
-                    new_min_score = max(curr_min_score, min(82, max(78, curr_min_score + 1)))  # never loosens
-                    new_trig_score = max(curr_trig_score, min(84, max(80, curr_trig_score + 1)))
-                    adjustment_reasons.append(f"Losing streak ({consecutive_losses} consecutive): Raised min consensus score to {new_min_score} and trigger score to {new_trig_score} for higher selectivity.")
+                if settings.SCORE_AUTO_TUNE and (consecutive_losses >= 2 or win_rate < 0.40) and expectancy_pct < 0:
+                    # One point per calibration up to 82 / 84; a score already above that is never lowered
+                    new_min_score = max(curr_min_score, min(82, curr_min_score + 1))
+                    new_trig_score = max(curr_trig_score, min(84, curr_trig_score + 1))
+                    adjustment_reasons.append(
+                        f"Losing window ({consecutive_losses} consecutive losses, win rate {win_rate*100:.1f}%, "
+                        f"expectancy {expectancy_pct:+.2f}%/trade): "
+                        f"min consensus score {curr_min_score} -> {new_min_score}, trigger score {curr_trig_score} -> {new_trig_score}.")
                 elif (settings.SCORE_AUTO_TUNE and win_rate >= 0.70 and expectancy_pct > 0
                       and consecutive_losses == 0 and total_trades >= 5):
-                    # Loosen one point at a time and never below the code default: loosening adds real-money entries
-                    fields = type(settings).model_fields
-                    new_min_score = max(min(curr_min_score, fields["MIN_CONSENSUS_SCORE"].default), curr_min_score - 1)
-                    new_trig_score = max(min(curr_trig_score, fields["TRIGGER_MIN_SCORE"].default), curr_trig_score - 1)
+                    # Loosen one point at a time
+                    new_min_score = max(min_score_floor, curr_min_score - 1)
+                    new_trig_score = max(trig_score_floor, curr_trig_score - 1)
                     adjustment_reasons.append(
                         f"High win rate ({win_rate*100:.1f}%) with positive expectancy ({expectancy_pct:+.2f}%/trade): "
                         f"min consensus score {curr_min_score} -> {new_min_score}, trigger score {curr_trig_score} -> {new_trig_score}.")
 
                 # C. Stop Loss ATR Multiplier & Slippage Adjustment
                 recent_stop_outs = [t for t in losses[:5] if "stop" in (t.rationale or "").lower()]
-                if len(recent_stop_outs) >= 2:
+                # Losers nearly always exit by a stop, so stop-outs alone say nothing: widen only when the window loses money
+                if len(recent_stop_outs) >= 2 and expectancy_pct < 0:
                     new_atr_mult = round(min(2.50, max(curr_atr_mult, curr_atr_mult + 0.15)), 2)
                     adjustment_reasons.append(f"Multiple stop-outs detected: Widened ATR stop multiplier to {new_atr_mult}x for volatility buffer.")
 
                 # E. Committee Weights Tuning (Emphasize Risk on Drawdowns)
-                if consecutive_losses >= 3:
-                    w_risk = round(min(0.30, w_risk + 0.05), 2)
-                    w_tech = round(max(0.25, w_tech - 0.05), 2)
+                if consecutive_losses >= 3 and expectancy_pct < 0:
+                    w_risk = min(0.30, w_risk + 0.05)
+                    w_tech = max(0.25, w_tech - 0.05)
+                    w_tech, w_fund, w_sent, w_risk = _normalise_weights(w_tech, w_fund, w_sent, w_risk)
                     adjustment_reasons.append(f"Defensive regime: Increased Risk Manager weighting to {int(w_risk*100)}% (Technical {int(w_tech*100)}%).")
 
                 calibrated_params = {
