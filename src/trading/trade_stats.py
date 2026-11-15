@@ -8,6 +8,7 @@ from typing import Optional
 
 from sqlalchemy import select
 
+from config.settings import settings
 from src.db import session as db_session
 from src.db.models import OrderTrigger, Position, Trade
 
@@ -69,18 +70,21 @@ def summarize_r(rows: list[tuple[str, float, float, float]], min_n: int = MIN_N)
 
 async def track_record_block() -> str:
     """Header, the All-trades line from SELL trades and one R line per entry type from closed triggered positions."""
+    # Same mode test as the learner: paper results are not the live bot's record, and the reverse
+    live = settings.TRADING_MODE.upper() == "LIVE" and settings.LIVE_TRADING_ENABLED
     # Read AsyncSessionLocal at call time so tests' rebinding to the test DB applies
     async with db_session.AsyncSessionLocal() as session:
         pcts = (await session.execute(
             select(Trade.realized_pnl_pct)
-            .where(Trade.order_type == "SELL", Trade.realized_pnl_pct.is_not(None))
+            .where(Trade.order_type == "SELL", Trade.realized_pnl_pct.is_not(None),
+                   Trade.is_live == live, Trade.is_manual.isnot(True))
             .order_by(Trade.id)
         )).scalars().all()
         r_rows = (await session.execute(
             select(OrderTrigger.trigger_type, Position.entry_price_native,
                    Position.current_price_native, OrderTrigger.stop_loss)
             .join(OrderTrigger, OrderTrigger.id == Position.trigger_id)
-            .where(Position.status == "CLOSED")
+            .where(Position.status == "CLOSED", Position.is_live == live, Position.is_manual.isnot(True))
             .order_by(Position.id)
         )).all()
     lines = [HEADER, summarize_pct(list(pcts))]

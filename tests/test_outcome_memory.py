@@ -174,7 +174,8 @@ async def test_paper_sell_records_main_paper_outcome():
     async with AsyncSessionLocal() as session:
         trade = (await session.execute(select(Trade).where(Trade.ticker == "OUTP.AS", Trade.order_type == "SELL")
                                        .order_by(desc(Trade.id)))).scalars().first()
-    assert o["ref_id"] == trade.id
+    # The ref carries the execution time so a trading-DB reset cannot reuse it
+    assert o["ref_id"] == f"{trade.id}:{trade.executed_at.isoformat()}"
 
 
 async def test_paper_sell_survives_record_failure():
