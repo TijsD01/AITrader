@@ -45,8 +45,9 @@ _LIST = [
     _num("trailing_stop_pct", "Trailing stop", "float", 0.02, 0.20, 0.01, True),
     _num("max_positions", "Max positions", "int", 1, 20, 1, True),
     _num("max_hold_days", "Max hold days", "int", 1, 120, 1, True),
-    _num("risk_per_trade_pct", "Risk per trade %", "float", 0.0, 3.0, 0.1, True),
-    _num("trailing_atr_mult", "Trailing ATR multiple", "float", 0.0, 6.0, 0.25, True),
+    # 0 = feature off: only a human may switch these off, the learner stops one notch above
+    _num("risk_per_trade_pct", "Risk per trade %", "float", 0.0, 3.0, 0.1, True, learn_min=0.1),
+    _num("trailing_atr_mult", "Trailing ATR multiple", "float", 0.0, 6.0, 0.25, True, learn_min=0.5),
     _flag("regime_filter", "Regime filter", nullable=True),
 ]
 SPECS: Dict[str, ParamSpec] = {s.name: s for s in _LIST}
@@ -101,7 +102,8 @@ def validate(params: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def clamp_step(name: str, old, proposed, strength: int):
-    """Limit a learner's proposed change: max move is STRENGTH_SHARE x range, clamped, snapped to step toward old."""
+    """Limit a learner's proposed change: max move is STRENGTH_SHARE x range (at least one step), clamped,
+    snapped to step toward old. A boolean flips only at the highest strength."""
     spec = SPECS[name]
     if old is None:
         return None
@@ -109,7 +111,7 @@ def clamp_step(name: str, old, proposed, strength: int):
     if not spec.learnable or share is None:
         return old
     if spec.kind == "bool":
-        return proposed if isinstance(proposed, bool) else old
+        return proposed if isinstance(proposed, bool) and strength >= 3 else old
     if spec.kind == "choice":
         return proposed if proposed in spec.choices else old
     if not _is_num(proposed) or not _finite(proposed):
@@ -118,7 +120,7 @@ def clamp_step(name: str, old, proposed, strength: int):
     hi = spec.max if spec.learn_max is None else spec.learn_max
     if _is_num(old) and not lo <= old <= hi:
         return old  # a human set it outside the learnable range; never move it
-    cap = share * (hi - lo)
+    cap = max(share * (hi - lo), spec.step)  # a cap below one grid step would pin the parameter
     delta = max(-cap, min(cap, proposed - old))
     new = max(lo, min(hi, old + delta))
     k = (new - lo) / spec.step

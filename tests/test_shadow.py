@@ -331,6 +331,7 @@ async def test_whole_shares_atr_trail_and_regime_filter(shadows, monkeypatch):
     monkeypatch.setattr(settings, "SHADOW_CUSTOM_STRATEGIES",
                         '{"tight": {"base": "baseline", "regime_filter": true, "trailing_atr_mult": 1.0}}')
     monkeypatch.setattr(settings, "WHOLE_SHARES_ONLY", True)
+    monkeypatch.setattr(settings, "MAX_POSITIONS", 8)  # the risk cap is slot-based: pin the slot count
     monkeypatch.setattr(settings, "RISK_PER_TRADE_PCT", 0.5)
     monkeypatch.setattr(settings, "TRAILING_STOP_ATR_MULT", 2.5)
     monkeypatch.setattr(settings, "REGIME_FILTER_ENABLED", False)
@@ -344,7 +345,7 @@ async def test_whole_shares_atr_trail_and_regime_filter(shadows, monkeypatch):
     prices["SHK.AS"] = 94.0
     filled = await shadow_portfolios.check_triggers()
     assert [f["strategy"] for f in filled] == ["baseline"]
-    # €1,250 slot, capped at 0.5% risk: 10000 x 0.005 / (4 / 94) = €1,175 -> 12 whole shares
+    # €1,250 slot, sized for a 4% stop: 1250 x 0.04 / (4 / 94) = €1,175 -> 12 whole shares
     assert filled[0]["shares"] == 12.0
 
     # Past breakeven the stop trails at high - 2.5 x ATR (main bot's value)

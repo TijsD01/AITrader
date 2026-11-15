@@ -270,10 +270,26 @@ def _live_only(b):
         pytest.skip("broker stop orders exist on live only")
 
 
-async def test_live_breakeven_stop_above_price_stays_off_the_broker_and_sells(broker):
+def _stop_above_price(monkeypatch):
+    # The breakeven step now locks below the price that set it; force a stop above the price to keep the guard tested
+    monkeypatch.setattr(live_module, "compute_trailing_stop", lambda *a, **k: 101.0)
+
+
+async def test_live_breakeven_stop_below_price_goes_to_the_broker_and_does_not_sell(broker):
     _live_only(broker)
     v = await write_main_rules({"breakeven_r": 0.5}, promoted_from="test")
-    # Initial stop 98.5: trigger 0.5 x 1.5% = 0.75%, below the 1% breakeven step
+    # Initial stop 99: trigger 0.5 x 1% = 0.5%, so the lock is entry + 0.25%, below the price
+    pid = await _add_position(broker, rules_version=v, stop=99.0, initial_stop=99.0)
+    assert await _monitor(broker, 100.8, atr=None) == []
+    pos = await _pos(pid)
+    assert pos.stop_loss_native == 100.25 and pos.status == "OPEN"
+    broker._t212_move_stop.assert_awaited_once_with(TICKER, "EUR", 1.0, 100.25)
+
+
+async def test_live_breakeven_stop_above_price_stays_off_the_broker_and_sells(broker, monkeypatch):
+    _live_only(broker)
+    _stop_above_price(monkeypatch)
+    v = await write_main_rules({"breakeven_r": 0.5}, promoted_from="test")
     pid = await _add_position(broker, rules_version=v, stop=98.5, initial_stop=98.5)
     sold = await _monitor(broker, 100.8, atr=None)
     pos = await _pos(pid)
@@ -282,8 +298,9 @@ async def test_live_breakeven_stop_above_price_stays_off_the_broker_and_sells(br
     assert "Stop-Loss" in sold[0]["reason"] and pos.status == "CLOSED"
 
 
-async def test_live_breakeven_stop_above_price_with_failed_sell_keeps_the_old_broker_stop(broker):
+async def test_live_breakeven_stop_above_price_with_failed_sell_keeps_the_old_broker_stop(broker, monkeypatch):
     _live_only(broker)
+    _stop_above_price(monkeypatch)
     broker._dispatch_real_close.return_value = None
     v = await write_main_rules({"breakeven_r": 0.5}, promoted_from="test")
     pid = await _add_position(broker, rules_version=v, stop=98.5, initial_stop=98.5)
@@ -301,7 +318,7 @@ async def test_live_stop_below_price_still_moves_the_broker_stop_once(broker):
     broker._t212_move_stop.assert_awaited_once_with(TICKER, "EUR", 1.0, 101.0)
 
 
-async def test_live_default_position_with_tiny_breakeven_pct_keeps_stop_off_the_broker(broker):
+async def test_live_default_position_with_tiny_breakeven_pct_locks_below_the_price(broker):
     _live_only(broker)
     async with AsyncSessionLocal() as s:
         previous = await s.get(SystemConfig, "BREAKEVEN_TRIGGER_PCT")
@@ -310,10 +327,9 @@ async def test_live_default_position_with_tiny_breakeven_pct_keeps_stop_off_the_
         await s.commit()
     try:
         pid = await _add_position(broker)
-        sold = await _monitor(broker, 100.6, atr=None)
-        assert (await _pos(pid)).stop_loss_native == 101.0
-        broker._t212_move_stop.assert_not_awaited()
-        assert "Stop-Loss" in sold[0]["reason"]
+        assert await _monitor(broker, 100.6, atr=None) == []  # was: stop 101.0 above the price, sold at once
+        assert (await _pos(pid)).stop_loss_native == 100.25
+        broker._t212_move_stop.assert_awaited_once_with(TICKER, "EUR", 1.0, 100.25)
     finally:
         async with AsyncSessionLocal() as s:
             if previous is None:

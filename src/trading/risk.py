@@ -513,7 +513,8 @@ def compute_trailing_stop(
 ) -> Optional[float]:
     """
     Returns the ratcheted stop for a position; never lower than current_stop.
-    Once the high-water mark is breakeven_trigger_pct above entry, the stop moves to at least entry + 1%.
+    Once the high-water mark is breakeven_trigger_pct above entry, the stop moves to at least entry + 1%,
+    or entry + half the trigger when the trigger is below 2%, so the lock always sits below the price that set it.
     With atr_mult > 0 it then trails at highest_price - atr_mult x ATR, so winners can run
     while a reversal still locks in most of the gain.
     """
@@ -521,7 +522,7 @@ def compute_trailing_stop(
         return current_stop
     if (highest_price / entry_price) - 1.0 < breakeven_trigger_pct:
         return current_stop
-    candidate = entry_price * 1.01
+    candidate = entry_price * (1.0 + min(0.01, breakeven_trigger_pct / 2.0))
     mult = settings.TRAILING_STOP_ATR_MULT if atr_mult is None else atr_mult
     if mult and mult > 0 and atr and atr > 0:
         candidate = max(candidate, highest_price - mult * atr)

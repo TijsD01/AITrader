@@ -191,8 +191,8 @@ class ShadowLearner:
         if last > total:  # the portfolio was reset; count from zero again
             last = 0
         new = total - last
-        if manual and total < MANUAL_MIN_TRADES:
-            return _result(False, True, f"Needs at least {MANUAL_MIN_TRADES} closed trades (has {total})")
+        if manual and new < MANUAL_MIN_TRADES:  # new, not total: a second click must not learn from the same trades
+            return _result(False, True, f"{new} new closed trades; manual learning needs {MANUAL_MIN_TRADES}")
         if not manual and new < settings.SHADOW_LEARN_MIN_TRADES:
             return _result(False, True, f"{new} new closed trades; learning starts at {settings.SHADOW_LEARN_MIN_TRADES}")
 
