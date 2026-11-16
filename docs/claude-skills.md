@@ -43,7 +43,7 @@ graphify update .                # AST-only build into graphify-out/, ~6 s, no L
 graphify hook install            # optional: rebuild the graph after each commit/checkout
 ```
 
-`graphify-out/` is gitignored: rebuild it after a clone. The hooks in `.claude/settings.json` nudge Claude to run `graphify query` before grep/read, and do nothing when `graphify` is not on PATH (activate the venv first). Docs and research notes need an LLM for semantic extraction: run `/graphify .` in Claude Code for that.
+`graphify-out/graph.json`, `GRAPH_REPORT.md`, `manifest.json` and the community labels are committed. Caches and `graph.html` are not; run `graphify export html` for the viewer. The committed graph includes semantic nodes for docs, specs, plans, research notes, the web UI and the mockup. `graphify update .` keeps them. The hooks in `.claude/settings.json` nudge Claude to run `graphify query` before grep/read, and do nothing when `graphify` is not on PATH (activate the venv first). After you edit docs or notes, run `/graphify . --update` in Claude Code. Only changed files are re-extracted, by Claude subagents. No API key is needed.
 
 ## Optional (marketplaces are registered, not enabled)
 

@@ -78,4 +78,4 @@ Rules:
 - If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
 - Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
 - After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
-- graphify-out/ is gitignored. If it is missing, build it with `pip install graphifyy==0.9.111 && graphify update .` (see `docs/claude-skills.md`).
+- graphify-out/graph.json is committed and includes docs, specs, plans and research notes. It is rewritten whole on every build, so a large diff to it is expected. After changing code, `graphify update .` refreshes code nodes and keeps doc nodes. After changing docs or notes, run `/graphify . --update`; it needs an LLM.
