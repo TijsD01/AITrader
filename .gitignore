@@ -70,3 +70,6 @@ logs/
 
 # Agent plan scratch
 .superpowers/
+
+# graphify knowledge graph (rebuild: graphify update .)
+graphify-out/

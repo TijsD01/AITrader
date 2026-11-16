@@ -68,3 +68,14 @@ Plugins and project skills for this repo are set up in `.claude/`. See `docs/cla
 - Building or judging a backtest or shadow experiment? Use the `backtest-discipline` skill.
 
 The caveman response style in AGENTS.md is mirrored in `.cursor/rules/`, `.clinerules/`, `.windsurf/rules/`, `.opencode/AGENTS.md` and `.github/copilot-instructions.md`. Change it in all of them together.
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+Rules:
+- When graphify-out/graph.json exists, run `graphify query "<question>"` before your first grep, search or source-file read for a codebase question, and put this rule in every subagent prompt that explores code. Read raw files only for lines the graph or an earlier read already located. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. When the answer is under a Markdown heading, `graphify section "<heading>"` prints that section's text, so the .md need not be opened. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
+- graphify-out/ is gitignored. If it is missing, build it with `pip install graphifyy==0.9.111 && graphify update .` (see `docs/claude-skills.md`).

@@ -25,5 +25,23 @@
     "pr-review-toolkit@claude-plugins-official": true,
     "pyright-lsp@claude-plugins-official": true,
     "commit-commands@claude-plugins-official": true
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Grep",
+        "hooks": [{ "type": "command", "command": "if command -v graphify >/dev/null 2>&1; then graphify hook-guard search; fi", "timeout": 10 }]
+      },
+      {
+        "matcher": "Read|Glob",
+        "hooks": [{ "type": "command", "command": "if command -v graphify >/dev/null 2>&1; then graphify hook-guard read; fi", "timeout": 10 }]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [{ "type": "command", "command": "if command -v graphify >/dev/null 2>&1; then graphify hook-guard compact; fi", "timeout": 10 }]
+      }
+    ]
   }
 }

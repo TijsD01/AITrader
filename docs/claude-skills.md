@@ -20,6 +20,7 @@ This repo ships a shared Claude Code setup in `.claude/`. When you open the repo
 |---|---|
 | `live-money-safety` | Before any change to the real-money path: `live.py`, `broker.py`, `risk.py`, `fees.py`, sizing, kill switch, `TRADING_MODE`. Lists the interlocks to keep and the tests to run. |
 | `backtest-discipline` | When building or judging a backtest or shadow experiment: no look-ahead, real fees from `fees.py`, whole shares, survivorship bias, hold-out period, benchmark. |
+| `graphify` | Codebase questions: query the knowledge graph in `graphify-out/` before grepping. Vendored from `graphifyy` 0.9.111 (`graphify install --platform claude`). See **Graphify** below. |
 | `unslop-ui-design` | When designing, building or reviewing UI (`src/web/static/`, Tailwind/CSS): 20 anti-slop rules for type, spacing, colour, radius, icons, CTA, loading states. |
 
 There was no maintained public backtesting skill worth adding, so these two are written for this codebase.
@@ -33,6 +34,16 @@ Why: Claude Code on the web can only reach the GitHub repos attached to the sess
 Locally the plugin still installs from `.claude/settings.json`. You may then see both the plugin skills (`ponytail:ponytail`) and these copies. That is harmless.
 
 To update: download the four `skills/<name>/SKILL.md` files from the new tag and replace the copies here.
+
+## Graphify (code knowledge graph)
+
+```bash
+pip install graphifyy==0.9.111   # CLI is `graphify`; dev tool, not in requirements.txt
+graphify update .                # AST-only build into graphify-out/, ~6 s, no LLM or API key
+graphify hook install            # optional: rebuild the graph after each commit/checkout
+```
+
+`graphify-out/` is gitignored: rebuild it after a clone. The hooks in `.claude/settings.json` nudge Claude to run `graphify query` before grep/read, and do nothing when `graphify` is not on PATH (activate the venv first). Docs and research notes need an LLM for semantic extraction: run `/graphify .` in Claude Code for that.
 
 ## Optional (marketplaces are registered, not enabled)
 
