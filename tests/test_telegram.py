@@ -754,3 +754,30 @@ async def test_telegram_status_shows_mode_and_kill_switch():
     assert "Trading Mode: PAPER" in text
     assert "Kill Switch: 🚨 ACTIVE" in text
     assert "Zero Cost" not in text
+
+
+def test_exit_alert_title_follows_reason_not_pnl():
+    """A broker stop fill must never be announced as a take-profit; a profitable stop is a trailing stop."""
+    from src.telegram.bot import exit_alert_title
+    assert exit_alert_title("Stop-loss hit at Trading 212", -12.0)[0] == "STOP-LOSS TRIGGERED"
+    assert exit_alert_title("Stop-loss hit at Trading 212", 8.0)[0] == "TRAILING STOP HIT"
+    assert exit_alert_title("Live Stop-Loss triggered at 9.5 <= 9.6", -3.0)[0] == "STOP-LOSS TRIGGERED"
+    assert exit_alert_title("Take-Profit triggered at 120 >= 118", 20.0)[0] == "TAKE-PROFIT TARGET ACHIEVED"
+    assert exit_alert_title("Take-profit hit at Trading 212", 20.0)[0] == "TAKE-PROFIT TARGET ACHIEVED"
+    assert exit_alert_title("Closed at Trading 212 (manual sale or unknown)", 5.0)[0] == "POSITION CLOSED IN PROFIT"
+    assert exit_alert_title("Time exit after 20 days", -1.0)[0] == "POSITION CLOSED AT A LOSS"
+
+
+def test_broker_exit_reason_classifies_fill():
+    """T212 rests only a stop, so a sync-booked exit is named from the fill price against stop and target."""
+    from types import SimpleNamespace
+    from src.trading.live import LiveBroker
+    pos = SimpleNamespace(stop_loss_native=95.0, take_profit_native=120.0)
+    reason = LiveBroker._broker_exit_reason
+    assert reason("Trading 212", pos, 94.2) == "Stop-loss hit at Trading 212"
+    assert reason("Trading 212", pos, 95.3) == "Stop-loss hit at Trading 212"  # tick rounding
+    assert reason("Trading 212", pos, 121.0) == "Take-profit hit at Trading 212"
+    assert reason("Trading 212", pos, 105.0) == "Closed at Trading 212 (manual sale or unknown)"
+    assert reason("Trading 212", pos, None) == "Closed at Trading 212 (manual sale or unknown)"
+    # Trailed above entry: stop still named a stop, not a target
+    assert reason("Trading 212", SimpleNamespace(stop_loss_native=110.0, take_profit_native=130.0), 109.8) == "Stop-loss hit at Trading 212"

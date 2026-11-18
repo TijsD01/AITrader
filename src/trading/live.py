@@ -2247,7 +2247,7 @@ class LiveBroker(BaseBroker):
         """Books exits for positions the broker no longer holds, places stops for adopted holdings and sends alerts."""
         for pos, exit_price in gone:
             await self.execute_sell(
-                pos.ticker, reason=f"Closed at {label} (stop/target leg or manual sale)",
+                pos.ticker, reason=self._broker_exit_reason(label, pos, exit_price),
                 broker_flat=True, exit_price_native=exit_price,
             )
         for stop_args in stops_to_place:
@@ -2259,6 +2259,19 @@ class LiveBroker(BaseBroker):
                 await telegram_bot.send_message(f"⚠️ <b>Untracked broker position adopted</b>\n{a}")
             except Exception as e:
                 logger.error(f"Failed to send adoption alert: {e}")
+
+    @staticmethod
+    def _broker_exit_reason(label: str, pos: Position, exit_price: Optional[float]) -> str:
+        """Names a broker-side exit. The bot rests only a stop at the broker (no target order), so a
+        fill at or under the stop is the stop, at or over the target is a target sale, else unknown."""
+        sl, tp = pos.stop_loss_native, pos.take_profit_native
+        if exit_price:
+            if tp and exit_price >= tp:
+                return f"Take-profit hit at {label}"
+            # Small tolerance: the broker stop is rounded to the instrument's tick size
+            if sl and exit_price <= sl * 1.005:
+                return f"Stop-loss hit at {label}"
+        return f"Closed at {label} (manual sale or unknown)"
 
     @staticmethod
     async def _t212_last_sell_fill(client: Any, t212_ticker: str) -> Optional[float]:

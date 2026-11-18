@@ -28,6 +28,17 @@ ACTION_NL = {
     "STRONG_SELL": "sterk verkoopadvies",
 }
 
+def exit_alert_title(reason: str, realized_pnl_eur: float) -> tuple:
+    """Exit alert title and icon. The reason decides; the PnL sign only colours a neutral exit.
+    A stop that closes in profit (breakeven or trailed stop) is a trailing stop, not a take-profit."""
+    r = reason.lower()
+    if "stop" in r:
+        return ("TRAILING STOP HIT", "🟢") if realized_pnl_eur >= 0 else ("STOP-LOSS TRIGGERED", "🛑")
+    if "take-profit" in r or "target" in r:
+        return "TAKE-PROFIT TARGET ACHIEVED", "🎯"
+    return ("POSITION CLOSED IN PROFIT", "🟢") if realized_pnl_eur >= 0 else ("POSITION CLOSED AT A LOSS", "🔴")
+
+
 class TelegramAssistant:
     def __init__(self):
         self.token = settings.TELEGRAM_BOT_TOKEN
@@ -161,14 +172,7 @@ class TelegramAssistant:
         shares = sell_info.get("shares", 0.0) or 0.0
 
         sign = "+" if realized_pnl_eur >= 0 else ""
-        icon = "🟢" if realized_pnl_eur >= 0 else "🛑"
-        title = "TAKE-PROFIT TARGET ACHIEVED" if realized_pnl_eur >= 0 else "STOP-LOSS TRIGGERED"
-        if "take-profit" in reason.lower() or "target" in reason.lower():
-            title = "TAKE-PROFIT TARGET ACHIEVED"
-            icon = "🎯"
-        elif "stop-loss" in reason.lower() or "stop" in reason.lower():
-            title = "STOP-LOSS TRIGGERED"
-            icon = "🛑"
+        title, icon = exit_alert_title(reason, realized_pnl_eur)
 
         msg = (
             f"{icon} <b>{title}</b>\n\n"
