@@ -95,7 +95,7 @@ class Settings(BaseSettings):
     # Shadow paper portfolios: simulated variants that follow the main bot's committee verdicts
     # with other parameters, to see whether changing them pays off. They never place real orders.
     SHADOW_ENABLED: bool = True
-    SHADOW_STRATEGIES: str = "aggressive,baseline,breakeven_1r,no_breakeven,score_76"   # Comma-separated preset keys: aggressive, momentum, baseline, breakeven_1r, no_breakeven, score_76 (or custom keys)
+    SHADOW_STRATEGIES: str = "aggressive,aggressive_2r,baseline,breakeven_1r,no_breakeven,score_76"   # Comma-separated preset keys: aggressive, aggressive_2r, momentum, baseline, breakeven_1r, no_breakeven, score_76 (or custom keys)
     SHADOW_INITIAL_CAPITAL: Optional[float] = None  # Starting cash per shadow (empty = INITIAL_PAPER_CAPITAL)
     SHADOW_CUSTOM_STRATEGIES: str = ""      # JSON: {"key": {"base": "aggressive", "score_offset": -5, ...}}
     SHADOW_LEARN_MIN_TRADES: int = 10       # Closed trades needed before a shadow's params are learned from

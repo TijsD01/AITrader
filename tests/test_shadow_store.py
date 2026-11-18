@@ -176,3 +176,16 @@ async def test_delete_removes_change_history_so_a_recreated_label_starts_clean()
     assert [r for r in await _rows(ShadowParamChange) if r.strategy == key] == []
     with pytest.raises(LookupError):
         await undo_param_change(old.id)
+
+
+async def test_aggressive_2r_preset_added_once_to_existing_install():
+    p = PRESETS["aggressive_2r"]
+    assert p.reward_risk == 2.0 and p.to_params() == {**PRESETS["aggressive"].to_params(), "reward_risk": 2.0}
+    async with AsyncSessionLocal() as session:  # existing install: seeded before the preset existed
+        await session.execute(delete(SystemConfig).where(SystemConfig.key == "SHADOW_ADDED_AGGRESSIVE_2R"))
+        await session.commit()
+    await load_strategies()
+    assert [s.key for s in get_strategies()] == ["baseline", "aggressive", "aggressive_2r"]
+    assert await delete_strategy("aggressive_2r") is True
+    await load_strategies()
+    assert "aggressive_2r" not in [s.key for s in get_strategies()]

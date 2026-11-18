@@ -153,6 +153,16 @@ PRESETS: Dict[str, ShadowStrategy] = {
         score_offset=-6,
     ),
 }
+PRESETS["aggressive_2r"] = dataclasses.replace(
+    PRESETS["aggressive"],
+    key="aggressive_2r",
+    label="Aggressive 2R",
+    description="Aggressive rules with one change: aims for 2R instead of 3R, so the take profit sits closer "
+                "and fills more often.",
+    reward_risk=2.0,
+)
+# One-time insert of a preset added after first start, so existing installs get it once (a later delete sticks)
+_ADDED_PRESET_FLAG = ("aggressive_2r", "SHADOW_ADDED_AGGRESSIVE_2R")
 
 _FIELD_NAMES = {f.name for f in dataclasses.fields(ShadowStrategy)} - {"key"}
 
@@ -225,14 +235,24 @@ async def load_strategies() -> None:
     global _CACHE
     async with AsyncSessionLocal() as session:
         # Seed once per database: later an empty table means the user deleted everything
+        new_key, flag = _ADDED_PRESET_FLAG
         if await session.get(SystemConfig, "SHADOW_SEEDED") is None:
             session.add(SystemConfig(key="SHADOW_SEEDED", value="true"))
+            await session.merge(SystemConfig(key=flag, value="true"))
             now = _utcnow()
             for i, s in enumerate(_env_strategies()):
                 session.add(ShadowStrategyRow(
                     key=s.key, label=s.label, description=s.description, params=s.to_params(),
                     is_preset=s.key in PRESETS, created_at=now + datetime.timedelta(microseconds=i),
                 ))
+            await session.commit()
+        elif await session.get(SystemConfig, flag) is None:
+            session.add(SystemConfig(key=flag, value="true"))
+            count = (await session.execute(select(func.count()).select_from(ShadowStrategyRow))).scalar_one()
+            if await session.get(ShadowStrategyRow, new_key) is None and count < settings.SHADOW_MAX_STRATEGIES:
+                p = PRESETS[new_key]
+                session.add(ShadowStrategyRow(key=p.key, label=p.label, description=p.description,
+                                              params=p.to_params(), is_preset=True, created_at=_utcnow()))
             await session.commit()
         rows = (await session.execute(
             select(ShadowStrategyRow).where(ShadowStrategyRow.enabled.is_(True)).order_by(ShadowStrategyRow.created_at)
