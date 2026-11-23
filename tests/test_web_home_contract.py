@@ -35,7 +35,9 @@ def test_home_ids_present():
 def test_kill_switch_button_hooks():
     m = re.search(r'(<button\b[^>]*id="killSwitchBtn"[^>]*>)(.*?)</button>', _html(), re.S)
     assert m is not None, "#killSwitchBtn button not found"
-    assert 'onclick="toggleKillSwitch()"' in m.group(1)
+    assert 'data-action="toggle-kill-switch"' in m.group(1)
+    js = APP_JS.read_text()
+    assert "case 'toggle-kill-switch': toggleKillSwitch();" in js
     assert re.search(r'class="(?:[^"]*\s)?kill-switch-label(?:\s[^"]*)?"', m.group(2))
 
 
@@ -57,9 +59,9 @@ def test_app_js_owner_actions():
 
 
 def test_settings_shortcuts_match_a_fold():
-    # openSettingsGroup('x') opens data-fold="settings-x"; a rename would silently do nothing
+    # data-action="open-settings-group" data-group="x" opens data-fold="settings-x"; a rename would silently do nothing
     html = _html()
-    groups = re.findall(r"openSettingsGroup\('([a-z-]+)'\)", html)
+    groups = re.findall(r'data-action="open-settings-group"[^>]*data-group="([a-z-]+)"', html)
     assert groups
     for g in groups:
         assert f'data-fold="settings-{g}"' in html, g

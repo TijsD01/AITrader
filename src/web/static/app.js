@@ -223,8 +223,62 @@ document.addEventListener('click', (e) => {
     case 'revert-main-rules': revertMainRules(el); break;
     case 'resume-main-learner': resumeMainLearner(el); break;
     case 'open-ticker': openTickerSheet(ticker, el.dataset.source || ''); break;
+    case 'switch-tab': switchTab(el.dataset.tab); break;
+    case 'open-settings-group': openSettingsGroup(el.dataset.group); break;
+    case 'ping-broker': pingBrokerStatus(true); break;
+    case 'ping-broker-close': pingBrokerStatus(true); closeMobileDropdown(); break;
+    case 'toggle-kill-switch': toggleKillSwitch(); break;
+    case 'refresh-market-data': refreshMarketData(); break;
+    case 'quick-scan': triggerQuickScan(); break;
+    case 'close-mobile-dropdown': closeMobileDropdown(); break;
+    case 'toggle-mobile-dropdown': toggleMobileDropdown(); break;
+    case 'reconnect-broker': reconnectBroker(); break;
+    case 'sync-account': syncAccountWithBroker(); break;
+    case 'reload-portfolio': loadPortfolio(); break;
+    case 'load-recommendations': loadRecommendations(); break;
+    case 'load-market-review': loadMarketReview(el.dataset.reviewMarket); break;
+    case 'run-market-review': triggerMarketReview(el.dataset.reviewRun); break;
+    case 'weekly-review-compare': loadWeeklyReviewComparison(); break;
+    case 'filter-screener': filterScreener(el.dataset.market); break;
+    case 'run-analysis': runOnDemandAnalysis(); break;
+    case 'load-triggers': loadTriggers(); break;
+    case 'arm-trigger-input': armTriggerFromInput(); break;
+    case 'refresh-history': loadTrades(); loadLearningInsights(); loadCashFlows(); break;
+    case 'learning-calibration': triggerLearningCalibration(); break;
+    case 'remove-cash-flow': removeCashFlow(Number(el.dataset.id)); break;
+    case 'load-shadow': loadShadow(); break;
+    case 'refresh-memory': refreshMemoryHub(); break;
+    case 'open-extract': openExtractModal(); break;
+    case 'score-auto-tune': setScoreAutoTune(el.dataset.scoreTune === 'true'); break;
+    case 'save-settings': saveSettings(); break;
     default: break;
   }
+});
+
+// Delegated change / input / submit for static controls (data-change, data-input, data-action on a form)
+document.addEventListener('change', (e) => {
+  const el = e.target.closest('[data-change]');
+  if (!el) return;
+  switch (el.dataset.change) {
+    case 'trading-mode': onTradingModeChange(el); break;
+    case 'auto-buy': onAutoBuyChange(el); break;
+    case 'save-settings': saveSettings(); break;
+    default: break;
+  }
+});
+document.addEventListener('input', (e) => {
+  const el = e.target.closest('[data-input]');
+  if (!el) return;
+  switch (el.dataset.input) {
+    case 'range-label': document.getElementById(el.dataset.label).textContent = el.value + (el.dataset.suffix || ''); break;
+    case 'capital-usage': updateCapitalUsageDisplay(el.value); break;
+    case 'capital-preview': recalcCapitalPreview(); break;
+    case 'clear-trigger-feedback': clearTriggerFeedback(); break;
+    default: break;
+  }
+});
+document.addEventListener('submit', (e) => {
+  if (e.target.dataset.action === 'add-cash-flow') addCashFlow(e);
 });
 
 // Fade in the first content that replaces a "Loading..." placeholder.
@@ -978,7 +1032,7 @@ async function loadPortfolio() {
         <div class="empty-state">
           <p class="empty-title">No open positions yet</p>
           <p class="empty-body">The bot buys during market hours when a stock scores high enough. Run a scan to find candidates now.</p>
-          <button type="button" onclick="triggerQuickScan()" class="ui-btn ui-btn-primary ui-btn-sm"><i class="fa-solid fa-satellite-dish" aria-hidden="true"></i> Run scan</button>
+          <button type="button" data-action="quick-scan" class="ui-btn ui-btn-primary ui-btn-sm"><i class="fa-solid fa-satellite-dish" aria-hidden="true"></i> Run scan</button>
         </div>`;
       return;
     }
@@ -1381,7 +1435,7 @@ async function loadCashFlows() {
             <div class="ui-num font-semibold ${isIn ? 'ui-gain' : 'ui-loss'}">${isIn ? 'Deposit' : 'Withdrawal'} ${esc(signedEur(f.amount_eur))}</div>
             <div class="text-xs ui-faint ui-num">${esc(localTime(f.timestamp))} · ${f.source === 'manual' ? 'added by you' : f.source === 'broker' ? 'from broker' : 'detected'}</div>
           </div>
-          <button type="button" onclick="removeCashFlow(${Number(f.id)})" class="ui-btn ui-btn-quiet ui-icon-btn shrink-0" aria-label="Remove" title="Remove"><i class="fa-solid fa-trash-can"></i></button>
+          <button type="button" data-action="remove-cash-flow" data-id="${Number(f.id)}" class="ui-btn ui-btn-quiet ui-icon-btn shrink-0" aria-label="Remove" title="Remove"><i class="fa-solid fa-trash-can"></i></button>
         </div>`;
     }).join('');
   } catch (e) {
