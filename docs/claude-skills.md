@@ -22,7 +22,17 @@ This repo ships a shared Claude Code setup in `.claude/`. When you open the repo
 | `backtest-discipline` | When building or judging a backtest or shadow experiment: no look-ahead, real fees from `fees.py`, whole shares, survivorship bias, hold-out period, benchmark. |
 | `unslop-ui-design` | When designing, building or reviewing UI (`src/web/static/`, Tailwind/CSS): 20 anti-slop rules for type, spacing, colour, radius, icons, CTA, loading states. |
 
+| `modern-web-guidance` | Before HTML/CSS/client-side JS work (`src/web/static/`): searches Google Chrome's modern web platform guides (dialogs, forms, a11y, dark mode, performance) and retrieves the matching one. |
+
 There was no maintained public backtesting skill worth adding, so these two are written for this codebase.
+
+### Vendored modern-web-guidance skill
+
+`.claude/skills/modern-web-guidance` is a copy of `skills/modern-web-guidance` from [GoogleChrome/modern-web-guidance](https://github.com/GoogleChrome/modern-web-guidance) at commit `64a6d70`. It holds only markdown (no scripts or hooks).
+
+At use time it runs `npx -y modern-web-guidance@latest search|retrieve`, which downloads and executes the latest npm package each time. It needs network access to the npm registry. Every reply that applies a guide ends with a `### Modern Web Guidance` section.
+
+To update: replace the folder with `skills/modern-web-guidance` from a newer commit, after reading the new `SKILL.md`.
 
 ### Vendored ponytail skills (for cloud sessions)
 
