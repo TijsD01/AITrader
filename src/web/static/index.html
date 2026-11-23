@@ -12,43 +12,13 @@
     try { document.documentElement.classList.toggle('dark', matchMedia('(prefers-color-scheme: dark)').matches); } catch (e) {}
   </script>
   
-  <!-- Tailwind CSS & FontAwesome -->
-  <script src="https://cdn.tailwindcss.com/3.4.1"></script>
-  <script>
-    tailwind.config = {
-      darkMode: 'class',
-      theme: {
-        extend: {
-          fontFamily: {
-            sans: ['-apple-system', 'BlinkMacSystemFont', '"SF Pro Text"', '"Inter"', 'system-ui', '"Segoe UI"', 'sans-serif'],
-            mono: ['"IBM Plex Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace']
-          },
-          colors: {
-            // Design tokens (see style.css :root). Every colour reads a CSS variable,
-            // so existing class names follow the light/dark theme.
-            accent: { DEFAULT: 'rgb(var(--rgb-accent) / <alpha-value>)', strong: 'rgb(var(--rgb-accent-strong) / <alpha-value>)', soft: 'rgb(var(--rgb-accent-soft) / <alpha-value>)' },
-            gain: 'rgb(var(--rgb-gain) / <alpha-value>)',
-            loss: 'rgb(var(--rgb-loss) / <alpha-value>)',
-            warn: 'rgb(var(--rgb-warn) / <alpha-value>)',
-            info: 'rgb(var(--rgb-info) / <alpha-value>)',
-            violet: { 300: 'rgb(var(--rgb-violet) / <alpha-value>)' },
-            pink: { 300: 'rgb(var(--rgb-pink) / <alpha-value>)' },
-            darkBg: 'rgb(var(--rgb-bg) / <alpha-value>)',
-            cardBg: 'rgb(var(--rgb-surface) / <alpha-value>)',
-            borderCol: 'rgb(var(--rgb-line) / <alpha-value>)',
-            slate: {
-              50: 'rgb(var(--rgb-slate-50) / <alpha-value>)', 100: 'rgb(var(--rgb-slate-100) / <alpha-value>)', 200: 'rgb(var(--rgb-slate-200) / <alpha-value>)', 300: 'rgb(var(--rgb-slate-300) / <alpha-value>)', 400: 'rgb(var(--rgb-slate-400) / <alpha-value>)', 500: 'rgb(var(--rgb-slate-500) / <alpha-value>)', 600: 'rgb(var(--rgb-slate-600) / <alpha-value>)', 700: 'rgb(var(--rgb-slate-700) / <alpha-value>)', 800: 'rgb(var(--rgb-slate-800) / <alpha-value>)', 900: 'rgb(var(--rgb-slate-900) / <alpha-value>)', 950: 'rgb(var(--rgb-slate-950) / <alpha-value>)'
-            }
-          }
-        }
-      }
-    }
-  </script>
+  <!-- Prebuilt Tailwind (see docs/frontend.md), then FontAwesome -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@100..125,400..700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" integrity="sha384-t1nt8BQoYMLFN5p42tRAtuAAFQaCQODekUVeKKZrEnEyp4H2R0RHFz0KWpmj7i8g" crossorigin="anonymous" referrerpolicy="no-referrer">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js" integrity="sha384-dug+JxfBvklEQdJ4AYuBBAIScUz0bVN73xpy273gcAwHjb3qI0fXmuYNaNfdyYJG" crossorigin="anonymous"></script>
+  <link rel="stylesheet" href="/static/tailwind.css">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body class="bg-darkBg text-slate-100 min-h-screen md:pb-8 flex flex-col font-sans antialiased overflow-x-clip selection:bg-slate-300 selection:text-slate-950">
@@ -566,7 +536,7 @@
           </span>
           <i class="fa-solid fa-chevron-down text-[12px] ui-faint adv-chev" aria-hidden="true"></i>
         </summary>
-        <div class="overflow-x-auto">
+        <div class="overflow-x-auto" tabindex="0" role="region" aria-label="Trigger history">
           <table class="responsive-table w-full min-w-[520px] text-left text-[13px] ui-muted">
             <thead class="ui-eyebrow border-b border-borderCol">
               <tr>
@@ -655,7 +625,7 @@
           </span>
           <i class="fa-solid fa-chevron-down text-[12px] ui-faint adv-chev" aria-hidden="true"></i>
         </summary>
-        <div class="overflow-x-auto">
+        <div class="overflow-x-auto" tabindex="0" role="region" aria-label="Executed trades">
           <table class="responsive-table w-full min-w-[650px] text-left text-[13px] ui-muted">
             <thead class="ui-eyebrow border-b border-borderCol">
               <tr>
