@@ -58,6 +58,9 @@ class TradingScheduler:
         )
         # Serializes trigger/stop checks so a manual refresh cannot overlap a scheduled run
         self._monitor_lock = asyncio.Lock()
+        # Serializes market sessions: each reads open positions and pending triggers at its start,
+        # so two sessions at once (double click, cron + manual, Telegram) could buy or arm the same ticker twice
+        self._session_lock = asyncio.Lock()
 
     @staticmethod
     def _should_arm_trigger(report: Dict[str, Any], trigger_min_score: int, rules=None) -> bool:
@@ -488,7 +491,15 @@ class TradingScheduler:
         except Exception as e:
             logger.error(f"Error checking startup market sessions: {e}")
 
+    def market_session_running(self) -> bool:
+        return self._session_lock.locked()
+
     async def run_market_session(self, market: str, session: str, target_chat_id: Optional[Union[int, str]] = None):
+        """Runs one market session; waits for any session already running to finish first."""
+        async with self._session_lock:
+            await self._run_market_session(market, session, target_chat_id)
+
+    async def _run_market_session(self, market: str, session: str, target_chat_id: Optional[Union[int, str]] = None):
         """
         Runs candidate scanning, invokes agent committee, executes auto-buys if high conviction,
         arms limit triggers if pending pullback, and broadcasts market digest.
