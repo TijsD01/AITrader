@@ -28,11 +28,11 @@ There was no maintained public backtesting skill worth adding, so these two are 
 
 ### Vendored modern-web-guidance skill
 
-`.claude/skills/modern-web-guidance` is a copy of `skills/modern-web-guidance` from [GoogleChrome/modern-web-guidance](https://github.com/GoogleChrome/modern-web-guidance) at commit `64a6d70`. It holds only markdown (no scripts or hooks).
+`.claude/skills/modern-web-guidance` is a copy of `skills/modern-web-guidance` from [GoogleChrome/modern-web-guidance](https://github.com/GoogleChrome/modern-web-guidance) at commit `64a6d70`. Only `SKILL.md` is kept: the skill fetches its guides at run time through `npx`, so the repo's `guides/` folder (about 210 files) was never read and is left out.
 
 At use time it runs `npx -y modern-web-guidance@latest search|retrieve`, which downloads and executes the latest npm package each time. It needs network access to the npm registry. Every reply that applies a guide ends with a `### Modern Web Guidance` section.
 
-To update: replace the folder with `skills/modern-web-guidance` from a newer commit, after reading the new `SKILL.md`.
+To update: replace `SKILL.md` with the one from a newer commit, after reading it.
 
 ### Vendored ponytail skills (for cloud sessions)
 
