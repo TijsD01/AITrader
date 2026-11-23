@@ -61,6 +61,8 @@ class TradingScheduler:
         # Serializes market sessions: each reads open positions and pending triggers at its start,
         # so two sessions at once (double click, cron + manual, Telegram) could buy or arm the same ticker twice
         self._session_lock = asyncio.Lock()
+        self._sessions_queued = 0  # started from the web but not yet holding the lock
+        self._session_tasks: set = set()  # keeps background session tasks from being garbage-collected
 
     @staticmethod
     def _should_arm_trigger(report: Dict[str, Any], trigger_min_score: int, rules=None) -> bool:
@@ -492,7 +494,27 @@ class TradingScheduler:
             logger.error(f"Error checking startup market sessions: {e}")
 
     def market_session_running(self) -> bool:
-        return self._session_lock.locked()
+        return self._session_lock.locked() or self._sessions_queued > 0
+
+    def start_market_session(self, market: str, session: str, target_chat_id: Optional[Union[int, str]] = None) -> bool:
+        """
+        Starts a session in the background unless one is running or already queued; False means refused.
+        Synchronous on purpose: two requests in the same loop tick cannot both pass the check.
+        """
+        if self.market_session_running():
+            return False
+        self._sessions_queued += 1
+
+        async def _run():
+            try:
+                await self.run_market_session(market, session, target_chat_id)
+            finally:
+                self._sessions_queued -= 1
+
+        task = asyncio.create_task(_run())
+        self._session_tasks.add(task)
+        task.add_done_callback(self._session_tasks.discard)
+        return True
 
     async def run_market_session(self, market: str, session: str, target_chat_id: Optional[Union[int, str]] = None):
         """Runs one market session; waits for any session already running to finish first."""

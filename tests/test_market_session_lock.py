@@ -39,6 +39,46 @@ async def test_session_endpoints_refuse_while_a_session_runs():
             run.assert_not_called()
 
 
+async def test_two_requests_at_once_start_only_one_session():
+    """Both requests can arrive before the first background task takes the lock."""
+    calls = []
+
+    async def fake_session(market, session, target_chat_id=None):
+        calls.append(market)
+        await asyncio.sleep(0.02)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
+        with patch.object(trading_scheduler, "_run_market_session", side_effect=fake_session):
+            r1, r2 = await asyncio.gather(
+                client.post("/api/market-session/run", json={"market": "EU", "session": "OPEN"}),
+                client.post("/api/market-session/run", json={"market": "EU", "session": "OPEN"}),
+            )
+            await asyncio.sleep(0.1)
+    assert sorted([r1.json()["success"], r2.json()["success"]]) == [False, True]
+    assert calls == ["EU"]
+    assert not trading_scheduler.market_session_running()
+
+
+async def test_telegram_review_refuses_while_a_session_runs():
+    """Waiting for the lock would stall every other command, /killswitch included."""
+    from config.settings import settings
+    from src.telegram.bot import TelegramAssistant
+    bot = TelegramAssistant()
+    replies = []
+
+    async def reply(chat_id, text, *a, **k):
+        replies.append(text)
+
+    bot._reply_chat = reply
+    update = {"update_id": 1, "message": {"chat": {"id": 12345}, "text": "/review"}}
+    with patch.object(settings, "TELEGRAM_CHAT_ID", "12345"), \
+            patch.object(trading_scheduler, "run_market_session") as run:
+        async with trading_scheduler._session_lock:
+            await bot._handle_update(update)
+    run.assert_not_called()
+    assert any("already running" in r for r in replies)
+
+
 async def test_session_endpoint_starts_when_idle():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
         with patch.object(trading_scheduler, "_run_market_session") as run:
