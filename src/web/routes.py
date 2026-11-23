@@ -746,7 +746,8 @@ async def update_settings(req: SettingsUpdateRequest, request: Request = None):
 @router.post("/api/scheduler/trigger")
 async def trigger_scan(market: str = "ALL"):
     """Allows triggering an immediate market session scan from the UI."""
-    asyncio.create_task(trading_scheduler.run_market_session(market=market, session="MANUAL_SCAN"))
+    if not trading_scheduler.start_market_session(market, "MANUAL_SCAN"):
+        return {"success": False, "message": "A market session is already running. Try again when it finishes."}
     return {"success": True, "message": f"Market scan triggered for {market} in background."}
 
 @router.post("/api/market-data/refresh")
@@ -808,7 +809,8 @@ async def run_market_session_endpoint(req: MarketSessionRequest):
     """Allows manual/on-demand execution of Opening Market Review or Closing Session."""
     market = (req.market or "EU").upper()
     session = (req.session or "OPEN").upper()
-    asyncio.create_task(trading_scheduler.run_market_session(market=market, session=session))
+    if not trading_scheduler.start_market_session(market, session):
+        return {"success": False, "message": "A market session is already running. Try again when it finishes."}
     return {"success": True, "message": f"Triggered {market} {session} market session in background."}
 
 @router.get("/api/learning/insights")

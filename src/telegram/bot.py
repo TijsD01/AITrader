@@ -1261,9 +1261,13 @@ class TelegramAssistant:
                 target_market = "US"
 
             session_name = "Closing Wrap-Up" if session == "CLOSE" else "Opening Market Review"
+            from src.scheduler.jobs import trading_scheduler
+            if trading_scheduler.market_session_running():
+                # Waiting would hold up every other command, /killswitch included, until that session ends
+                await self._reply_chat(chat_id, "⏳ A market session is already running. Try /review again when it finishes.")
+                return
             await self._reply_chat(chat_id, f"⏳ Generating <b>{target_market} {session_name} & Advice</b>...")
             try:
-                from src.scheduler.jobs import trading_scheduler
                 await trading_scheduler.run_market_session(market=target_market, session=session, target_chat_id=chat_id)
             except Exception as e:
                 logger.error(f"Error handling /review: {e}", exc_info=True)
