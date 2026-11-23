@@ -35,12 +35,26 @@ function mdBold(value) {
   return esc(value).replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
 }
 
-// GET + JSON that throws on an HTTP error, so a failed load never renders as zeros or "nothing yet"
-async function getJson(url) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
+// GET/POST + JSON that throws on an HTTP error, so a failed load never renders as zeros or "nothing yet".
+// The error message is the server's `detail`/`message` when it sent one; e.status and e.data carry the rest.
+async function requestJson(url, opts) {
+  const res = await fetch(url, opts);
+  if (!res.ok) {
+    const data = await res.json().catch(() => null);
+    const detail = data && (typeof data.detail === 'string' ? data.detail : data.message);
+    const err = new Error(detail || `${url}: HTTP ${res.status}`);
+    err.status = res.status;
+    err.detail = detail;
+    err.data = data && typeof data === 'object' ? data : {};
+    throw err;
+  }
   return res.json();
 }
+const getJson = url => requestJson(url);
+const postJson = (url, body) => requestJson(url, {
+  method: 'POST',
+  ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+});
 
 // Fills a list that never loaded with a failure note; a list that loaded before keeps its last data
 function showLoadFailed(el, what, colspan = 0) {
@@ -65,10 +79,12 @@ function num(value, digits = 2) {
   const n = Number(value);
   return Number.isFinite(n) ? n.toFixed(digits) : (0).toFixed(digits);
 }
+// Decimal format with a literal € (not style:'currency', which would print negatives as "-€5.00", not "€-5.00")
+const eurFormats = {};
 function eur(value, digits = 2) {
   const n = Number(value);
-  const v = Number.isFinite(n) ? n : 0;
-  return `€${v.toLocaleString('en-US', {minimumFractionDigits: digits, maximumFractionDigits: digits})}`;
+  const fmt = eurFormats[digits] ??= new Intl.NumberFormat('en-US', {minimumFractionDigits: digits, maximumFractionDigits: digits});
+  return `€${fmt.format(Number.isFinite(n) ? n : 0)}`;
 }
 
 // Euro amount with an explicit + or - sign
@@ -93,7 +109,7 @@ function renderAllocationBar(cashEur, positions, mineEur = 0) {
   const total = parts.reduce((s, p) => s + p.value, 0);
   if (total <= 0) {
     bar.innerHTML = '<span style="flex:1;background:var(--line-strong)"></span>';
-    if (legend) legend.innerHTML = '';
+    if (legend) legend.replaceChildren();
     return;
   }
   const shown = parts.filter(p => p.value > 0);
@@ -149,8 +165,8 @@ function advicePrice(value, suffix = '') {
 document.addEventListener('DOMContentLoaded', () => {
   initChart();
   applyTheme();
-  loadAllData();
-  loadMainRulesBanner();
+  loadAllData().catch(e => console.error('Initial load failed:', e));
+  loadMainRulesBanner().catch(e => console.error('Main rules banner failed:', e));
   switchTabUi('portfolio');
   updateMoreButton('portfolio');
   initFolds();
@@ -158,19 +174,26 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Enter key submits the ticker inputs (on-screen keyboard "Go")
   const analyzeInput = document.getElementById('analyzeInput');
-  if (analyzeInput) analyzeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); runOnDemandAnalysis(); } });
+  if (analyzeInput) analyzeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); if (e.isComposing || e.keyCode === 229) return; runOnDemandAnalysis(); } });
   const triggerInput = document.getElementById('triggerTickerInput');
-  if (triggerInput) triggerInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); armTriggerFromInput(); } });
+  if (triggerInput) triggerInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); if (e.isComposing || e.keyCode === 229) return; armTriggerFromInput(); } });
 
   // Auto-refresh every 30 seconds (skipped while the browser tab is in the background)
-  setInterval(() => {
-    if (document.hidden) return;
-    loadPortfolio();
-    loadMarketStatus();
-    loadBrokerStatus();
-    refreshSystemStatus();
-  }, 30000);
+  setInterval(refreshTick, 30000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshTick(); });
 });
+
+// One refresh at a time: a slow tick (or the refresh on tab return) makes the next one skip
+let refreshing = false;
+async function refreshTick() {
+  if (refreshing || document.hidden) return;
+  refreshing = true;
+  try {
+    await Promise.allSettled([loadPortfolio(), loadMarketStatus(), loadBrokerStatus(), refreshSystemStatus()]);
+  } finally {
+    refreshing = false;
+  }
+}
 
 // Event delegation for all dynamically rendered buttons (no inline handlers with data in them)
 document.addEventListener('click', (e) => {
@@ -217,6 +240,8 @@ document.querySelectorAll('[data-loading]').forEach(el => {
 });
 
 let toastTimer = null;
+const HAS_POPOVER = 'showPopover' in HTMLElement.prototype;
+let toastHideTimer = null;
 function showToast(message, kind = false) {
   // kind: true | 'error' => error styling; false | 'info' | 'success' => normal
   const isError = kind === true || kind === 'error';
@@ -233,12 +258,25 @@ function showToast(message, kind = false) {
     icon.className = 'fa-solid fa-circle-check ui-gain';
   }
 
+  // Popover = top layer, so the toast shows above open modal dialogs; without support it behaves as before
+  if (HAS_POPOVER) {
+    clearTimeout(toastHideTimer);
+    if (!toast.matches(':popover-open')) { toast.showPopover(); void toast.offsetWidth; }
+  }
   toast.classList.add('is-open');
 
   if (toastTimer) clearTimeout(toastTimer);
   toastTimer = setTimeout(() => {
     toast.classList.remove('is-open');
+    // Hide after the fade-out (CSS .is-open transition), or the exit animation is skipped
+    if (HAS_POPOVER) toastHideTimer = setTimeout(() => { if (toast.matches(':popover-open')) toast.hidePopover(); }, 300);
   }, isError ? 6000 : 3500);
+}
+
+// A modal dialog opened after the toast would cover it: re-show the toast so it sits on top again
+function raiseToast() {
+  const toast = document.getElementById('toast');
+  if (HAS_POPOVER && toast.matches(':popover-open')) { toast.hidePopover(); toast.showPopover(); }
 }
 
 // Tab Metadata for Mobile Dropdown & Navigation
@@ -486,13 +524,15 @@ function openSettingsGroup(group) {
 }
 
 function loadAllData() {
-  refreshSystemStatus();
-  loadMarketStatus();
-  loadBrokerStatus();
-  loadPortfolio();
-  loadRecommendations();
-  loadMarketReview();
-  loadWeeklyReviewComparison();
+  return Promise.all([
+    refreshSystemStatus(),
+    loadMarketStatus(),
+    loadBrokerStatus(),
+    loadPortfolio(),
+    loadRecommendations(),
+    loadMarketReview(),
+    loadWeeklyReviewComparison()
+  ]);
 }
 
 // Theme: colour tokens switch by media query in style.css. JS reads them only
@@ -663,14 +703,10 @@ async function setOwner(ticker, owner, sw) {
   const holder = sw.parentElement;
   holder.outerHTML = ownerSwitchHtml(ticker, owner);
   try {
-    const res = await fetch(`/api/holdings/${encodeURIComponent(ticker)}/owner`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ owner })
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.detail || `Could not move ${ticker}`);
+    const data = await postJson(`/api/holdings/${encodeURIComponent(ticker)}/owner`, { owner });
     showToast(data.message || 'Done');
   } catch (e) {
-    showToast(e.message, true);
+    showToast(e.status ? (e.data.detail || `Could not move ${ticker}`) : e.message, true);
   } finally {
     flipping.delete(ticker);
   }
@@ -757,8 +793,7 @@ async function loadValueHistory() {
   if (!fig || !canvas || !note) return;
   let points = [];
   try {
-    const res = await fetch('/api/portfolio/history?days=30');
-    if (res.ok) points = await res.json();
+    points = await getJson('/api/portfolio/history?days=30');
   } catch (e) { /* offline: show the empty note */ }
   const empty = !Array.isArray(points) || points.length < 2 || typeof Chart === 'undefined';
   fig.classList.toggle('is-empty', empty);
@@ -789,7 +824,7 @@ async function loadValueHistory() {
     valueChart.$readout = i => {
       const c = valueChart;
       setReadout(total, i === null ? null : eur(c.data.datasets[0].data[i]));
-      setReadout(note, i === null ? null : new Date(c.data.labels[i] + 'Z').toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }));
+      setReadout(note, i === null ? null : new Date(c.data.labels[i] + 'Z').toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }));
     };
   } else {
     valueChart.data.labels = labels;
@@ -802,7 +837,7 @@ async function loadValueHistory() {
 async function loadPortfolio() {
   loadValueHistory();
   // Separate promise: a holdings failure must not blank the bot list
-  const holdingsReq = fetch('/api/holdings').then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
+  const holdingsReq = getJson('/api/holdings');
   holdingsReq.catch(() => {});
   try {
     const [summary, positions] = await Promise.all([
@@ -1077,8 +1112,7 @@ async function loadScreener() {
     </div>`;
 
   try {
-    const res = await fetch(`/api/screener?market=${currentScreenerMarket}`);
-    const candidates = await res.json();
+    const candidates = await getJson(`/api/screener?market=${currentScreenerMarket}`);
 
     if (!Array.isArray(candidates) || candidates.length === 0) {
       container.innerHTML = `<div class="col-span-full ui-card ui-card-pad adv-prose">No qualifying candidates right now.</div>`;
@@ -1331,9 +1365,7 @@ async function loadCashFlows() {
   const list = document.getElementById('cashFlowList');
   if (!list) return;
   try {
-    const res = await fetch('/api/cash-flows');
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
+    const data = await getJson('/api/cash-flows');
     const flows = data.flows || [];
     const netEl = document.getElementById('cashFlowNet');
     if (netEl) netEl.textContent = flows.length ? `net ${eur(data.net_deposits_eur)}` : '';
@@ -1365,11 +1397,7 @@ async function addCashFlow(event) {
   const label = amount > 0 ? `deposit of ${eur(amount)}` : `withdrawal of ${eur(-amount)}`;
   if (!confirm(`Record a ${label}? It will no longer count as gain or loss.`)) return;
   try {
-    const res = await fetch('/api/cash-flows', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ amount_eur: amount })
-    });
-    if (!res.ok) throw new Error((await res.json()).detail || `HTTP ${res.status}`);
+    await postJson('/api/cash-flows', { amount_eur: amount });
     input.value = '';
     showToast('Recorded.');
     loadCashFlows(); loadPortfolio();
@@ -1447,21 +1475,11 @@ async function executePaperBuy(ticker) {
   if (!confirm(`Execute ${modeLabel} BUY order for ${ticker} at market price?`)) return;
 
   try {
-    const res = await fetch('/api/trade/buy', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ticker: ticker })
-    });
-
-    const data = await res.json();
-    if (res.ok) {
-      showToast(data.message);
-      loadPortfolio();
-    } else {
-      showToast(data.detail || 'Buy order failed.', true);
-    }
+    const data = await postJson('/api/trade/buy', { ticker: ticker });
+    showToast(data.message);
+    loadPortfolio();
   } catch (e) {
-    showToast('Network error executing trade.', true);
+    showToast(e.status ? (e.data.detail || 'Buy order failed.') : 'Network error executing trade.', true);
   }
 }
 
@@ -1470,37 +1488,23 @@ async function closePosition(ticker) {
   if (!confirm(`SELL: close the whole ${modeLabel} position in ${ticker} at market price?`)) return;
 
   try {
-    const res = await fetch('/api/trade/sell', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ticker: ticker, reason: 'Manual User Close' })
-    });
-
-    const data = await res.json();
-    if (res.ok) {
-      showToast(data.message);
-      loadPortfolio();
-    } else {
-      showToast(data.detail || 'Close position failed.', true);
-    }
+    const data = await postJson('/api/trade/sell', { ticker: ticker, reason: 'Manual User Close' });
+    showToast(data.message);
+    loadPortfolio();
   } catch (e) {
-    showToast('Network error closing position.', true);
+    showToast(e.status ? (e.data.detail || 'Close position failed.') : 'Network error closing position.', true);
   }
 }
 
 async function syncAccountWithBroker() {
   showToast('⏳ Synchronizing portfolio & balances with broker...');
   try {
-    const res = await fetch('/api/portfolio/sync', { method: 'POST' });
-    if (res.ok) {
-      showToast('Broker account state synced successfully.');
-      await loadPortfolio();
-      await loadBrokerStatus();
-    } else {
-      showToast('Failed to sync account with broker.', true);
-    }
+    await postJson('/api/portfolio/sync');
+    showToast('Broker account state synced successfully.');
+    await loadPortfolio();
+    await loadBrokerStatus();
   } catch (e) {
-    showToast('Network error syncing with broker.', true);
+    showToast(e.status ? 'Failed to sync account with broker.' : 'Network error syncing with broker.', true);
   }
 }
 
@@ -1675,8 +1679,7 @@ async function loadBrokerStatus(force = false) {
 // Market Status Loader
 async function loadMarketStatus() {
   try {
-    const msRes = await fetch('/api/market-status');
-    const msData = await msRes.json();
+    const msData = await getJson('/api/market-status');
     const badge = document.getElementById('marketStatusBadge');
     const textEl = document.getElementById('marketStatusText');
     if (!badge || !textEl) return;
@@ -1707,8 +1710,7 @@ async function loadMarketStatus() {
 // 8. Settings Management
 async function loadSettings() {
   try {
-    const res = await fetch('/api/settings');
-    const data = await res.json();
+    const data = await getJson('/api/settings');
 
     document.getElementById('settingAutoBuy').checked = data.auto_buy_enabled;
     renderAutoBuyStatus(data.auto_buy_enabled);
@@ -1845,9 +1847,9 @@ function recalcCapitalPreview() {
   const previewDep = document.getElementById('previewDeployableCash');
   const previewRes = document.getElementById('previewProtectedReserve');
 
-  if (previewTotal) previewTotal.textContent = `€${totalCash.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
-  if (previewDep) previewDep.textContent = `€${deployable.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
-  if (previewRes) previewRes.textContent = `€${reserve.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+  if (previewTotal) previewTotal.textContent = eur(totalCash);
+  if (previewDep) previewDep.textContent = eur(deployable);
+  if (previewRes) previewRes.textContent = eur(reserve);
 }
 
 async function saveSettings() {
@@ -1910,29 +1912,19 @@ async function saveSettings() {
       payload.live_trading_enabled = (tradingMode === 'LIVE');
     }
 
-    const res = await fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    if (res.ok) {
-      showToast('Settings saved successfully.');
-      if (payload.min_consensus_score !== undefined) minScoreEl.dataset.loaded = String(minScore);
-      if (payload.trigger_min_score !== undefined) trigScoreEl.dataset.loaded = String(triggerScore);
-      renderAutoBuyStatus(autoBuy);
-      if (tradingMode) lastSavedTradingMode = tradingMode;
-      recalcCapitalPreview();
-      await loadPortfolio();
-      await loadBrokerStatus();
-      if (typeof loadTriggers === 'function') await loadTriggers();
-    } else {
-      const err = await res.json().catch(() => ({}));
-      showToast(err.detail || 'Failed to save settings.', true);
-      // Server refused: reload the real values so the form does not lie
-      loadSettings();
-    }
+    await postJson('/api/settings', payload);
+    showToast('Settings saved successfully.');
+    if (payload.min_consensus_score !== undefined) minScoreEl.dataset.loaded = String(minScore);
+    if (payload.trigger_min_score !== undefined) trigScoreEl.dataset.loaded = String(triggerScore);
+    renderAutoBuyStatus(autoBuy);
+    if (tradingMode) lastSavedTradingMode = tradingMode;
+    recalcCapitalPreview();
+    await loadPortfolio();
+    await loadBrokerStatus();
+    if (typeof loadTriggers === 'function') await loadTriggers();
   } catch (e) {
-    showToast('Failed to save settings.', true);
+    // Server refused (or network failed): reload the real values so the form does not lie
+    showToast(e.status ? (e.data.detail || 'Failed to save settings.') : 'Failed to save settings.', true);
     loadSettings();
   }
 }
@@ -1979,9 +1971,7 @@ function renderAutoBuyStatus(enabled) {
 // Lightweight status refresh (auto-buy + trading mode) that does not touch the settings form
 async function refreshSystemStatus() {
   try {
-    const res = await fetch('/api/settings');
-    if (!res.ok) return;
-    const data = await res.json();
+    const data = await getJson('/api/settings');
     renderAutoBuyStatus(data.auto_buy_enabled);
     if (data.trading_mode) lastSavedTradingMode = String(data.trading_mode).toUpperCase();
   } catch (e) {
@@ -2014,9 +2004,8 @@ async function toggleKillSwitch() {
     : 'Resume trading? The kill switch will be released and the bot may place new buy orders again.';
   if (!confirm(msg)) return;
   try {
-    const res = await fetch(`/api/killswitch?active=${activate ? 'true' : 'false'}`, { method: 'POST' });
-    const data = await res.json().catch(() => ({}));
-    if (res.ok && data.success !== false) {
+    const data = await postJson(`/api/killswitch?active=${activate ? 'true' : 'false'}`);
+    if (data.success !== false) {
       killSwitchActive = typeof data.kill_switch_active === 'boolean' ? data.kill_switch_active : activate;
       renderKillSwitch();
       showToast(killSwitchActive ? 'Kill switch ACTIVE: new buying halted.' : 'Kill switch released: trading resumed.', killSwitchActive ? true : false);
@@ -2024,7 +2013,7 @@ async function toggleKillSwitch() {
       showToast(data.detail || 'Kill switch request failed.', true);
     }
   } catch (e) {
-    showToast('Network error toggling kill switch.', true);
+    showToast(e.status ? (e.data.detail || 'Kill switch request failed.') : 'Network error toggling kill switch.', true);
   }
 }
 
@@ -2070,20 +2059,20 @@ async function triggerQuickScan() {
   let delayReset = false;
 
   try {
-    const res = await fetch('/api/scheduler/trigger', { method: 'POST' });
-    if (res.ok) {
+    const data = await postJson('/api/scheduler/trigger');
+    if (data.success) {
       showToast('Market scan started. Inspecting candidates...');
       delayReset = true;
       setTimeout(() => {
-        loadAllData();
+        loadAllData().catch(e => console.error('Reload after scan failed:', e));
         btn.innerHTML = idleHtml;
         btn.disabled = false;
       }, 3500);
     } else {
-      showToast('Scan could not start (HTTP ' + res.status + ').', true);
+      showToast(data.message || 'Scan could not start.', true);
     }
   } catch (e) {
-    showToast('Scan trigger failed.', true);
+    showToast(e.status ? `Scan could not start (HTTP ${e.status}).` : 'Scan trigger failed.', true);
   } finally {
     if (!delayReset) {
       btn.innerHTML = idleHtml;
@@ -2100,9 +2089,8 @@ async function refreshMarketData() {
   btn.disabled = true;
 
   try {
-    const res = await fetch('/api/market-data/refresh', { method: 'POST' });
-    const data = await res.json();
-    if (res.ok && data.success) {
+    const data = await postJson('/api/market-data/refresh');
+    if (data.success) {
       showToast(`Market data refreshed: ${data.tickers_refreshed} prices, ${data.triggers_resized} triggers resized, ${data.triggers_executed} bought, ${data.positions_closed} closed.`);
       loadPortfolio();
       loadTriggers();
@@ -2110,7 +2098,7 @@ async function refreshMarketData() {
       showToast(data.detail || data.message || 'Market data refresh failed.', true);
     }
   } catch (e) {
-    showToast('Network error refreshing market data.', true);
+    showToast(e.status ? (e.detail || 'Market data refresh failed.') : 'Network error refreshing market data.', true);
   } finally {
     btn.innerHTML = idleHtml;
     btn.disabled = false;
@@ -2281,7 +2269,7 @@ function normalizeTriggerTicker(raw) {
 // Inline "why was this not armed" line under the ticker input
 function clearTriggerFeedback() {
   const el = document.getElementById('triggerArmFeedback');
-  if (el) el.innerHTML = '';
+  if (el) el.replaceChildren();
 }
 
 // info: { title, message, tone: 'danger' | 'warn', armed, action, score, minScore, summary }
@@ -2555,9 +2543,8 @@ async function loadLearningInsights() {
 async function triggerLearningCalibration() {
   showToast('Re-evaluating trade performance and calibrating risk parameters...');
   try {
-    const res = await fetch('/api/learning/calibrate', { method: 'POST' });
-    const data = await res.json();
-    if (res.ok && data.success) {
+    const data = await postJson('/api/learning/calibrate');
+    if (data.success) {
       showToast(`Calibration complete. Win rate: ${data.win_rate_pct}%`);
       loadLearningInsights();
       loadSettings();
@@ -2565,34 +2552,34 @@ async function triggerLearningCalibration() {
       showToast(data.detail || data.message || 'No trades to calibrate yet.', true);
     }
   } catch (e) {
-    showToast('Error calibrating learning parameters.', true);
+    showToast(e.status ? (e.detail || 'No trades to calibrate yet.') : 'Error calibrating learning parameters.', true);
   }
 }
 
 // 8. Market Review & Next Scheduled Session Loader
-// Plain Dutch labels; keep in sync with ACTION_NL / _pick_status_nl in src/telegram/bot.py
-const REVIEW_SESSION_NL = { OPEN: 'opening', CLOSE: 'slot', REVIEW: 'review', MANUAL_SCAN: 'scan' };
-const REVIEW_ACTION_NL = { STRONG_BUY: 'Sterk koopadvies', BUY: 'Koopadvies', HOLD: 'Afwachten', SELL: 'Verkoopadvies', STRONG_SELL: 'Sterk verkoopadvies' };
+// English labels for the stored review session and pick status (Telegram has its own Dutch set in src/telegram/bot.py)
+const REVIEW_SESSION_LABEL = { OPEN: 'open', CLOSE: 'close', REVIEW: 'review', MANUAL_SCAN: 'scan' };
+const REVIEW_ACTION_LABEL = { STRONG_BUY: 'Strong buy', BUY: 'Buy', HOLD: 'Hold', SELL: 'Sell', STRONG_SELL: 'Strong sell' };
 
-function reviewActionNl(action) {
+function reviewActionLabel(action) {
   const key = String(action || '').toUpperCase();
-  return REVIEW_ACTION_NL[key] || key.replace(/_/g, ' ').toLowerCase();
+  return REVIEW_ACTION_LABEL[key] || key.replace(/_/g, ' ').toLowerCase();
 }
 
-function reviewPickStatusNl(p, minScore) {
+function reviewPickStatus(p, minScore) {
   switch (p.status_type) {
-    case 'BOUGHT': return '🚀 Gekocht';
+    case 'BOUGHT': return '🚀 Bought';
     case 'TRIGGER_ARMED':
       return p.entry_trigger_price
-        ? `🎯 Koopopdracht klaar: koopt als de koers ${p.entry_trigger_price} ${p.currency || ''} raakt`
-        : '🎯 Koopopdracht klaar: koopt zodra de instapkoers geraakt wordt';
-    case 'ALREADY_HELD': return '💼 Zit al in de portefeuille, niet bijgekocht';
-    case 'TRIGGER_PENDING': return '⏳ Er stond al een koopopdracht klaar, die wacht nog';
-    case 'TRIGGER_CANCELLED': return '🛑 Koopopdracht geannuleerd: nieuwe beoordeling steunt de aankoop niet meer';
-    case 'INSUFFICIENT_CASH': return '⏸️ Goed genoeg, maar geen vrij geld of vrije plek';
-    case 'SHARE_TOO_EXPENSIVE': return '💶 Goed genoeg, maar 1 aandeel kost meer dan het budget per positie';
-    case 'REGIME_FILTER': return '🌧️ Goed genoeg, maar de hele markt daalt (index onder 200-daags gemiddelde)';
-    default: return `👀 Alleen volgen: score onder ${minScore}, dus nog niet kopen`;
+        ? `🎯 Buy order armed: buys when the price reaches ${p.entry_trigger_price} ${p.currency || ''}`
+        : '🎯 Buy order armed: buys when the entry price is reached';
+    case 'ALREADY_HELD': return '💼 Already in the portfolio, not bought again';
+    case 'TRIGGER_PENDING': return '⏳ A buy order was already armed and is still waiting';
+    case 'TRIGGER_CANCELLED': return '🛑 Buy order cancelled: the new assessment no longer supports the purchase';
+    case 'INSUFFICIENT_CASH': return '⏸️ Good enough, but no free cash or free slot';
+    case 'SHARE_TOO_EXPENSIVE': return '💶 Good enough, but 1 share costs more than the budget per position';
+    case 'REGIME_FILTER': return '🌧️ Good enough, but the whole market is falling (index below its 200-day average)';
+    default: return `👀 Watch only: score below ${minScore}, so not buying yet`;
   }
 }
 let currentMarketFilter = null;
@@ -2608,8 +2595,7 @@ async function loadMarketReview(market = null) {
   });
   try {
     const url = currentMarketFilter ? `/api/market-digest/latest?market=${encodeURIComponent(currentMarketFilter)}` : '/api/market-digest/latest';
-    const res = await fetch(url);
-    const data = await res.json();
+    const data = await getJson(url);
 
     const timestampEl = document.getElementById('digestTimestamp');
     const headlineEl = document.getElementById('digestHeadline');
@@ -2618,48 +2604,48 @@ async function loadMarketReview(market = null) {
     const textContainer = document.getElementById('reviewTextContainer');
 
     if (data.next_session && nextBadgeEl) {
-      nextBadgeEl.innerHTML = `<i class="fa-regular fa-clock"></i> Volgende: <span class="ui-num text-slate-50">${esc(data.next_session.formatted)}</span>`;
+      nextBadgeEl.innerHTML = `<i class="fa-regular fa-clock"></i> Next: <span class="ui-num text-slate-50">${esc(data.next_session.formatted)}</span>`;
     }
     const textDetails = document.getElementById('reviewTextDetails');
 
     if (!data.found) {
       const marketLabel = currentMarketFilter ? `${currentMarketFilter}-` : '';
-      if (headlineEl) headlineEl.innerText = `Nog geen ${marketLabel}review vandaag`;
-      if (contentEl) contentEl.innerHTML = `<div class="adv-prose">Tik hieronder op <strong class="text-slate-50">${esc(currentMarketFilter || 'US')}-review starten</strong>. De bot beoordeelt dan de kansen van vandaag.</div>`;
-      if (timestampEl) timestampEl.innerText = 'Nog niet gedraaid';
+      if (headlineEl) headlineEl.innerText = `No ${marketLabel}review today yet`;
+      if (contentEl) contentEl.innerHTML = `<div class="adv-prose">Tap <strong class="text-slate-50">Start ${esc(currentMarketFilter || 'US')} review</strong> below. The bot then assesses today's opportunities.</div>`;
+      if (timestampEl) timestampEl.innerText = 'Not run yet';
       if (textDetails) textDetails.classList.add('hidden');
       return;
     }
 
-    if (timestampEl) timestampEl.innerText = `${data.market || ''} ${REVIEW_SESSION_NL[data.session] || data.session || ''} · ${data.timestamp || 'Vandaag'}`.trim();
+    if (timestampEl) timestampEl.innerText = `${data.market || ''} ${REVIEW_SESSION_LABEL[data.session] || data.session || ''} · ${data.timestamp || 'Today'}`.trim();
     if (headlineEl) headlineEl.innerText = data.headline || 'Review';
 
     const minScore = data.trigger_min_score || 80;
     const block = (title, body) => `<div><div class="ui-eyebrow mb-1.5">${title}</div>${body}</div>`;
 
-    const summaryHtml = block('In het kort', `<div class="adv-prose">${safeRichText(data.content || '')}</div>`);
+    const summaryHtml = block('In short', `<div class="adv-prose">${safeRichText(data.content || '')}</div>`);
 
     const positions = (data.portfolio_state && data.portfolio_state.positions) || [];
-    const holdingsHtml = block(`Bezit (${positions.length})`, positions.length === 0
-      ? '<div class="adv-prose ui-faint">Geen aandelen. Alles staat in cash.</div>'
+    const holdingsHtml = block(`Holdings (${positions.length})`, positions.length === 0
+      ? '<div class="adv-prose ui-faint">No stocks. Everything is in cash.</div>'
       : '<div class="ui-inset px-3.5 py-2.5 space-y-2.5">' + positions.map(pos => {
           const up = Number(pos.unrealized_pnl_eur) >= 0;
           const levels = [
-            pos.stop_loss_native ? `verkoopt onder ${esc(pos.stop_loss_native)}` : '',
-            pos.take_profit_native ? `winst nemen bij ${esc(pos.take_profit_native)}` : ''
+            pos.stop_loss_native ? `sells below ${esc(pos.stop_loss_native)}` : '',
+            pos.take_profit_native ? `takes profit at ${esc(pos.take_profit_native)}` : ''
           ].filter(Boolean).join(' · ');
           return `<div>
             <div class="kv"><span class="ui-num text-slate-50 font-semibold">${tickerLink(pos.ticker)}</span>
               <span class="ui-num ${up ? 'ui-gain' : 'ui-loss'}">${up ? '▲' : '▼'} ${esc(signedEur(pos.unrealized_pnl_eur))} (${up ? '+' : ''}${num(pos.unrealized_pnl_pct, 1)}%)</span></div>
-            <div class="ui-faint text-[13px] ui-num">${esc(pos.shares)} st. · gekocht ${esc(pos.entry_price_native)} · nu ${esc(pos.current_price_native)} ${esc(pos.currency)}</div>
+            <div class="ui-faint text-[13px] ui-num">${esc(pos.shares)} sh. · bought ${esc(pos.entry_price_native)} · now ${esc(pos.current_price_native)} ${esc(pos.currency)}</div>
             ${levels ? `<div class="ui-faint text-[13px] ui-num">${levels}</div>` : ''}
           </div>`;
         }).join('') + '</div>');
 
     const picks = (data.top_picks || []).slice(0, 4);
-    const picksHtml = block('Kansen', picks.length === 0
-      ? '<div class="adv-prose ui-faint">Geen aandelen door de filters gekomen.</div>'
-      : `<div class="set-help mb-2">Score = hoe zeker de AI-commissie is (0-100). Vanaf ${esc(minScore)} zet de bot een koopopdracht klaar.</div>
+    const picksHtml = block('Opportunities', picks.length === 0
+      ? '<div class="adv-prose ui-faint">No stocks passed the filters.</div>'
+      : `<div class="set-help mb-2">Score = how sure the AI committee is (0-100). From ${esc(minScore)} the bot arms a buy order.</div>
          <div class="ui-list">` + picks.map(p => {
           const risk = p.risk || {};
           return `<div class="p-3.5 space-y-1">
@@ -2667,14 +2653,15 @@ async function loadMarketReview(market = null) {
               <span class="min-w-0 truncate"><span class="text-[15px] font-bold text-slate-50">${tickerLink(p.ticker)}</span> <span class="ui-faint text-[13px]">${esc(p.name || '')}</span></span>
               <span class="ui-num shrink-0"><span class="text-slate-50 font-semibold">${esc(p.consensus_score)}</span><span class="ui-faint">/100</span></span>
             </div>
-            <div class="adv-prose">${esc(reviewActionNl(p.action))} · koers ${advicePrice(p.price, p.currency)}</div>
-            <div class="adv-prose text-slate-50">${esc(reviewPickStatusNl(p, minScore))}</div>
-            ${String(p.action || '').includes('BUY') && risk.stop_loss_price && risk.take_profit_price ? `<div class="ui-faint text-[13px] ui-num">Na kopen: verkoopt onder ${esc(risk.stop_loss_price)} · winst nemen bij ${esc(risk.take_profit_price)}</div>` : ''}
+            <div class="adv-prose">${esc(reviewActionLabel(p.action))} · price ${advicePrice(p.price, p.currency)}</div>
+            <div class="adv-prose text-slate-50">${esc(reviewPickStatus(p, minScore))}</div>
+            ${String(p.action || '').includes('BUY') && risk.stop_loss_price && risk.take_profit_price ? `<div class="ui-faint text-[13px] ui-num">After buying: sells below ${esc(risk.stop_loss_price)} · takes profit at ${esc(risk.take_profit_price)}</div>` : ''}
           </div>`;
         }).join('') + '</div>');
 
     if (contentEl) {
       contentEl.removeAttribute('data-loading');
+      contentEl.dataset.loaded = '1';
       contentEl.innerHTML = summaryHtml + holdingsHtml + picksHtml;
     }
 
@@ -2685,61 +2672,60 @@ async function loadMarketReview(market = null) {
       textDetails.classList.add('hidden');
     }
   } catch (e) {
-    console.debug('Error loading market review:', e);
+    console.error('Error loading market review:', e);
+    showLoadFailed(document.getElementById('digestContent'), 'the market review');
   }
 }
 
+// One review poll at a time; both review buttons stay disabled until it ends
+let reviewPoll = null;
+function setReviewButtons(disabled) {
+  document.querySelectorAll('[data-review-run]').forEach(b => { b.disabled = disabled; });
+}
+
 async function triggerMarketReview(market) {
-  showToast(`${market}-review gestart...`);
+  clearInterval(reviewPoll);
+  setReviewButtons(true);
+  showToast(`${market} review started...`);
   try {
     // Record current latest digest id before running
-    const prevRes = await fetch(`/api/market-digest/latest?market=${encodeURIComponent(market)}`);
-    const prevData = await prevRes.json().catch(() => ({}));
+    const digestUrl = `/api/market-digest/latest?market=${encodeURIComponent(market)}`;
+    const prevData = await getJson(digestUrl).catch(() => ({}));
     const prevId = prevData.found ? prevData.id : null;
 
-    const res = await fetch('/api/market-session/run', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ market: market, session: 'OPEN' })
-    });
-    const data = await res.json();
-    if (res.ok && data.success) {
-      showToast(`${market}-review beoordeelt aandelen. Resultaat volgt zo.`);
-      currentMarketFilter = market;
-
-      // Poll every 5s for up to 90s for the review to appear or update
-      let attempts = 0;
-      const poll = setInterval(async () => {
-        attempts++;
-        try {
-          const checkRes = await fetch(`/api/market-digest/latest?market=${encodeURIComponent(market)}`);
-          const checkData = await checkRes.json();
-          if (checkData.found && checkData.id !== prevId) {
-            clearInterval(poll);
-            showToast(`${market}-review is klaar.`);
-            loadMarketReview(market);
-            loadWeeklyReviewComparison();
-            loadRecommendations();
-            loadPortfolio();
-            return;
-          }
-        } catch (err) {
-          console.debug('Polling check error:', err);
-        }
-
-        if (attempts >= 18) { // 90 seconds timeout
-          clearInterval(poll);
-          loadMarketReview(market);
-          loadWeeklyReviewComparison();
-          loadRecommendations();
-          loadPortfolio();
-        }
-      }, 5000);
-    } else {
-      showToast(data.detail || data.message || 'Failed generating market review.', true);
+    const data = await postJson('/api/market-session/run', { market: market, session: 'OPEN' });
+    if (!data.success) {
+      showToast(data.message || 'Failed generating market review.', true);
+      setReviewButtons(false);
+      return;
     }
+    showToast(`${market} review is assessing stocks. Results follow shortly.`);
+    currentMarketFilter = market;
+
+    // Poll every 5s for up to 90s for the review to appear or update
+    let attempts = 0;
+    const finish = (doneMsg) => {
+      clearInterval(reviewPoll);
+      setReviewButtons(false);
+      if (doneMsg) showToast(doneMsg);
+      loadMarketReview(market);
+      loadWeeklyReviewComparison();
+      loadRecommendations();
+      loadPortfolio();
+    };
+    reviewPoll = setInterval(async () => {
+      attempts++;
+      try {
+        const checkData = await getJson(digestUrl);
+        if (checkData.found && checkData.id !== prevId) return finish(`${market} review is ready.`);
+      } catch (err) {
+        console.debug('Polling check error:', err);
+      }
+      if (attempts >= 18) finish(); // 90 seconds timeout
+    }, 5000);
   } catch (e) {
-    showToast(`Failed generating ${market} market review.`, true);
+    showToast(e.detail || `Failed generating ${market} market review.`, true);
+    setReviewButtons(false);
   }
 }
 
@@ -2749,13 +2735,10 @@ let weeklyReviewsCache = [];
 async function loadWeeklyReviewComparison() {
   const STAT = 'ui-num text-[17px] font-semibold mt-1 truncate';
   try {
-    const [compRes, weeklyRes] = await Promise.all([
-      fetch('/api/reviews/compare'),
-      fetch('/api/reviews/weekly?days=7')
+    const [comp, weeklyData] = await Promise.all([
+      getJson('/api/reviews/compare'),
+      getJson('/api/reviews/weekly?days=7')
     ]);
-
-    const comp = await compRes.json();
-    const weeklyData = await weeklyRes.json();
     weeklyReviewsCache = Array.isArray(weeklyData) ? weeklyData : [];
 
     // Update Badges
@@ -2767,6 +2750,7 @@ async function loadWeeklyReviewComparison() {
     const bestPickDetailsEl = document.getElementById('weeklyBestPickDetails');
     const sessionsCountEl = document.getElementById('weeklySessionsCount');
     const picksContainer = document.getElementById('weeklyTrackedPicksContainer');
+    if (picksContainer) picksContainer.dataset.loaded = '1';
     const archiveCountBadge = document.getElementById('archiveCountBadge');
 
     if (sessionsCountEl) sessionsCountEl.innerText = comp.total_reviews || 0;
@@ -2774,11 +2758,11 @@ async function loadWeeklyReviewComparison() {
 
     if (!comp.has_history || !comp.tracked_picks || comp.tracked_picks.length === 0) {
       if (winRateEl) { winRateEl.innerText = '--%'; winRateEl.className = `${STAT} ui-faint`; }
-      if (winCountsEl) winCountsEl.innerText = 'Nog geen adviezen';
+      if (winCountsEl) winCountsEl.innerText = 'No advice yet';
       if (deltaEl) { deltaEl.innerText = '€0.00 (+0.0%)'; deltaEl.className = `${STAT} text-slate-50`; }
       if (bestPickEl) bestPickEl.innerText = '--';
       if (picksContainer) {
-        picksContainer.innerHTML = `<div class="p-3.5 adv-prose">Nog geen adviezen in de afgelopen 7 dagen. Start een review om te beginnen.</div>`;
+        picksContainer.innerHTML = `<div class="p-3.5 adv-prose">No advice in the past 7 days. Start a review to begin.</div>`;
       }
       renderWeeklyArchive();
       return;
@@ -2834,11 +2818,11 @@ async function loadWeeklyReviewComparison() {
               <div class="ui-num text-[15px] font-semibold shrink-0 ${isPos ? 'ui-gain' : 'ui-loss'}">${isPos ? '▲' : '▼'} ${sign}${esc(p.pnl_pct)}%</div>
             </div>
             <div class="space-y-1">
-              <div class="kv"><span>Advies gegeven</span><span>${esc(p.rec_session)}</span></div>
-              <div class="kv"><span>Koers bij advies</span><span>${advicePrice(p.rec_price, p.currency)}</span></div>
-              <div class="kv"><span>Koers nu</span><span>${advicePrice(p.current_price, p.currency)}</span></div>
-              ${p.target_price ? `<div class="kv"><span>Winst nemen bij</span><span class="ui-gain">▲ ${esc(p.target_price)}</span></div>` : ''}
-              ${p.stop_loss ? `<div class="kv"><span>Verkoopt onder</span><span class="ui-loss">▼ ${esc(p.stop_loss)}</span></div>` : ''}
+              <div class="kv"><span>Advice given</span><span>${esc(p.rec_session)}</span></div>
+              <div class="kv"><span>Price at advice</span><span>${advicePrice(p.rec_price, p.currency)}</span></div>
+              <div class="kv"><span>Price now</span><span>${advicePrice(p.current_price, p.currency)}</span></div>
+              ${p.target_price ? `<div class="kv"><span>Takes profit at</span><span class="ui-gain">▲ ${esc(p.target_price)}</span></div>` : ''}
+              ${p.stop_loss ? `<div class="kv"><span>Sells below</span><span class="ui-loss">▼ ${esc(p.stop_loss)}</span></div>` : ''}
             </div>
           </div>
         `;
@@ -2847,7 +2831,8 @@ async function loadWeeklyReviewComparison() {
 
     renderWeeklyArchive();
   } catch (e) {
-    console.debug('Error loading weekly review comparison:', e);
+    console.error('Error loading weekly review comparison:', e);
+    showLoadFailed(document.getElementById('weeklyTrackedPicksContainer'), 'the tracked picks');
   }
 }
 
@@ -2856,12 +2841,12 @@ function renderWeeklyArchive() {
   if (!container || !weeklyReviewsCache) return;
 
   if (!Array.isArray(weeklyReviewsCache) || weeklyReviewsCache.length === 0) {
-    container.innerHTML = `<div class="adv-prose ui-faint px-1">Nog geen eerdere reviews.</div>`;
+    container.innerHTML = `<div class="adv-prose ui-faint px-1">No earlier reviews yet.</div>`;
     return;
   }
 
   container.innerHTML = weeklyReviewsCache.map(r => {
-    const picks = (r.top_picks || []).map(p => p.ticker).join(', ') || 'Geen'; // escaped below
+    const picks = (r.top_picks || []).map(p => p.ticker).join(', ') || 'None'; // escaped below
     return `
       <div class="ui-inset p-3.5 space-y-1.5">
         <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
@@ -2896,8 +2881,7 @@ async function loadColdStartRecap() {
   const container = document.getElementById('memoryColdStartText');
   if (!container) return;
   try {
-    const res = await fetch('/v3/memory/cold-start');
-    const json = await res.json();
+    const json = await getJson('/v3/memory/cold-start');
     if (json.code === 0 && json.data) {
       container.textContent = json.data.full_prompt_context || json.data.what_had_happened || 'No recent memory recorded.';
     } else {
@@ -2910,8 +2894,7 @@ async function loadColdStartRecap() {
 
 async function loadMemoryAssets() {
   try {
-    const res = await fetch('/v3/memory/assets');
-    const json = await res.json();
+    const json = await getJson('/v3/memory/assets');
     if (json.code === 0 && json.data) {
       renderMemoryAssets(json.data);
     }
@@ -3243,7 +3226,7 @@ function drawShadowChart(s, mainLabel) {
       readout.querySelector(`[data-v="${d}"]`).textContent = v == null ? '--' : signedPct(v);
     });
     readout.querySelector('[data-v="at"]').textContent = i === null ? 'Latest'
-      : new Date(hist.shadow[i][0].replace(' ', 'T') + 'Z').toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+      : new Date(hist.shadow[i][0].replace(' ', 'T') + 'Z').toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
   };
   chart.$readout(null);
   styleShadowChart(chart);
@@ -3254,11 +3237,13 @@ async function loadShadow() {
   const container = document.getElementById('shadowContainer');
   if (!container) return;
   try {
-    const res = await fetch('/api/shadow');
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || 'Request failed');
+    const data = await getJson('/api/shadow');
     const mainLabel = (data.main && data.main.label) || 'Main';
     shadowData = data;
+    const liveKeys = new Set(data.enabled ? (data.strategies || []).map(s => s.key) : []);
+    for (const key of Object.keys(shadowCharts)) {
+      if (!liveKeys.has(key)) { shadowCharts[key].destroy(); delete shadowCharts[key]; }
+    }
     if (!data.enabled || !(data.strategies || []).length) {
       const presets = (data.presets || []).map(p => `<li><span class="ui-num" style="color:var(--text)">${esc(p.key)}</span>: ${esc(p.description)}</li>`).join('');
       container.innerHTML = `<div class="ui-card ui-card-pad text-[13px] ui-muted space-y-2">
@@ -3283,16 +3268,15 @@ async function resetShadow(key) {
   if (!key) return;
   if (!confirm(`Reset the "${key}" shadow portfolio? Its simulated positions and history are deleted and it restarts with fresh capital. The main portfolio is not touched.`)) return;
   try {
-    const res = await fetch(`/api/shadow/${encodeURIComponent(key)}/reset`, { method: 'POST' });
-    const data = await res.json();
-    if (res.ok && data.success) {
+    const data = await postJson(`/api/shadow/${encodeURIComponent(key)}/reset`);
+    if (data.success) {
       showToast(data.message);
       loadShadow();
     } else {
       showToast(data.detail || data.message || 'Reset failed.', true);
     }
   } catch (e) {
-    showToast('Error resetting shadow portfolio.', true);
+    showToast(e.status ? (e.detail || 'Reset failed.') : 'Error resetting shadow portfolio.', true);
   }
 }
 
@@ -3404,7 +3388,7 @@ async function loadShadowHistory(key) {
     if (!rows.length) { d.innerHTML = '<p class="py-2 text-[13px] ui-faint">No changes yet.</p>'; return; }
     d.innerHTML = rows.map(r => {
       const diffs = Object.entries(r.changes || {}).map(([k, v]) => `<div class="ui-num">${esc(k)}: ${esc(v.old ?? 'main bot')} &rarr; ${esc(v.new ?? 'main bot')}</div>`).join('');
-      const when = r.created_at ? new Date(r.created_at + (r.created_at.endsWith('Z') ? '' : 'Z')).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+      const when = r.created_at ? new Date(r.created_at + (r.created_at.endsWith('Z') ? '' : 'Z')).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
       return `<div class="sh-hist-item">
         <div class="min-w-0">
           <div class="ui-faint text-xs">${esc(when)} · ${esc(r.source)}</div>
@@ -3520,12 +3504,13 @@ async function openShadowEditor(key) {
     <div class="se-field"><label class="ui-label" for="seDesc">Description</label>
       <textarea id="seDesc" class="ui-input" maxlength="300">${key ? esc(src.description) : ''}</textarea></div>
     ${shadowSchema.map(sp => shadowParamField(sp, shadowEditor.initial[sp.name])).join('')}`;
-  if (!dlg.open) { dlg.classList.remove('is-closing'); dlg.showModal(); }
+  if (!dlg.open) { dlg.classList.remove('is-closing'); dlg.showModal(); raiseToast(); }
   document.getElementById('seLabel').focus();
 }
 
-function closeShadowEditor() {
-  const dlg = document.getElementById('shadowEditor');
+// Closing sheet: animate out, then dialog.close() (animationend, or 250 ms if no animation runs)
+function closeSheet(id) {
+  const dlg = document.getElementById(id);
   if (!dlg || !dlg.open || dlg.classList.contains('is-closing')) return;
   dlg.classList.add('is-closing');
   let done = false;
@@ -3533,6 +3518,8 @@ function closeShadowEditor() {
   dlg.addEventListener('animationend', e => { if (e.target === dlg) finish(); }, { once: true });
   setTimeout(finish, 250);
 }
+
+function closeShadowEditor() { closeSheet('shadowEditor'); }
 
 async function saveShadowEditor() {
   const err = document.getElementById('seError');
@@ -3654,7 +3641,7 @@ function renderPromotePreview(p) {
   mode.className = `ui-badge mt-1 ${p.live ? 'ui-badge-loss' : ''}`;
 
   // Changed rows first, so nothing that changes sits below the fold on a phone
-  const params = [...(p.params || [])].sort((a, b) => Number(!!b.changed) - Number(!!a.changed));
+  const params = (p.params || []).toSorted((a, b) => Number(!!b.changed) - Number(!!a.changed));
   const raw = v => (v === null || v === undefined ? 'None' : String(v));
   const rows = params.map(r => {
     let now = formatRuleValue(r.name, r.current);
@@ -3709,19 +3696,14 @@ async function openPromoteDialog(key) {
   document.getElementById('prError').classList.add('hidden');
   dlg.classList.remove('is-closing');
   dlg.showModal();
+  raiseToast();
   // Start at the top so the mode badge and risk lines are seen before anything can be typed
   dlg.querySelector('[data-pr-close]').focus({ preventScroll: true });
   dlg.querySelector('.ts-panel').scrollTop = 0;
 }
 
 function closePromoteDialog() {
-  const dlg = document.getElementById('promoteDialog');
-  if (!dlg || !dlg.open || dlg.classList.contains('is-closing') || promoteState.busy) return;
-  dlg.classList.add('is-closing');
-  let done = false;
-  const finish = () => { if (done) return; done = true; dlg.classList.remove('is-closing'); dlg.close(); };
-  dlg.addEventListener('animationend', e => { if (e.target === dlg) finish(); }, { once: true });
-  setTimeout(finish, 250);
+  if (!promoteState.busy) closeSheet('promoteDialog');
 }
 
 async function confirmPromote() {
@@ -3778,7 +3760,7 @@ async function confirmPromote() {
   });
   dlg.addEventListener('input', e => { if (e.target.id === 'prConfirmText') syncPromoteConfirm(); });
   dlg.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && e.target.id === 'prConfirmText') { e.preventDefault(); confirmPromote(); }
+    if (e.key === 'Enter' && e.target.id === 'prConfirmText') { e.preventDefault(); if (e.isComposing || e.keyCode === 229) return; confirmPromote(); }
   });
 })();
 
@@ -3926,6 +3908,7 @@ function openTickerSheet(ticker, source = '') {
   if (!dlg.open) {
     dlg.classList.remove('is-closing');
     dlg.showModal();
+    raiseToast();
     const push = () => history.pushState({ tickerSheet: true }, '');
     // A history.back() from the previous close may still be in flight; push after it lands
     if (tickerSheet.backPending) window.addEventListener('popstate', push, { once: true });
@@ -3934,15 +3917,7 @@ function openTickerSheet(ticker, source = '') {
   loadTickerSheet();
 }
 
-function closeTickerSheet() {
-  const dlg = document.getElementById('tickerSheet');
-  if (!dlg || !dlg.open || dlg.classList.contains('is-closing')) return;
-  dlg.classList.add('is-closing');
-  let done = false;
-  const finish = () => { if (done) return; done = true; dlg.classList.remove('is-closing'); dlg.close(); };
-  dlg.addEventListener('animationend', e => { if (e.target === dlg) finish(); }, { once: true });
-  setTimeout(finish, 250);
-}
+function closeTickerSheet() { closeSheet('tickerSheet'); }
 
 async function loadTickerSheet() {
   const req = ++tickerSheet.req;
@@ -3958,8 +3933,7 @@ async function loadTickerSheet() {
   box.setAttribute('aria-busy', 'true');
   let data = null;
   try {
-    const res = await fetch(`/api/ticker/${encodeURIComponent(ticker)}/detail?range=${encodeURIComponent(range)}`);
-    if (res.ok) data = await res.json();
+    data = await getJson(`/api/ticker/${encodeURIComponent(ticker)}/detail?range=${encodeURIComponent(range)}`);
   } catch (e) { /* offline: error state below */ }
   if (req !== tickerSheet.req) return; // a newer range or ticker was requested
   box.removeAttribute('aria-busy');
@@ -4102,7 +4076,7 @@ function renderTickerChart(chosen, animate) {
 function renderTickerLegend(lines) {
   const keys = Object.keys(TS_LEVELS).filter(k => lines.some(l => l.key === k));
   const el = document.getElementById('tsLegend');
-  if (!keys.length) { el.innerHTML = ''; return; }
+  if (!keys.length) { el.replaceChildren(); return; }
   const dotted = l => l.key === 'high' || l.key === 'breakeven_at';
   const swatch = (color, dash) => `<span class="ts-swatch" style="border-top: 2px ${dash} ${color}"></span>`;
   el.innerHTML = [
@@ -4114,7 +4088,7 @@ function renderTickerLegend(lines) {
 
 function renderTickerInfo(set) {
   const el = document.getElementById('tsInfo');
-  if (!set) { el.innerHTML = ''; return; }
+  if (!set) { el.replaceChildren(); return; }
   const price = Number(tickerSheet.data.current_price);
   const lv = set.levels || {};
   const info = set.info || {};
