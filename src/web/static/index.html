@@ -12,14 +12,15 @@
     try { document.documentElement.classList.toggle('dark', matchMedia('(prefers-color-scheme: dark)').matches); } catch (e) {}
   </script>
   
-  <!-- Prebuilt Tailwind (see docs/frontend.md), then FontAwesome -->
+  <!-- FontAwesome; prebuilt Tailwind (see docs/frontend.md) loads after style.css below -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@100..125,400..700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" integrity="sha384-t1nt8BQoYMLFN5p42tRAtuAAFQaCQODekUVeKKZrEnEyp4H2R0RHFz0KWpmj7i8g" crossorigin="anonymous" referrerpolicy="no-referrer">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js" integrity="sha384-dug+JxfBvklEQdJ4AYuBBAIScUz0bVN73xpy273gcAwHjb3qI0fXmuYNaNfdyYJG" crossorigin="anonymous" defer></script>
-  <link rel="stylesheet" href="/static/tailwind.css">
   <link rel="stylesheet" href="/static/style.css">
+  <!-- After style.css, like the old Play CDN (it appended its styles last): utilities win equal-specificity ties -->
+  <link rel="stylesheet" href="/static/tailwind.css">
 </head>
 <body class="bg-darkBg text-slate-100 min-h-screen md:pb-8 flex flex-col font-sans antialiased overflow-x-clip selection:bg-slate-300 selection:text-slate-950">
 

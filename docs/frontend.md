@@ -2,7 +2,7 @@
 
 ## Rebuilding Tailwind CSS
 
-`src/web/static/tailwind.css` is prebuilt and committed (Tailwind 3.4.1, minified). `index.html` loads it before `style.css`. Config: `tailwind.config.js`. Input: `tailwind.input.css`.
+`src/web/static/tailwind.css` is prebuilt and committed (Tailwind 3.4.1, minified). `index.html` loads it after `style.css`, as the old Play CDN did, so utility classes win ties with `style.css` rules. Config: `tailwind.config.js`. Input: `tailwind.input.css`.
 
 Rebuild after you add or change a Tailwind class in `index.html`, `app.js` or `features.js`, or edit `tailwind.config.js`:
 
